@@ -1,9 +1,10 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { DrawerContentComponentProps, DrawerContentScrollView, DrawerItem } from '@react-navigation/drawer';
 import { usePathname, useRouter } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { Text, View } from 'react-native';
 
-import { palette, radius, spacing } from '../theme';
+import { radius, spacing } from '../theme';
+import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
 const drawerLinks = [
   { label: 'Favoritos', route: '/favorites', icon: 'heart-outline' },
@@ -13,6 +14,8 @@ const drawerLinks = [
 ] as const;
 
 export function AppDrawerContent(props: DrawerContentComponentProps) {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -50,7 +53,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   container: {
     flex: 1,
     paddingTop: spacing.md,
@@ -71,7 +74,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   avatarText: {
-    color: palette.surface,
+    color: palette.onPrimary,
     fontWeight: '700',
   },
   brand: {
@@ -87,7 +90,7 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.sm,
   },
   itemActive: {
-    backgroundColor: '#D3E9FF',
+    backgroundColor: palette.primarySoft,
   },
   label: {
     color: palette.text,
@@ -98,4 +101,4 @@ const styles = StyleSheet.create({
     color: palette.primary,
     fontWeight: '700',
   },
-});
+}));

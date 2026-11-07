@@ -36,6 +36,7 @@ export interface Medicamento {
   controle_especial?: boolean | null;
   classificacao_fonte?: string | null;
   imagem_url?: string | null;
+  imagem_urls?: string[];
   imagem_ref?: string | null;
   imagem_fonte?: string | null;
   imagem_status?: string | null;

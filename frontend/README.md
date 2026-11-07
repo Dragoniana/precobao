@@ -34,13 +34,15 @@ frontend/
 
 ## Variáveis de ambiente
 
-O frontend **não possui arquivo `.env.example`**. A URL da API é configurada pela variável `EXPO_PUBLIC_API_URL` com fallback hardcoded para `http://127.0.0.1:8000` em `src/services/api.ts`. Para sobrescrever, crie um arquivo `.env` na raiz do diretório `frontend/`:
+A URL da API é configurada por `EXPO_PUBLIC_API_URL` em `frontend/.env`. Um exemplo está em `.env.example`:
 
 ```sh
 EXPO_PUBLIC_API_URL=http://localhost:8000
 ```
 
-No Android físico ou emulador, `localhost` aponta para o próprio dispositivo. Use o IP da máquina host ou o túnel Cloudflare disponível no `docker-compose.yml` do backend.
+No desenvolvimento Web, `localhost` aponta para o computador. O Android Emulator usa `10.0.2.2` quando a URL configurada é loopback; em Android físico, o app troca loopback pelo endereço privado anunciado pelo Metro quando disponível. Para uma sessão de dispositivo, inicie o Metro em modo LAN e confirme que o computador e o telefone estão na mesma rede; se o host anunciado não for alcançável, configure `EXPO_PUBLIC_API_URL` com o endereço LAN do computador. O FastAPI deve estar acessível pela rede de desenvolvimento, sem publicar a porta para a Internet.
+
+Builds nativos de produção exigem uma URL pública HTTPS em `EXPO_PUBLIC_API_URL`. A variável é incorporada ao bundle no momento do export/build; mudar `.env` depois não altera um APK já gerado. Não use localhost nem HTTP em builds de produção.
 
 ## Comandos
 

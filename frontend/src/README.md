@@ -92,7 +92,8 @@ Retorna o tema ativo (claro ou escuro) combinando a preferência do sistema com 
 
 Configuração do cliente HTTP axios.
 
-- **Base URL**: `EXPO_PUBLIC_API_URL` com fallback para `http://127.0.0.1:8000`
+- **Base URL**: `EXPO_PUBLIC_API_URL`; em desenvolvimento, Android/iOS usam o host privado anunciado pelo Metro quando disponível, e Android Emulator tem fallback `10.0.2.2:8000`. Se o host do Metro não estiver acessível, configure o IP/host do computador na rede local. Builds de produção não usam loopback e exigem API HTTPS no nativo.
+- **Timeout**: chamadas HTTP encerram após 15 segundos para evitar telas presas em carregamento quando a rede não responde.
 - **Interceptor de request**: injeta token JWT no header `Authorization` se disponível
 - **Interceptor de response**: detecta 401 e chama `unauthorizedCallback` para limpar sessão automaticamente (apenas se o token da requisição for o mesmo da sessão ativa)
 - **Armazenamento de token**: `tokenStorage` abstrai `SecureStore` (mobile) vs `localStorage` (web) para evitar crashes em plataformas sem SecureStore

@@ -1,6 +1,7 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 
-import { palette, spacing } from '../theme';
+import { spacing } from '../theme';
+import { createThemedStyles } from '../context/ThemeContext';
 import { Medicamento } from '../types/api';
 import { MedicineImage } from './MedicineImage';
 
@@ -15,6 +16,7 @@ type OfferRowProps = {
 };
 
 function OfferRowContent({ medicine, medicineName, laboratory, pharmacy, price, color }: OfferRowProps) {
+  const styles = useStyles();
   const safePrice = Number(price);
   const priceDisplay = Number.isFinite(safePrice)
     ? safePrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -36,6 +38,7 @@ function OfferRowContent({ medicine, medicineName, laboratory, pharmacy, price, 
 }
 
 export function OfferRow(props: OfferRowProps) {
+  const styles = useStyles();
   if (props.onPress) {
     return (
       <Pressable style={styles.row} onPress={props.onPress}>
@@ -51,7 +54,7 @@ export function OfferRow(props: OfferRowProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -86,4 +89,4 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: palette.text,
   },
-});
+}));

@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 
@@ -17,9 +17,12 @@ import {
 
 import { Screen } from '../../components/Screen';
 import { useFavoritesContext, useSessionContext } from '../../context/AppContext';
-import { palette, radius, spacing } from '../../theme';
+import { radius, spacing } from '../../theme';
+import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
 export default function ProfileScreen() {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   const { sessionMode, currentUserName, currentUserEmail, logout, updateProfile } = useSessionContext();
   const { favoriteIds } = useFavoritesContext();
 
@@ -182,7 +185,7 @@ export default function ProfileScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   page: { width: '100%', maxWidth: 720, alignSelf: 'center', gap: spacing.xl, paddingBottom: spacing.xl },
   pageDesktop: { paddingTop: spacing.xl },
   pageHeading: { gap: 4 },
@@ -213,11 +216,11 @@ const styles = StyleSheet.create({
   guestTitle: { color: palette.text, fontSize: 20, lineHeight: 27, fontWeight: '700' },
   guestDescription: { color: palette.textSoft, fontSize: 14, lineHeight: 21, marginBottom: spacing.sm },
   primaryButton: { minHeight: 50, backgroundColor: palette.primary, borderRadius: radius.md, justifyContent: 'center', alignItems: 'center' },
-  primaryButtonText: { color: palette.surface, fontSize: 15, fontWeight: '700' },
+  primaryButtonText: { color: palette.onPrimary, fontSize: 15, fontWeight: '700' },
   secondaryButton: { minHeight: 50, borderWidth: 1, borderColor: palette.primary, borderRadius: radius.md, justifyContent: 'center', alignItems: 'center' },
   secondaryButtonText: { color: palette.primaryDark, fontSize: 15, fontWeight: '700' },
   modalOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(16, 29, 49, 0.48)' },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: palette.overlay },
   modalKeyboard: { width: '100%', maxWidth: 520, maxHeight: '100%' },
   modalScroll: { width: '100%' },
   modalScrollContent: { flexGrow: 1, justifyContent: 'center', padding: spacing.lg },
@@ -236,6 +239,6 @@ const styles = StyleSheet.create({
   cancelButton: { minHeight: 50, flex: 1, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: palette.border, borderRadius: radius.md },
   cancelButtonText: { color: palette.text, fontSize: 14, fontWeight: '600' },
   saveButton: { minHeight: 50, flex: 1.5, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.primary, borderRadius: radius.md },
-  saveButtonText: { color: palette.surface, fontSize: 14, fontWeight: '700' },
+  saveButtonText: { color: palette.onPrimary, fontSize: 14, fontWeight: '700' },
   disabled: { opacity: 0.55 },
-});
+}));

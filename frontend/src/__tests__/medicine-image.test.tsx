@@ -4,8 +4,7 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { MedicineImage } from '../components/MedicineImage';
 import { Medicamento } from '../types/api';
 
-it('tries another exact-product offer image, then shows the fallback', async () => {
-  const productUrl = 'https://www.farmaciaindiana.com.br/nimesulida-100mg-cimed-12-comprimidos/p';
+it('tries API-resolved image references in order, then shows the fallback', async () => {
   const medicine = {
     id: 9,
     nome: 'Nimesulida 100mg Cimed 12 Comprimidos',
@@ -15,11 +14,8 @@ it('tries another exact-product offer image, then shows the fallback', async () 
     exige_receita: false,
     categorias: [],
     imagem_status: 'pendente',
-    ofertas: [1, 2].map((id) => ({
-      id, farmacia_id: 1, catalogo_id: 9, preco: 5,
-      quantidade_estoque: 1, disponivel: true, url_origem: productUrl,
-      imagem_url: `https://farmaciaindiana.vteximg.com.br/arquivos/nimesulida-100mg-cimed-12-comprimidos-${id}.jpg`,
-    })),
+    imagem_urls: [1, 2].map((id) => `https://images.example.test/nimesulida-${id}.jpg`),
+    ofertas: [],
   } as Medicamento;
 
   const screen = await render(<MedicineImage medicine={medicine} />);
@@ -32,6 +28,25 @@ it('tries another exact-product offer image, then shows the fallback', async () 
   expect(screen.getByText('Imagem indisponível')).toBeTruthy();
 });
 
+it('shows a neutral loading placeholder until a remote image loads', async () => {
+  const medicine = {
+    id: 11,
+    nome: 'Produto com imagem remota',
+    codigo_barras: '',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: ['https://images.example.test/produto.jpg'],
+    ofertas: [],
+  } as Medicamento;
+  const screen = await render(<MedicineImage medicine={medicine} />);
+
+  expect(screen.getByText('Carregando imagem…')).toBeTruthy();
+  await fireEvent(screen.getByTestId('medicine-image'), 'load');
+  expect(screen.queryByText('Carregando imagem…')).toBeNull();
+});
+
 it('resets the fallback cursor when the persisted image reference changes', async () => {
   const medicine = {
     id: 10,
@@ -42,16 +57,8 @@ it('resets the fallback cursor when the persisted image reference changes', asyn
     exige_receita: false,
     categorias: [],
     imagem_status: 'pendente',
-    ofertas: [1, 2].map((id) => ({
-      id,
-      farmacia_id: 1,
-      catalogo_id: 10,
-      preco: 5,
-      quantidade_estoque: 1,
-      disponivel: true,
-      url_origem: 'https://www.farmaciaindiana.com.br/produto/p',
-      imagem_url: `https://farmaciaindiana.vteximg.com.br/arquivos/fallback-${id}.jpg`,
-    })),
+    imagem_urls: [1, 2].map((id) => `https://images.example.test/fallback-${id}.jpg`),
+    ofertas: [],
   } as Medicamento;
   const view = await render(<MedicineImage medicine={medicine} />);
   const label = `Embalagem de ${medicine.nome}`;
@@ -63,13 +70,13 @@ it('resets the fallback cursor when the persisted image reference changes', asyn
       <MedicineImage
         medicine={{
           ...medicine,
-          imagem_ref: '/catalogo/medicamentos/10/imagem?v=updated',
+          imagem_urls: ['https://cdn.example.test/updated.jpg'],
           imagem_status: 'verificada',
         }}
       />,
     );
   });
   await waitFor(() => {
-    expect(view.getByLabelText(label).props.source.uri).toContain('/imagem?v=updated');
+    expect(view.getByLabelText(label).props.source.uri).toBe('https://cdn.example.test/updated.jpg');
   });
 });

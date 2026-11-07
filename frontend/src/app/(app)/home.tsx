@@ -1,22 +1,26 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
 
 import { FilterChip } from '../../components/FilterChip';
 import { CatalogFiltersSidebar } from '../../components/CatalogFiltersSidebar';
 import { MedicineCard } from '../../components/MedicineCard';
 import { Screen } from '../../components/Screen';
+import { markMedicineOpenTrace, startMedicineOpenTrace } from '../../services/medicineOpenPerformance';
 import { SearchBar } from '../../components/SearchBar';
 import { useCatalogContext } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { CatalogSort } from '../../services/catalog';
 import { Medicamento } from '../../types/api';
-import { palette, radius, spacing } from '../../theme';
+import { radius, spacing } from '../../theme';
+import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
 type Pharmacy = { id: number; nome_fantasia: string };
 
 export default function HomeScreen() {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   const router = useRouter();
   const { width } = useWindowDimensions();
   const { markAsViewed, selectedFilters, selectedPharmacyId, setSelectedPharmacyId, loadCatalogPage } = useCatalogContext();
@@ -91,7 +95,9 @@ export default function HomeScreen() {
     : pharmacies.find((item) => item.id === selectedPharmacyId)?.nome_fantasia || 'Medicamentos', [pharmacies, selectedPharmacyId]);
 
   const openDetail = (id: number) => {
+    startMedicineOpenTrace(id, 'home');
     markAsViewed(id);
+    markMedicineOpenTrace(id, 'navigation-start');
     router.push(`/medicine/${id}`);
   };
 
@@ -214,7 +220,7 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   screen: { paddingTop: spacing.xs, paddingBottom: spacing.xl },
   catalogLayout: { width: '100%' },
   catalogLayoutDesktop: { marginTop: 22, flexDirection: 'row', alignItems: 'flex-start', gap: spacing.lg },
@@ -237,7 +243,7 @@ const styles = StyleSheet.create({
   sortWrap: { position: 'relative', zIndex: 3 },
   sortButton: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface },
   sortButtonText: { color: palette.text, fontSize: 13, fontWeight: '600' },
-  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: '#172033', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
+  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: palette.shadow, shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
   sortOption: { minHeight: 38, paddingHorizontal: spacing.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderRadius: radius.sm },
   sortOptionActive: { backgroundColor: palette.primarySoft },
   sortOptionText: { color: palette.text, fontSize: 13 },
@@ -246,13 +252,13 @@ const styles = StyleSheet.create({
   resultCount: { color: palette.textSoft, fontSize: 13, marginTop: 2 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: spacing.md },
   gridWeb: { justifyContent: 'space-between', columnGap: spacing.md, rowGap: spacing.lg },
-  gridMobileList: { width: '100%', flexDirection: 'column', justifyContent: 'flex-start', rowGap: spacing.sm },
+  gridMobileList: { width: '100%', flexDirection: 'column', flexWrap: 'nowrap', alignItems: 'stretch', justifyContent: 'flex-start', rowGap: spacing.sm },
   messageBox: { padding: spacing.lg, backgroundColor: palette.surface, borderRadius: radius.md, gap: spacing.sm },
   message: { color: palette.textSoft, fontSize: 14, lineHeight: 20 },
   retry: { color: palette.primaryDark, fontSize: 14, fontWeight: '700' },
   loading: { minHeight: 180, alignItems: 'center', justifyContent: 'center', gap: spacing.sm },
   pagination: { marginTop: spacing.xl, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: palette.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   pageButton: { minHeight: 40, justifyContent: 'center', backgroundColor: palette.primary, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.sm },
-  pageButtonText: { color: palette.surface, fontSize: 13, fontWeight: '700' },
+  pageButtonText: { color: palette.onPrimary, fontSize: 13, fontWeight: '700' },
   pageInfo: { color: palette.text, fontSize: 13, fontWeight: '600' },
-});
+}));

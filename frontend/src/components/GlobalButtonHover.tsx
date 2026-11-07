@@ -1,10 +1,13 @@
 import { useEffect } from 'react';
 
 import { Platform } from 'react-native';
+import { useAppTheme } from '../context/ThemeContext';
 
 const STYLE_ID = 'preco-bao-global-button-hover';
 
 export function GlobalButtonHover() {
+  const { palette } = useAppTheme();
+
   useEffect(() => {
     if (Platform.OS !== 'web') {
       return;
@@ -16,9 +19,7 @@ export function GlobalButtonHover() {
 
     const existingStyle = document.getElementById(STYLE_ID);
 
-    if (existingStyle) {
-      return;
-    }
+    existingStyle?.remove();
 
     const style = document.createElement('style');
 
@@ -56,7 +57,7 @@ export function GlobalButtonHover() {
       a[href]:focus-visible,
       [role="button"]:focus-visible,
       div[tabindex="0"]:focus-visible {
-        outline: 2px solid #1688F6;
+        outline: 2px solid ${palette.primary};
         outline-offset: 3px;
       }
     `;
@@ -70,7 +71,7 @@ export function GlobalButtonHover() {
         currentStyle.remove();
       }
     };
-  }, []);
+  }, [palette.primary]);
 
   return null;
 }

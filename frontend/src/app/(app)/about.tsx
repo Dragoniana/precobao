@@ -1,9 +1,10 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '../../components/Screen';
-import { palette, radius, spacing } from '../../theme';
+import { radius, spacing } from '../../theme';
+import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
 const features = [
   'Compare ofertas disponíveis por farmácia.',
@@ -12,6 +13,8 @@ const features = [
 ];
 
 export default function AboutScreen() {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   return (
     <Screen>
       <View style={styles.header}>
@@ -39,7 +42,7 @@ export default function AboutScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.md },
   mark: { width: 48, height: 48, borderRadius: radius.md, backgroundColor: palette.primary, alignItems: 'center', justifyContent: 'center' },
   eyebrow: { color: palette.primaryDark, fontSize: 11, fontWeight: '800', letterSpacing: 1.2 },
@@ -50,4 +53,4 @@ const styles = StyleSheet.create({
   number: { color: palette.primary, fontSize: 13, fontWeight: '800' },
   feature: { flex: 1, color: palette.text, fontSize: 15, lineHeight: 21 },
   note: { color: palette.textSoft, fontSize: 13, lineHeight: 19, marginTop: spacing.lg, maxWidth: 680 },
-});
+}));

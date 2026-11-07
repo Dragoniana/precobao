@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Medicamento } from '../types/api';
 import {
@@ -9,6 +9,7 @@ import {
   fetchMedicine,
   FilterOption,
 } from '../services/catalog';
+import { markMedicineOpenTrace } from '../services/medicineOpenPerformance';
 
 const DEFAULT_FILTERS: FilterOption[] = [];
 const isSupportedFilter = (filter: FilterOption) =>
@@ -19,11 +20,10 @@ const CACHE_LIMIT = 180;
 export function useCatalogState() {
   const cacheRef = useRef(new Map<number, Medicamento>());
   const requestsRef = useRef(new Map<number, Promise<Medicamento>>());
-  const [cache, setCache] = useState<Medicamento[]>([]);
+  const catalogRequestSerial = useRef(0);
   const [filterOptions, setFilterOptions] = useState(DEFAULT_FILTERS);
   const [selectedFilters, setSelectedFilters] = useState<FilterOption[]>([]);
   const [selectedPharmacyId, setSelectedPharmacyId] = useState<number | null>(null);
-  const [recentIds, setRecentIds] = useState<number[]>([]);
   const [cheapestMedicines, setCheapestMedicines] = useState<Medicamento[]>([]);
   const [optionsError, setOptionsError] = useState(false);
   const [cheapestError, setCheapestError] = useState(false);
@@ -39,35 +39,49 @@ export function useCatalogState() {
       if (oldestId === undefined) break;
       current.delete(oldestId);
     }
-    setCache([...current.values()]);
   }, []);
 
   const loadCatalogPage = useCallback(async (query: CatalogQuery) => {
+    const requestSerial = ++catalogRequestSerial.current;
     const page = await fetchCatalogPage({ ...query, sortBy: query.sortBy ?? 'relevancia' });
-    rememberMedicines(page.items);
+    // Ignore stale pages so a slower response from a previous search/filter
+    // cannot overwrite the shared medicine cache with older offer data.
+    if (requestSerial === catalogRequestSerial.current) rememberMedicines(page.items);
     return page;
   }, [rememberMedicines]);
 
   const loadMedicineById = useCallback(async (id: number, force = false) => {
+    // A forced refresh bypasses a successful cache entry, but still joins an
+    // in-flight lookup for this ID instead of issuing a duplicate request.
+    const pending = requestsRef.current.get(id);
+    if (pending) return pending;
     const existing = !force ? cacheRef.current.get(id) : undefined;
     if (existing) return existing;
-    const pending = requestsRef.current.get(id);
-    if (pending && !force) return pending;
+    markMedicineOpenTrace(id, 'api-request-start');
     const request = fetchMedicine(id).then((medicine) => {
+      markMedicineOpenTrace(id, 'api-response');
       rememberMedicines([medicine]);
       return medicine;
-    }).finally(() => requestsRef.current.delete(id));
+    }).catch((error: unknown) => {
+      markMedicineOpenTrace(id, 'api-error');
+      throw error;
+    }).finally(() => {
+      if (requestsRef.current.get(id) === request) requestsRef.current.delete(id);
+    });
     requestsRef.current.set(id, request);
     return request;
   }, [rememberMedicines]);
 
-  const getMedicineById = useCallback(
-    (id: number) => cache.find((medicine) => medicine.id === id),
-    [cache]
-  );
+  const getMedicineById = useCallback((id: number) => {
+    const medicine = cacheRef.current.get(id);
+    if (medicine) {
+      cacheRef.current.delete(id);
+      cacheRef.current.set(id, medicine);
+    }
+    return medicine;
+  }, []);
 
   const markAsViewed = useCallback((id: number) => {
-    setRecentIds((current) => [id, ...current.filter((item) => item !== id)].slice(0, 6));
     if (!cacheRef.current.has(id)) void loadMedicineById(id).catch(() => undefined);
   }, [loadMedicineById]);
 
@@ -98,18 +112,11 @@ export function useCatalogState() {
     return () => { active = false; };
   }, [rememberMedicines]);
 
-  const recentMedicines = useMemo(
-    () => recentIds.map((id) => cache.find((medicine) => medicine.id === id)).filter((item): item is Medicamento => Boolean(item)),
-    [cache, recentIds]
-  );
-
   return {
     filterOptions,
     selectedFilters,
     selectedPharmacyId,
     setSelectedPharmacyId,
-    recentIds,
-    recentMedicines,
     cheapestMedicines,
     optionsError,
     cheapestError,

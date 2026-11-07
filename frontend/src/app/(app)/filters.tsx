@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -7,7 +7,6 @@ import {
   Modal,
   Platform,
   Pressable,
-  StyleSheet,
   Text,
   TextInput,
   useWindowDimensions,
@@ -19,7 +18,8 @@ import { Screen } from '../../components/Screen';
 import { FilterOption, useCatalogContext } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { formatLaboratoryLabel, normalizeText } from '../../services/catalog';
-import { palette, radius, spacing } from '../../theme';
+import { radius, spacing } from '../../theme';
+import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
 type Pharmacy = { id: number; nome_fantasia: string };
 type SectionKind = 'categoria' | 'tipo_venda';
@@ -39,6 +39,8 @@ const SECTION_ICONS: Record<SectionKind, keyof typeof Ionicons.glyphMap> = {
 };
 
 export default function FiltersScreen() {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   const router = useRouter();
   const { width } = useWindowDimensions();
   const {
@@ -277,7 +279,7 @@ export default function FiltersScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   form: { width: '100%' },
   formWeb: { maxWidth: 860, alignSelf: 'center' },
   formMobile: { width: 'calc(100% - 24px)' } as any,
@@ -316,11 +318,11 @@ const styles = StyleSheet.create({
   clearButton: { flex: 1, minHeight: 48, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: palette.primary, borderRadius: radius.sm, backgroundColor: palette.surface },
   clearText: { color: palette.primaryDark, fontSize: 14, fontWeight: '700' },
   applyButton: { flex: 1.25, minHeight: 48, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: palette.primary },
-  applyText: { color: palette.surface, fontSize: 14, fontWeight: '700' },
+  applyText: { color: palette.onPrimary, fontSize: 14, fontWeight: '700' },
   pressed: { opacity: 0.82 },
   modal: { width: '100%', maxWidth: 720, height: 580, maxHeight: '88%', alignSelf: 'center', marginTop: 'auto', marginBottom: 'auto', padding: spacing.lg, borderRadius: radius.lg, backgroundColor: palette.surface },
   modalMobile: { maxWidth: '100%', height: '100%', maxHeight: '100%', borderRadius: 0, paddingTop: spacing.xl },
-  modalOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: 'rgba(23, 32, 51, 0.38)' },
+  modalOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: palette.overlay },
   modalOverlayMobile: { padding: 0, backgroundColor: palette.surface },
   modalHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md },
   modalTitleWrap: { flex: 1 },
@@ -344,4 +346,4 @@ const styles = StyleSheet.create({
   modalFooter: { flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: palette.border },
   modalClear: { flex: 1, minHeight: 48, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm },
   modalDone: { flex: 1, minHeight: 48, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: palette.primary },
-});
+}));

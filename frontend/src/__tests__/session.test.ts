@@ -50,6 +50,46 @@ it('restores only a token validated by the backend', async () => {
   expect(tokenStorage.delete).toHaveBeenCalled();
 });
 
+it('keeps a saved token after a network failure and restores it on retry', async () => {
+  (tokenStorage.get as jest.Mock).mockResolvedValue('saved-token');
+  (api.get as jest.Mock)
+    .mockRejectedValueOnce(new Error('Network Error'))
+    .mockResolvedValueOnce({ data: user });
+  const { result } = await renderHook(() => useAuthSession());
+
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+  expect(result.current.isAuthenticated).toBe(false);
+  expect(result.current.sessionRestoreError).toMatch(/continua salva/i);
+  expect(tokenStorage.delete).not.toHaveBeenCalled();
+
+  let restored = false;
+  await act(async () => { restored = await result.current.retrySessionRestore(); });
+  expect(restored).toBe(true);
+  expect(result.current.isAuthenticated).toBe(true);
+  expect(result.current.token).toBe('saved-token');
+  expect(tokenStorage.delete).not.toHaveBeenCalled();
+});
+
+it('keeps a saved token after a server error instead of treating it as revoked', async () => {
+  (tokenStorage.get as jest.Mock).mockResolvedValue('saved-token');
+  (api.get as jest.Mock).mockRejectedValue({ response: { status: 503, data: {} } });
+  const { result } = await renderHook(() => useAuthSession());
+
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+  expect(result.current.isAuthenticated).toBe(false);
+  expect(result.current.sessionRestoreError).toMatch(/continua salva/i);
+  expect(tokenStorage.delete).not.toHaveBeenCalled();
+});
+
+it('does not delete secure session data when secure storage cannot be read', async () => {
+  (tokenStorage.get as jest.Mock).mockRejectedValue(new Error('SecureStore unavailable'));
+  const { result } = await renderHook(() => useAuthSession());
+
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+  expect(result.current.sessionRestoreError).toMatch(/armazenamento seguro/i);
+  expect(tokenStorage.delete).not.toHaveBeenCalled();
+});
+
 it('clears a newly issued token when the account validation request fails', async () => {
   (api.post as jest.Mock).mockResolvedValue({ data: { access_token: 'unverified-token' } });
   (api.get as jest.Mock).mockRejectedValue({ response: { status: 401, data: {} } });
@@ -62,6 +102,30 @@ it('clears a newly issued token when the account validation request fails', asyn
   expect(result.current.isAuthenticated).toBe(false);
   expect(result.current.token).toBeNull();
   expect(tokenStorage.delete).toHaveBeenCalled();
+});
+
+it('keeps a newly issued token when profile validation fails temporarily', async () => {
+  (api.post as jest.Mock).mockResolvedValue({ data: { access_token: 'issued-token' } });
+  (api.get as jest.Mock)
+    .mockRejectedValueOnce(new Error('Network Error'))
+    .mockResolvedValueOnce({ data: user });
+  (tokenStorage.get as jest.Mock)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValue('issued-token');
+  const { result } = await renderHook(() => useAuthSession());
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+  let response!: { ok: boolean };
+  await act(async () => { response = await result.current.signIn(user.email, 'secret'); });
+  expect(response.ok).toBe(false);
+  expect(result.current.isAuthenticated).toBe(false);
+  expect(tokenStorage.set).toHaveBeenCalledWith('issued-token');
+  expect(tokenStorage.delete).not.toHaveBeenCalled();
+
+  let restored = false;
+  await act(async () => { restored = await result.current.retrySessionRestore(); });
+  expect(restored).toBe(true);
+  expect(result.current.isAuthenticated).toBe(true);
 });
 
 it('persists profile edits and reports backend conflicts without changing local data', async () => {

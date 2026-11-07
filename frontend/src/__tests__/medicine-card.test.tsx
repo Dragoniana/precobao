@@ -1,6 +1,6 @@
 import React from 'react';
 import { Dimensions, StyleSheet } from 'react-native';
-import { fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render } from '@testing-library/react-native';
 
 import { MedicineCard } from '../components/MedicineCard';
 import { Medicamento } from '../types/api';
@@ -32,6 +32,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockFavoriteIds = [];
   mockSessionMode = 'authenticated';
+  Dimensions.set({ window: { width: 390, height: 844, scale: 1, fontScale: 1 }, screen: { width: 390, height: 844, scale: 1, fontScale: 1 } });
 });
 
 it('opens the medicine details when the image, title, price, or open card surface is pressed', async () => {
@@ -101,6 +102,33 @@ it('keeps compact card controls and prices inside a very narrow mobile layout', 
   expect(StyleSheet.flatten(getByTestId('medicine-card-price-section').props.style).flexDirection).toBe('column');
   expect(StyleSheet.flatten(getByTestId('medicine-card-price-column').props.style).width).toBe('100%');
   expect(StyleSheet.flatten(getByTestId('medicine-card-compare').props.style).minHeight).toBe(44);
+});
+
+it('uses a bounded image frame and content-sized horizontal card on mobile', async () => {
+  const { getByTestId } = await render(<MedicineCard medicine={medicine} onPress={jest.fn()} compact />);
+  const cardStyle = StyleSheet.flatten(getByTestId('medicine-card').props.style);
+  const imageStyle = StyleSheet.flatten(getByTestId('medicine-image-frame').props.style);
+
+  expect(cardStyle.flexDirection).toBe('row');
+  expect(cardStyle.minHeight).toBeLessThanOrEqual(150);
+  expect(cardStyle.height).toBeUndefined();
+  expect(imageStyle.width).toBe(84);
+  expect(imageStyle.height).toBe(120);
+  expect(imageStyle.height).not.toBe('auto');
+});
+
+it('preserves the desktop card variant and lets mobile titles grow with accessibility font scale', async () => {
+  Dimensions.set({ window: { width: 1440, height: 900, scale: 1, fontScale: 1 }, screen: { width: 1440, height: 900, scale: 1, fontScale: 1 } });
+  const desktop = await render(<MedicineCard medicine={medicine} onPress={jest.fn()} compact />);
+  const desktopStyle = StyleSheet.flatten(desktop.getByTestId('medicine-card').props.style);
+  expect(desktopStyle.flexDirection).toBeUndefined();
+  expect(desktopStyle.minHeight).toBe(356);
+
+  await act(async () => {
+    Dimensions.set({ window: { width: 390, height: 844, scale: 1, fontScale: 1.5 }, screen: { width: 390, height: 844, scale: 1, fontScale: 1.5 } });
+  });
+  desktop.rerender(<MedicineCard medicine={medicine} onPress={jest.fn()} compact />);
+  expect(desktop.getByTestId('medicine-card-title').props.numberOfLines).toBeUndefined();
 });
 
 it('shows a friendly laboratory name while keeping the medicine source value unchanged', async () => {

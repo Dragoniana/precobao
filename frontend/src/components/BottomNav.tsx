@@ -1,11 +1,14 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useNavigation } from '@react-navigation/native';
 import { usePathname, useRouter } from 'expo-router';
-import { Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Platform, Pressable, View } from 'react-native';
 
-import { palette, radius, spacing } from '../theme';
+import { radius, spacing } from '../theme';
+import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
 export function BottomNav() {
+  const styles = useStyles();
+  const { palette } = useAppTheme();
   const router = useRouter();
   const navigation = useNavigation<any>();
   const pathname = usePathname();
@@ -64,7 +67,7 @@ export function BottomNav() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((palette) => ({
   wrapper: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -76,7 +79,7 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
     paddingBottom: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: '#E4E4E4',
+    borderTopColor: palette.border,
   },
   wrapperWeb: {
     width: '100%',
@@ -87,7 +90,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderWidth: 1,
-    borderColor: '#E4E4E4',
+    borderColor: palette.border,
     borderRadius: radius.pill,
     backgroundColor: palette.surface,
   },
@@ -97,7 +100,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#ECECEC',
+    backgroundColor: palette.surfaceAlt,
   },
   iconButtonActive: {
     backgroundColor: palette.primarySoft,
@@ -108,9 +111,9 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#E5E5E5',
+    backgroundColor: palette.surfaceAlt,
   },
   homeButtonActive: {
     backgroundColor: palette.primary,
   },
-});
+}));

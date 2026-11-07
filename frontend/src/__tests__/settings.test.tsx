@@ -17,10 +17,12 @@ jest.mock('../components/Screen', () => {
 it('navigates to profile from the available account setting', async () => {
   const push = jest.fn();
   (useRouter as jest.Mock).mockReturnValue({ push });
-  const { getByText } = await render(<SettingsScreen />);
+  const { getByText, getByLabelText } = await render(<SettingsScreen />);
 
   fireEvent.press(getByText('Dados da conta'));
   expect(push).toHaveBeenCalledWith('/(app)/profile');
   expect(getByText(/Apar.ncia/)).toBeTruthy();
-  expect(getByText(/tema claro/)).toBeTruthy();
+  expect(getByLabelText('Tema Claro').props.accessibilityState.checked).toBe(true);
+  expect(getByLabelText('Tema Escuro')).toBeTruthy();
+  expect(getByLabelText('Tema Sistema')).toBeTruthy();
 });
