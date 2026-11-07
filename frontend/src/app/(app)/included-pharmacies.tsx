@@ -1,16 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '../../components/Screen';
 import { api } from '../../services/api';
-import { radius, spacing } from '../../theme';
-import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
+import { palette, radius, spacing } from '../../theme';
 
 type Pharmacy = { id: number; nome_fantasia: string; endereco_completo: string };
 
 export default function IncludedPharmaciesScreen() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const [pharmacies, setPharmacies] = useState<Pharmacy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -48,7 +45,7 @@ export default function IncludedPharmaciesScreen() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   title: {
     fontSize: 28,
     color: palette.text,
@@ -80,4 +77,4 @@ const useStyles = createThemedStyles((palette) => ({
     color: palette.textSoft,
     fontSize: 15,
   },
-}));
+});

@@ -1,25 +1,21 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { CatalogFiltersSidebar } from '../../components/CatalogFiltersSidebar';
 import { MedicineCard } from '../../components/MedicineCard';
 import { OfferRow } from '../../components/OfferRow';
 import { Screen } from '../../components/Screen';
-import { markMedicineOpenTrace, startMedicineOpenTrace } from '../../services/medicineOpenPerformance';
 import { SearchBar } from '../../components/SearchBar';
 import { useCatalogContext } from '../../context/AppContext';
 import { CatalogSort, getLaboratoryDisplayName } from '../../services/catalog';
-import { radius, spacing } from '../../theme';
-import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
+import { palette, radius, spacing } from '../../theme';
 import { Medicamento } from '../../types/api';
 
 type SearchRow = { medicine: Medicamento; medicineId: number; medicineName: string; pharmacyId: number; pharmacyName: string; price: number };
 
 export default function SearchScreen() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const router = useRouter();
   const params = useLocalSearchParams<{ q?: string }>();
   const { loadCatalogPage, cheapestMedicines, cheapestError, selectedFilters, selectedPharmacyId, markAsViewed } = useCatalogContext();
@@ -96,9 +92,7 @@ export default function SearchScreen() {
   const showCheapestSuggestions = !query && selectedFilters.length === 0 && selectedPharmacyId === null;
 
   const openDetail = (id: number) => {
-    startMedicineOpenTrace(id, 'search');
     markAsViewed(id);
-    markMedicineOpenTrace(id, 'navigation-start');
     router.push(`/medicine/${id}`);
   };
 
@@ -172,7 +166,7 @@ export default function SearchScreen() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   screen: { paddingTop: spacing.lg },
   catalogLayout: { width: '100%' },
   catalogLayoutDesktop: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.lg },
@@ -185,7 +179,7 @@ const useStyles = createThemedStyles((palette) => ({
   sortWrap: { position: 'relative', zIndex: 3 },
   sortButton: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface },
   sortButtonText: { color: palette.text, fontSize: 13, fontWeight: '600' },
-  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: palette.shadow, shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
+  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: '#172033', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
   sortOption: { minHeight: 38, paddingHorizontal: spacing.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderRadius: radius.sm },
   sortOptionActive: { backgroundColor: palette.primarySoft },
   sortOptionText: { color: palette.text, fontSize: 13 },
@@ -205,4 +199,4 @@ const useStyles = createThemedStyles((palette) => ({
   sectionTitle: { color: palette.text, fontSize: 19, fontWeight: '700', marginBottom: spacing.md },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md },
   gridMobileList: { flexDirection: 'column', flexWrap: 'nowrap' },
-}));
+});

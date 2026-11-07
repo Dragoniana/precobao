@@ -1,4 +1,4 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { router, usePathname } from 'expo-router';
 import React, { ReactNode, useMemo, useState } from 'react';
 import {
@@ -7,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   StyleProp,
+  StyleSheet,
   Text,
   View,
   ViewStyle,
@@ -15,8 +16,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useSessionContext } from '../context/AppContext';
-import { radius, spacing } from '../theme';
-import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
+import { palette, radius, spacing } from '../theme';
 
 type ScreenProps = {
   children: ReactNode;
@@ -28,13 +28,12 @@ type ScreenProps = {
 
 const navigation = [
   { label: 'Início', path: '/home', icon: 'home-outline', activeIcon: 'home' },
+  { label: 'Buscar', path: '/search', icon: 'search-outline', activeIcon: 'search' },
   { label: 'Favoritos', path: '/favorites', icon: 'heart-outline', activeIcon: 'heart' },
   { label: 'Perfil', path: '/profile', icon: 'person-outline', activeIcon: 'person' },
 ] as const;
 
 export function Screen({ children, hideBottomNav = false, scroll = true, contentStyle, wideContent = false }: ScreenProps) {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const pathname = usePathname();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -46,7 +45,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
   const activeTab = useMemo(() => {
     if (pathname.includes('/favorites')) return 'favorites';
     if (pathname.includes('/profile')) return 'profile';
-    if (pathname.includes('/search')) return null;
+    if (pathname.includes('/search')) return 'search';
     return 'home';
   }, [pathname]);
 
@@ -61,10 +60,10 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
     router.replace('/login');
   };
 
-  const contentStyles = [styles.content, isDesktop && (wideContent ? styles.contentDesktopWide : styles.contentDesktop), contentStyle, !isDesktop && !hideBottomNav && styles.contentWithMobileNav, !isWeb && hideBottomNav && { paddingBottom: Math.max(insets.bottom + spacing.sm, spacing.xl) }];
+  const contentStyles = [styles.content, isDesktop && (wideContent ? styles.contentDesktopWide : styles.contentDesktop), contentStyle, !isDesktop && !hideBottomNav && styles.contentWithMobileNav];
 
   return (
-    <View style={[styles.root, !isWeb && { paddingTop: insets.top }]}>
+    <View style={styles.root}>
       {isDesktop && !hideBottomNav && (
         <View style={styles.desktopHeader}>
           <View style={[styles.headerInner, wideContent && styles.headerInnerWide]}>
@@ -73,7 +72,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
               <View><Text style={styles.brandName}>Preço Bão</Text><Text style={styles.brandCaption}>COMPARADOR DE MEDICAMENTOS</Text></View>
             </Pressable>
             <View style={styles.desktopNavigation}>
-              {navigation.map((item) => {
+              {navigation.filter((item) => item.path !== '/search').map((item) => {
                 const active = activeTab === item.path.slice(1);
                 return (
                   <Pressable key={item.path} onPress={() => goTo(item.path)} accessibilityRole="button" accessibilityLabel={item.label} accessibilityState={{ selected: active }} style={({ hovered, pressed }) => [styles.desktopNavItem, active && styles.desktopNavItemActive, hovered && styles.desktopNavItemHover, pressed && styles.pressed]}>
@@ -97,7 +96,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
       )}
 
       {scroll ? (
-        <ScrollView style={styles.flex} contentContainerStyle={[contentStyles, styles.scrollContent]} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} showsVerticalScrollIndicator={false}>
+        <ScrollView style={styles.flex} contentContainerStyle={[contentStyles, styles.scrollContent]} showsVerticalScrollIndicator={false}>
           {children}
         </ScrollView>
       ) : <View style={[styles.flex, contentStyles]}>{children}</View>}
@@ -150,7 +149,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: palette.background },
   flex: { flex: 1 },
   desktopHeader: { width: '100%', backgroundColor: palette.surface, borderBottomWidth: 1, borderBottomColor: palette.border },
@@ -158,7 +157,7 @@ const useStyles = createThemedStyles((palette) => ({
   headerInnerWide: { maxWidth: '100%', paddingHorizontal: 24 },
   brand: { flexDirection: 'row', alignItems: 'center', gap: 11, minWidth: 220 },
   brandMark: { width: 38, height: 38, borderRadius: 11, backgroundColor: palette.primary, justifyContent: 'center', alignItems: 'center' },
-  brandLetter: { color: palette.onPrimary, fontSize: 23, fontWeight: '900' },
+  brandLetter: { color: palette.surface, fontSize: 23, fontWeight: '900' },
   brandName: { color: palette.text, fontSize: 17, fontWeight: '900', letterSpacing: -0.3 },
   brandCaption: { color: palette.textSoft, fontSize: 9, fontWeight: '700', letterSpacing: 0.8, marginTop: 1 },
   desktopNavigation: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
@@ -171,21 +170,21 @@ const useStyles = createThemedStyles((palette) => ({
   accountButton: { maxWidth: 175, flexDirection: 'row', alignItems: 'center', gap: 7, padding: 8 },
   accountName: { color: palette.text, fontSize: 14, fontWeight: '600', maxWidth: 135 },
   signInButton: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: radius.sm, backgroundColor: palette.primary },
-  signInText: { color: palette.onPrimary, fontWeight: '700', fontSize: 14 },
+  signInText: { color: palette.surface, fontWeight: '700', fontSize: 14 },
   moreButton: { width: 38, height: 38, borderRadius: radius.sm, backgroundColor: palette.surfaceAlt, justifyContent: 'center', alignItems: 'center' },
-  content: { width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.xl, boxSizing: 'border-box' } as any,
+  content: { width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.xl },
   contentDesktop: { maxWidth: 1320, paddingHorizontal: 32, paddingTop: 30, paddingBottom: 48 },
   contentDesktopWide: { maxWidth: '100%', paddingHorizontal: 24, paddingTop: 30, paddingBottom: 48 },
   contentWithMobileNav: { paddingBottom: 80 },
   scrollContent: { flexGrow: 1 },
   mobileNavWrapper: { width: '100%', backgroundColor: palette.surface, borderTopWidth: 1, borderTopColor: palette.border, paddingTop: 7, paddingBottom: Platform.OS === 'web' ? 8 : 12 },
-  mobileNavigation: { width: '100%', maxWidth: 560, alignSelf: 'center', flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', paddingHorizontal: 8, boxSizing: 'border-box' } as any,
-  mobileNavItem: { flex: 1, minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center', gap: 2, borderRadius: radius.sm, paddingHorizontal: 5 },
+  mobileNavigation: { width: '100%', maxWidth: 560, alignSelf: 'center', flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', paddingHorizontal: 8 },
+  mobileNavItem: { minWidth: 58, minHeight: 48, alignItems: 'center', justifyContent: 'center', gap: 2, borderRadius: radius.sm, paddingHorizontal: 5 },
   mobileNavText: { color: palette.textSoft, fontSize: 10, fontWeight: '600' },
   mobileNavTextActive: { color: palette.primaryDark, fontWeight: '800' },
   pressed: { opacity: 0.72 },
   modalOverlay: { flex: 1, flexDirection: 'row' },
-  modalBackdrop: { flex: 1, backgroundColor: palette.overlay },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.32)' },
   sidebar: { width: 310, maxWidth: '88%', backgroundColor: palette.surface, paddingTop: 24, paddingHorizontal: 18, paddingBottom: 20 },
   sidebarDesktop: { width: 340 },
   sidebarHeader: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 28 },
@@ -199,4 +198,4 @@ const useStyles = createThemedStyles((palette) => ({
   sidebarItemText: { flex: 1, color: palette.text, fontSize: 13, fontWeight: '700' },
   logoutItem: { marginTop: 8, borderTopWidth: 1, borderColor: palette.border, borderRadius: 0 },
   logoutText: { color: palette.danger },
-}));
+});

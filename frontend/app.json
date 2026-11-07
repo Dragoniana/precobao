@@ -4,31 +4,18 @@
     "slug": "farmacia-scraper-frontend",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/app-icon.png",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "scheme": "farmacia-scraper-frontend",
     "plugins": [
       "expo-router",
       "expo-font",
-      "expo-secure-store",
-      "expo-asset",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/splash-screen.png",
-          "resizeMode": "contain",
-          "backgroundColor": "#F6F8FC",
-          "dark": {
-            "image": "./assets/splash-screen.png",
-            "backgroundColor": "#101722"
-          }
-        }
-      ]
+      "expo-secure-store"
     ],
     "splash": {
-      "image": "./assets/splash-screen.png",
+      "image": "./assets/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#F6F8FC"
+      "backgroundColor": "#ffffff"
     },
     "ios": {
       "supportsTablet": true
@@ -36,10 +23,13 @@
     "android": {
       "package": "com.dragoniana.precobao",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon-foreground.png",
-        "backgroundColor": "#1688F6"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
       },
-      "permissions": []
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
     },
     "experiments": {
       "typedRoutes": true

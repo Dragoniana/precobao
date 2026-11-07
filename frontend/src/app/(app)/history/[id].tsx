@@ -1,4 +1,4 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 
@@ -7,6 +7,7 @@ import {
   Linking,
   Platform,
   Pressable,
+  StyleSheet,
   Text,
   useWindowDimensions,
   View,
@@ -19,6 +20,7 @@ import {
 
 import { OfferRow } from '../../../components/OfferRow';
 import { Screen } from '../../../components/Screen';
+import { SearchBar } from '../../../components/SearchBar';
 import { useCatalogContext, useSessionContext } from '../../../context/AppContext';
 
 import {
@@ -26,14 +28,8 @@ import {
   Oferta,
 } from '../../../types/api';
 import { api } from '../../../services/api';
-import {
-  getHistoryPharmacyOptions,
-  getVisibleHistorySeries,
-  toggleHistoryPharmacy,
-} from '../../../services/historySeries';
 
-import { radius, spacing } from '../../../theme';
-import { createThemedStyles, useAppTheme } from '../../../context/ThemeContext';
+import { palette, radius, spacing } from '../../../theme';
 
 const PHARMACY_COLORS = [
   '#1688F6',
@@ -83,8 +79,8 @@ function getPharmacyName(offer?: Oferta) {
   );
 }
 
-function getPharmacyColor(pharmacyId: number) {
-  return PHARMACY_COLORS[(pharmacyId - 1) % PHARMACY_COLORS.length];
+function getColorByIndex(index: number) {
+  return PHARMACY_COLORS[index % PHARMACY_COLORS.length];
 }
 
 function getLowestOffer(offers: Oferta[]) {
@@ -102,31 +98,25 @@ const HISTORY_PERIODS = [
 ] as const;
 
 export default function HistoryScreen() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const router = useRouter();
 
   const handleBack = () => {
-    if (router.canGoBack()) {
-      router.back();
-      return;
-    }
+  if (router.canGoBack()) {
+    router.back();
+    return;
+  }
 
-    if (medicineId !== null) {
-      router.replace(`/medicine/${medicineId}`);
-      return;
-    }
-
-    router.replace('/home');
-  };
+  router.replace('/home');
+};
 
   const params = useLocalSearchParams<{
     id?: string | string[];
   }>();
 
-  const { loadMedicineById } = useCatalogContext();
+  const { getMedicineById, loadMedicineById } = useCatalogContext();
   const { isLoading } = useSessionContext();
 
+  const [search, setSearch] = useState('Preço Bão');
   const [series, setSeries] = useState<HistoryChartSeries[]>([]);
   const [selectedPharmacies, setSelectedPharmacies] = useState<number[] | null>(null);
   const [historyStats, setHistoryStats] = useState<{ key: string; label: string; minimum: number; maximum: number; average: number; variation: number | null }[]>([]);
@@ -150,21 +140,15 @@ export default function HistoryScreen() {
     return Number.isFinite(parsedId) ? parsedId : null;
   }, [params.id]);
 
-  const medicine = loadedMedicine?.id === medicineId ? loadedMedicine : undefined;
-  const backButton = (
-    <View style={styles.backRow}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Voltar"
-        onPress={handleBack}
-        style={styles.backButton}
-      >
-        <Ionicons name="arrow-back" size={19} color={palette.primaryDark} />
-      </Pressable>
-    </View>
-  );
+  const cachedMedicine = useMemo(() => {
+    if (medicineId === null) {
+      return undefined;
+    }
 
-  useEffect(() => setSelectedPharmacies(null), [medicineId]);
+    return getMedicineById(medicineId);
+  }, [getMedicineById, medicineId]);
+
+  const medicine = cachedMedicine || loadedMedicine;
 
   useEffect(() => {
     let active = true;
@@ -176,7 +160,7 @@ export default function HistoryScreen() {
     setLoadedMedicine(undefined);
     setHistoryMessage('');
     setMedicineLoading(true);
-    loadMedicineById(medicineId, true).then((item) => {
+    loadMedicineById(medicineId).then((item) => {
       if (active) setLoadedMedicine(item);
     }).catch(() => {
       if (active) setHistoryMessage('Não foi possível carregar o medicamento.');
@@ -195,23 +179,11 @@ export default function HistoryScreen() {
   }, [medicine]);
 
   const lowestOffer = useMemo(() => getLowestOffer(currentOffers), [currentOffers]);
-  const pharmacyOptions = useMemo(
-    () => getHistoryPharmacyOptions(currentOffers, series, getPharmacyName, PHARMACY_COLORS),
-    [currentOffers, series],
-  );
-  const visibleSeries = useMemo(
-    () => getVisibleHistorySeries(series, selectedPharmacies),
-    [selectedPharmacies, series],
-  );
-  const selectedMissingHistory = selectedPharmacies !== null && selectedPharmacies.length === 1
-    ? pharmacyOptions.find((item) => Number(item.key) === selectedPharmacies[0] && !item.hasHistory)
-    : undefined;
+  const visibleSeries = useMemo(() => selectedPharmacies === null ? series : series.filter((item) => selectedPharmacies.includes(Number(item.key))), [selectedPharmacies, series]);
   const chartEmptyMessage = historyMessage
     ? 'Não foi possível consultar o histórico agora. Tente novamente mais tarde.'
-    : selectedMissingHistory && period === 'all'
-    ? `${selectedMissingHistory.label} ainda não possui observações de preço.`
-    : selectedPharmacies !== null && visibleSeries.length === 0 && period !== 'all'
-    ? 'Esta farmácia não possui observações neste período. Selecione Tudo para conferir outras datas.'
+    : selectedPharmacies !== null && series.length > 0 && visibleSeries.length === 0
+    ? 'Selecione ao menos uma farmácia para visualizar as observações.'
     : series.length === 0 && totalHistoryObservations > 0 && period !== 'all'
       ? `Não há observações neste período. Existem ${totalHistoryObservations} observações em outras datas; selecione Tudo para consultá-las.`
       : 'O acompanhamento ainda não possui observações reais de preço. Uma coleta bem-sucedida registrará o primeiro ponto.';
@@ -235,10 +207,10 @@ export default function HistoryScreen() {
       try {
         const response = await api.get(`/api/v1/medicines/${medicineId}/history?periodo=${period}`);
         const data = response.data as { pharmacies?: { farmacia_id: number; pharmacy_name?: string; history: { data_registro: string; preco: number }[] }[]; statistics?: Record<string, { menor_preco: number; maior_preco: number; preco_medio: number; variacao_percentual: number | null }>; total_observacoes?: number };
-        const normalized = (data.pharmacies || []).map((item) => ({
+        const normalized = (data.pharmacies || []).map((item, index) => ({
           key: String(item.farmacia_id),
           label: item.pharmacy_name || `Farm\u00e1cia ${item.farmacia_id}`,
-          color: getPharmacyColor(item.farmacia_id),
+          color: getColorByIndex(index),
           history: item.history.map((point) => ({
             timestamp: point.data_registro,
             label: formatDateLabel(point.data_registro),
@@ -248,6 +220,7 @@ export default function HistoryScreen() {
         if (active) {
           setSeries(normalized);
           setTotalHistoryObservations(Number(data.total_observacoes ?? normalized.reduce((count, item) => count + item.history.length, 0)));
+          setSelectedPharmacies(null);
           setHistoryStats(normalized.flatMap((item) => {
             const stat = data.statistics?.[item.key];
             return stat ? [{ key: item.key, label: item.label, minimum: Number(stat.menor_preco), maximum: Number(stat.maior_preco), average: Number(stat.preco_medio), variation: stat.variacao_percentual === null ? null : Number(stat.variacao_percentual) }] : [];
@@ -283,7 +256,19 @@ export default function HistoryScreen() {
   if (!medicine) {
     return (
       <Screen>
-        {backButton}
+        <SearchBar
+          value={search}
+          onChangeText={setSearch}
+          onSubmit={() =>
+            router.push({
+              pathname: '/search',
+              params: {
+                q: search,
+              },
+            })
+          }
+          onBack={handleBack}
+        />
 
         <View style={styles.notFoundBox}>
           <View style={styles.notFoundIcon}>
@@ -293,7 +278,7 @@ export default function HistoryScreen() {
           <Text style={styles.notFoundTitle}>Histórico não encontrado</Text>
 
           <Text style={styles.notFoundText}>
-            {historyMessage || 'Não foi possível localizar esse medicamento no catálogo carregado.'}
+            Não foi possível localizar esse medicamento no catálogo carregado.
           </Text>
         </View>
       </Screen>
@@ -302,7 +287,19 @@ export default function HistoryScreen() {
 
   return (
     <Screen>
-      {backButton}
+      <SearchBar
+        value={search}
+        onChangeText={setSearch}
+        onSubmit={() =>
+          router.push({
+            pathname: '/search',
+            params: {
+              q: search,
+            },
+          })
+        }
+        onBack={handleBack}
+      />
 
       <View style={[styles.heroCard, isDesktop && styles.heroCardDesktop]}>
         <View style={styles.heroTextBox}>
@@ -351,7 +348,7 @@ export default function HistoryScreen() {
                   style={[
                     styles.summaryDot,
                     {
-                      backgroundColor: getPharmacyColor(offer.farmacia_id),
+                      backgroundColor: getColorByIndex(index),
                     },
                   ]}
                 />
@@ -413,7 +410,7 @@ export default function HistoryScreen() {
         ))}
       </View>
 
-      {!!pharmacyOptions.length && (
+      {!!series.length && (
         <View style={styles.periodFilters} accessibilityLabel="Filtrar farmácias">
           <Pressable
             accessibilityRole="button"
@@ -423,23 +420,17 @@ export default function HistoryScreen() {
           >
             <Text style={[styles.periodChipText, selectedPharmacies === null && styles.periodChipTextSelected]}>Todas</Text>
           </Pressable>
-          {pharmacyOptions.map((item) => {
+          {series.map((item) => {
             const id = Number(item.key);
             const selected = selectedPharmacies === null || selectedPharmacies.includes(id);
             return (
-              <Pressable key={item.key} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setSelectedPharmacies((current) => toggleHistoryPharmacy(current, id, pharmacyOptions))} style={[styles.periodChip, selected && { borderColor: item.color }]}>
+              <Pressable key={item.key} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => setSelectedPharmacies((current) => current === null ? series.filter((candidate) => Number(candidate.key) !== id).map((candidate) => Number(candidate.key)) : current.includes(id) ? current.filter((value) => value !== id) : [...current, id])} style={[styles.periodChip, selected && { borderColor: item.color }]}>
                 <Text style={[styles.periodChipText, selected && { color: item.color }]}>{item.label}</Text>
               </Pressable>
             );
           })}
         </View>
       )}
-
-      {period === 'all' && pharmacyOptions.some((item) => !item.hasHistory) && !historyMessage && !isLoadingHistory ? (
-        <Text style={styles.loadingHistoryText}>
-          Sem histórico ainda: {pharmacyOptions.filter((item) => !item.hasHistory).map((item) => item.label).join(', ')}.
-        </Text>
-      ) : null}
 
       {historyMessage ? (
         <View style={styles.messageBox}>
@@ -459,9 +450,9 @@ export default function HistoryScreen() {
         <HistoryChart series={visibleSeries} emptyMessage={chartEmptyMessage} />
       )}
 
-      {!!historyStats.length && visibleSeries.length > 0 && (
+      {!!historyStats.length && (
         <View style={styles.summaryGrid}>
-          {historyStats.filter((stat) => selectedPharmacies === null || selectedPharmacies.includes(Number(stat.key))).map((stat) => (
+          {historyStats.map((stat) => (
             <View key={stat.key} style={[styles.summaryCard, { width: summaryCardWidth }]}>
               <Text numberOfLines={1} style={styles.summaryPharmacy}>{stat.label}</Text>
               <Text style={styles.summaryPrice}>Mín. {formatPrice(stat.minimum)}</Text>
@@ -492,7 +483,7 @@ export default function HistoryScreen() {
                 medicineName={medicine.nome}
                 pharmacy={getPharmacyName(offer)}
                 price={offer.preco}
-                color={getPharmacyColor(offer.farmacia_id)}
+                color={getColorByIndex(index)}
                 onPress={() => {
                   if (offer.url_origem?.startsWith('https://')) {
                     void Linking.openURL(offer.url_origem).catch(() => {
@@ -509,7 +500,7 @@ export default function HistoryScreen() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   centerContent: {
     justifyContent: 'center',
     alignItems: 'center',
@@ -518,14 +509,14 @@ const useStyles = createThemedStyles((palette) => ({
   },
 
   heroCard: {
-    marginTop: 0,
+    marginTop: spacing.lg,
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: palette.border,
     padding: spacing.lg,
     gap: spacing.lg,
-    shadowColor: palette.shadow,
+    shadowColor: '#0F172A',
     shadowOpacity: 0,
     shadowRadius: 0,
     shadowOffset: {
@@ -540,21 +531,6 @@ const useStyles = createThemedStyles((palette) => ({
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: spacing.xl,
-  },
-
-  backRow: {
-    marginBottom: spacing.sm,
-  },
-
-  backButton: {
-    width: 40,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.surface,
   },
 
   heroTextBox: {
@@ -647,7 +623,7 @@ const useStyles = createThemedStyles((palette) => ({
   },
   periodChipSelected: { backgroundColor: palette.primary, borderColor: palette.primary },
   periodChipText: { color: palette.textSoft, fontWeight: '600' },
-  periodChipTextSelected: { color: palette.onPrimary },
+  periodChipTextSelected: { color: '#FFFFFF' },
 
   summaryCard: {
     backgroundColor: palette.surface,
@@ -655,7 +631,7 @@ const useStyles = createThemedStyles((palette) => ({
     borderColor: palette.border,
     borderRadius: radius.xl,
     padding: spacing.lg,
-    shadowColor: palette.shadow,
+    shadowColor: '#0F172A',
     shadowOpacity: 0.06,
     shadowRadius: 14,
     shadowOffset: {
@@ -700,11 +676,11 @@ const useStyles = createThemedStyles((palette) => ({
   },
 
   stockAvailable: {
-    backgroundColor: palette.successSoft,
+    backgroundColor: '#EAF8EF',
   },
 
   stockUnavailable: {
-    backgroundColor: palette.dangerSoft,
+    backgroundColor: '#FFF1F1',
   },
 
   stockBadgeText: {
@@ -751,10 +727,10 @@ const useStyles = createThemedStyles((palette) => ({
   messageBox: {
     marginTop: spacing.sm,
     marginBottom: spacing.sm,
-    backgroundColor: palette.warningSoft,
+    backgroundColor: '#FFF8E8',
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: palette.warningBorder,
+    borderColor: '#F5D48A',
     padding: spacing.md,
     flexDirection: 'row',
     gap: spacing.sm,
@@ -821,4 +797,4 @@ const useStyles = createThemedStyles((palette) => ({
     lineHeight: 22,
     maxWidth: 420,
   },
-}));
+});

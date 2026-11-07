@@ -31,16 +31,12 @@ export function useAuthSession() {
   const [user, setUser] = useState<User | null>(null);
   const [sessionMode, setSessionMode] = useState<SessionMode>('guest');
   const [sessionVersion, setSessionVersion] = useState(0);
-  const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const epoch = useRef(0);
-  const restoreRequestId = useRef(0);
 
   const clearSession = useCallback(async () => {
     epoch.current += 1;
-    restoreRequestId.current += 1;
-    setIsLoading(false);
     setSessionVersion(epoch.current);
     setActiveToken(null);
     setIsAuthenticated(false);
@@ -49,7 +45,6 @@ export function useAuthSession() {
     setSessionMode('guest');
     setCurrentUserName(null);
     setCurrentUserEmail(null);
-    setSessionRestoreError(null);
     try {
       await tokenStorage.delete();
     } catch {
@@ -63,62 +58,39 @@ export function useAuthSession() {
     setUnauthorizedCallback(() => { void clearSession(); });
   }, [clearSession]);
 
-  const retrySessionRestore = useCallback(async () => {
-    const restoreId = ++restoreRequestId.current;
-    const requestEpoch = epoch.current;
-    let storedToken: string | null = null;
-    setIsLoading(true);
-    setSessionRestoreError(null);
-    try {
-      storedToken = await tokenStorage.get();
-      if (!storedToken || restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
-      setActiveToken(storedToken);
-      const { data } = await api.get<User>('/users/me');
-      if (restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
-      epoch.current += 1;
-      setSessionVersion(epoch.current);
-      setUser(data);
-      setToken(storedToken);
-      setIsAuthenticated(true);
-      setSessionMode('authenticated');
-      setCurrentUserName(data.nome || data.name || data.email);
-      setCurrentUserEmail(data.email);
-      setSessionRestoreError(null);
-      return true;
-    } catch (error: any) {
-      if (restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
-      if (error.response?.status === 401) {
-        await clearSession();
-      } else {
-        // A timeout, server error, or SecureStore error does not prove that a
-        // saved token is invalid. Keep it for an explicit retry when online.
-        setActiveToken(null);
-        setIsAuthenticated(false);
-        setToken(null);
-        setUser(null);
-        setSessionMode('guest');
-        setSessionRestoreError(storedToken
-          ? 'Não foi possível validar sua sessão agora. Ela continua salva neste aparelho; verifique a conexão e tente novamente.'
-          : 'Não foi possível acessar o armazenamento seguro. Os dados de sessão não foram removidos.');
-      }
-      return false;
-    } finally {
-      if (restoreId === restoreRequestId.current) setIsLoading(false);
-    }
-  }, [clearSession]);
-
   useEffect(() => {
-    void retrySessionRestore();
-    return () => { restoreRequestId.current += 1; };
-  }, [retrySessionRestore]);
+    let active = true;
+    const restore = async () => {
+      const requestEpoch = epoch.current;
+      try {
+        const storedToken = await tokenStorage.get();
+        if (!storedToken || !active || requestEpoch !== epoch.current) return;
+        setActiveToken(storedToken);
+        const { data } = await api.get<User>('/users/me');
+        if (!active || requestEpoch !== epoch.current) return;
+        epoch.current += 1;
+        setSessionVersion(epoch.current);
+        setUser(data);
+        setToken(storedToken);
+        setIsAuthenticated(true);
+        setSessionMode('authenticated');
+        setCurrentUserName(data.nome || data.name || data.email);
+        setCurrentUserEmail(data.email);
+      } catch {
+        if (active && requestEpoch === epoch.current) await clearSession();
+      } finally {
+        if (active) setIsLoading(false);
+      }
+    };
+    void restore();
+    return () => { active = false; };
+  }, [clearSession]);
 
   const continueAsGuest = useCallback(() => { void clearSession(); }, [clearSession]);
 
   const signIn = useCallback(async (email: string, password: string): Promise<LoginResult> => {
     const startingEpoch = epoch.current;
     let authEpoch: number | null = null;
-    let tokenWasStored = false;
-    setSessionRestoreError(null);
     try {
       const formData = new URLSearchParams({ username: email.trim(), password });
       const { data } = await api.post('/auth/jwt/login', formData.toString(), {
@@ -131,7 +103,6 @@ export function useAuthSession() {
       setSessionVersion(authEpoch);
       setActiveToken(accessToken);
       await tokenStorage.set(accessToken);
-      tokenWasStored = true;
       const { data: verifiedUser } = await api.get<User>('/users/me');
       if (authEpoch !== epoch.current) return { ok: false, message: 'Sessão alterada.' };
       setUser(verifiedUser);
@@ -140,23 +111,10 @@ export function useAuthSession() {
       setSessionMode('authenticated');
       setCurrentUserName(verifiedUser.nome || verifiedUser.name || verifiedUser.email);
       setCurrentUserEmail(verifiedUser.email);
-      setSessionRestoreError(null);
       return { ok: true, message: 'Login realizado com sucesso.' };
     } catch (error: any) {
       if (authEpoch !== null && authEpoch === epoch.current) {
-        if (error.response?.status === 401) {
-          await clearSession();
-        } else {
-          setActiveToken(null);
-          setIsAuthenticated(false);
-          setToken(null);
-          setUser(null);
-          setSessionMode('guest');
-          setSessionRestoreError('O servidor emitiu uma sessão, mas não foi possível validá-la agora. A sessão foi mantida neste aparelho; verifique a conexão e tente novamente.');
-          if (!tokenWasStored) {
-            setSessionRestoreError('Não foi possível salvar ou validar a sessão neste aparelho. Verifique a conexão e tente entrar novamente.');
-          }
-        }
+        await clearSession();
       }
       return {
         ok: false,
@@ -201,8 +159,8 @@ export function useAuthSession() {
   }, [isAuthenticated]);
 
   return {
-    isLoading, isAuthenticated, token, user, sessionMode, sessionVersion, sessionRestoreError,
+    isLoading, isAuthenticated, token, user, sessionMode, sessionVersion,
     currentUserName, currentUserEmail, clearSession, logout, continueAsGuest,
-    retrySessionRestore, signIn, registerUser, updateProfile,
+    signIn, registerUser, updateProfile,
   };
 }

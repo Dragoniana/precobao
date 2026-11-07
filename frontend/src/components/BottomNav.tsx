@@ -1,14 +1,11 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { usePathname, useRouter } from 'expo-router';
-import { Platform, Pressable, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, View } from 'react-native';
 
-import { radius, spacing } from '../theme';
-import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
+import { palette, radius, spacing } from '../theme';
 
 export function BottomNav() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const router = useRouter();
   const navigation = useNavigation<any>();
   const pathname = usePathname();
@@ -67,7 +64,7 @@ export function BottomNav() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   wrapper: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -79,7 +76,7 @@ const useStyles = createThemedStyles((palette) => ({
     paddingTop: spacing.sm,
     paddingBottom: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: palette.border,
+    borderTopColor: '#E4E4E4',
   },
   wrapperWeb: {
     width: '100%',
@@ -90,7 +87,7 @@ const useStyles = createThemedStyles((palette) => ({
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: '#E4E4E4',
     borderRadius: radius.pill,
     backgroundColor: palette.surface,
   },
@@ -100,7 +97,7 @@ const useStyles = createThemedStyles((palette) => ({
     borderRadius: radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: '#ECECEC',
   },
   iconButtonActive: {
     backgroundColor: palette.primarySoft,
@@ -111,9 +108,9 @@ const useStyles = createThemedStyles((palette) => ({
     borderRadius: radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: '#E5E5E5',
   },
   homeButtonActive: {
     backgroundColor: palette.primary,
   },
-}));
+});

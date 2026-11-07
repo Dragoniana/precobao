@@ -1,8 +1,9 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import {
   Platform,
   Pressable,
+  StyleSheet,
   Text,
   TextInput,
   TextInputProps,
@@ -10,8 +11,7 @@ import {
   View,
 } from 'react-native';
 
-import { radius, spacing } from '../theme';
-import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
+import { palette, radius, shadow, spacing } from '../theme';
 
 type SearchBarProps = {
   value: string;
@@ -33,8 +33,6 @@ export function SearchBar({
   placeholder = 'Buscar medicamento ou princípio ativo',
   ...textInputProps
 }: SearchBarProps) {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const isWeb = Platform.OS === 'web';
   const { width } = useWindowDimensions();
   const isCompact = width <= 480;
@@ -93,7 +91,7 @@ export function SearchBar({
   );
 }
 
-const useStyles = createThemedStyles((palette, shadow) => ({
+const styles = StyleSheet.create({
   row: {
     width: '100%',
     flexDirection: 'row',
@@ -197,8 +195,8 @@ const useStyles = createThemedStyles((palette, shadow) => ({
   },
 
   filterText: {
-    color: palette.onPrimary,
+    color: palette.surface,
     fontSize: 14,
     fontWeight: '800',
   },
-}));
+});

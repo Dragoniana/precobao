@@ -1,7 +1,6 @@
-import { Pressable, Text } from 'react-native';
+import { Pressable, StyleSheet, Text } from 'react-native';
 
-import { radius, spacing } from '../theme';
-import { createThemedStyles } from '../context/ThemeContext';
+import { palette, radius, spacing } from '../theme';
 
 type FilterChipProps = {
   label: string;
@@ -12,7 +11,6 @@ type FilterChipProps = {
 };
 
 export function FilterChip({ label, active, onPress, accessibilityLabel, compact = false }: FilterChipProps) {
-  const styles = useStyles();
   return (
     <Pressable
       accessibilityRole="button"
@@ -26,7 +24,7 @@ export function FilterChip({ label, active, onPress, accessibilityLabel, compact
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   chip: {
     minHeight: 40,
     borderRadius: radius.pill,
@@ -60,7 +58,7 @@ const useStyles = createThemedStyles((palette) => ({
     lineHeight: 19,
   },
   labelActive: {
-    color: palette.onPrimary,
+    color: palette.surface,
     fontWeight: '600',
   },
-}));
+});

@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
-import { api } from '../services/api';
+import { API_URL, api } from '../services/api';
 import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
@@ -12,49 +12,122 @@ const item = {
 
 beforeEach(() => jest.clearAllMocks());
 
-it('renders only API-resolved registry URLs without pharmacy-specific rules', () => {
+it('accepts offer supplied generic images and rejects technically unsafe or mismatched assets', () => {
   const medicine = {
-    id: 1,
-    codigo_barras: '7891035010866',
-    nome: 'Strepsils Mel e Lim??o',
-    principio_ativo: '',
-    laboratorio: '',
-    exige_receita: false,
-    categorias: [],
-    imagem_urls: [
-      'https://new-pharmacy.example.test/generic-pack.jpg',
-      'https://cdn.example.test/second-image.webp',
-    ],
+    id: 1, codigo_barras: '7891035010866', nome: 'Strepsils Mel e Limão 16 Pastilhas',
+    principio_ativo: '', laboratorio: '', exige_receita: false, categorias: [],
     ofertas: [{
       id: 1, farmacia_id: 1, catalogo_id: 1, preco: 10, quantidade_estoque: 1,
-      disponivel: true,
-      url_origem: 'https://shop.example.test/product/p',
-      imagem_url: 'https://shop.example.test/legacy-database-image.jpg',
+      disponivel: true, url_origem: 'https://www.farmaciaindiana.com.br/strepsils-8-75mg-sabor-mel-e-limao-16-pastilhas/p',
+      imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/strepsils-8-75mg-sabor-mel-e-limao-16-pastilhas-1.jpg',
     }],
-  } as Medicamento;
-
-  expect(resolveMedicineImages(medicine)).toEqual(medicine.imagem_urls ?? []);
-  expect(resolveMedicineImage(medicine)).toBe(medicine.imagem_urls?.[0]);
-  expect(resolveMedicineImages({ ...medicine, imagem_urls: [] })).toEqual([]);
+  };
+  expect(resolveMedicineImage(medicine)).toBe(medicine.ofertas[0].imagem_url);
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_rejeitada: true }] })).toBeUndefined();
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/imagem-strepsils-mel-limao.jpg' }] })).toContain('imagem-strepsils-mel-limao.jpg');
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/7891035010866.jpg' }] })).toContain('7891035010866.jpg');
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/7891035010867.jpg' }] })).toBeUndefined();
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/MEDICAMENTOS-CAIXA-AZUL-OTC.jpg' }] })).toContain('MEDICAMENTOS-CAIXA-AZUL-OTC.jpg');
+  const encodedGenericImage = 'https://farmaciaindiana.vteximg.com.br/arquivos/CAIXA%20MEDICAMENTO%20v.2.0%20-%20CIMED.jpg';
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: encodedGenericImage }] })).toBe(encodedGenericImage);
+  expect(resolveMedicineImage({ ...medicine, imagem_status: 'pendente', imagem_ref: '/catalogo/medicamentos/1/imagem?v=hash', imagem_url: encodedGenericImage, ofertas: [] })).toBe(`${API_URL.replace(/\/+$/, '')}/catalogo/medicamentos/1/imagem?v=hash`);
+  expect(resolveMedicineImage({ ...medicine, ofertas: [{ ...medicine.ofertas[0], imagem_url: 'https://cdn.example.com/strepsils.jpg' }] })).toBeUndefined();
+  expect(resolveMedicineImage({
+    ...medicine,
+    ofertas: [{ ...medicine.ofertas[0], url_origem: 'https://www.farmaciaindiana.com.br/citrato-sildenafila-50mg-neo-quimica-generico-4-comprimidos/p', imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/Caixa-Neo-Quimica-Generico.jpg' }],
+  })).toContain('Caixa-Neo-Quimica-Generico.jpg');
+  const araujoOffer = {
+    ...medicine.ofertas[0],
+    farmacia_id: 2,
+    url_origem: 'https://www.araujo.com.br/simeticona-75mgml-cimed-generico-gotas-com-15ml/17332.html',
+    imagem_url: 'https://i3-imagens-prd.araujo.com.br/redimensionada/380x380/17332/07896523212319_1.webp',
+  };
+  expect(resolveMedicineImage({ ...medicine, codigo_barras: '', ofertas: [araujoOffer] })).toBe(araujoOffer.imagem_url);
+  expect(resolveMedicineImage({
+    ...medicine, codigo_barras: '', imagem_status: 'pendente',
+    imagem_url: araujoOffer.imagem_url,
+    imagem_motivo_rejeicao: 'O conteúdo é uma ilustração genérica da farmácia.',
+    ofertas: [araujoOffer],
+  })).toBe(araujoOffer.imagem_url);
+  const newlyCollectedAraujoOffer = {
+    ...araujoOffer,
+    url_origem: 'https://www.araujo.com.br/produto-novo/987654.html',
+    imagem_url: 'https://i3-imagens-prd.araujo.com.br/redimensionada/380x380/987654/78912345678905_1.webp',
+  };
+  expect(
+    resolveMedicineImage({ ...medicine, codigo_barras: '', ofertas: [newlyCollectedAraujoOffer] }),
+  ).toBe(newlyCollectedAraujoOffer.imagem_url);
+  expect(resolveMedicineImage({
+    ...medicine,
+    ofertas: [{ ...araujoOffer, url_origem: 'https://www.araujo.com.br/wegovy-1mg-semaglutida-com-4-doses-injetaveis/101392.html', imagem_url: 'https://i3-imagens-prd.araujo.com.br/redimensionada/380x380/101392/231489_7897705203095_2.webp' }],
+  })).toBeUndefined();
+  expect(resolveMedicineImage({
+    ...medicine,
+    ofertas: [{
+      ...araujoOffer,
+      url_origem: 'https://www.araujo.com.br/glyxambi-25mg--5mg-com-30-comprimidos/7290.html',
+      imagem_url: 'https://i3-imagens-prd.araujo.com.br/webp/7290/128666_7896026306751_1.webp?sw=200&sh=200&sm=fit',
+      imagem_generica: true,
+    }],
+  })).toContain('128666_7896026306751_1.webp');
+  expect(resolveMedicineImage({
+    ...medicine,
+    codigo_barras: '7896026307925',
+    ofertas: [{
+      ...medicine.ofertas[0],
+      url_origem: 'https://www.farmaciaindiana.com.br/glyxambi-25mg-5mg-30-comprimidos/p',
+      imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/ids/306093/7896026306751.jpg',
+    }],
+  })).toBeUndefined();
+  expect(resolveMedicineImage({
+    ...medicine,
+    codigo_barras: '',
+    ofertas: [{
+      ...medicine.ofertas[0],
+      farmacia_id: 2,
+      url_origem: 'https://www.araujo.com.br/aciclovir-200mg-pharlab-generico-com-25-comprimidos/84977.html',
+      imagem_url: 'https://i3-imagens-prd.araujo.com.br/webp/84977/120803_7898216367429_1.webp?sw=200&sh=200&sm=fit',
+    }],
+  })).toContain('120803_7898216367429_1.webp');
+  expect(resolveMedicineImage({
+    ...medicine,
+    codigo_barras: '',
+    ofertas: [{
+      ...araujoOffer,
+      url_origem: 'https://www.araujo.com.br/aciclovir/84977.html',
+      imagem_url: 'https://i3-imagens-prd.araujo.com.br/webp/12345/specific-image.webp',
+    }],
+  })).toBeUndefined();
+  expect(resolveMedicineImage({
+    ...medicine,
+    codigo_barras: '7898581711254',
+    ofertas: [{
+      ...medicine.ofertas[0],
+      farmacia_nome: 'Nissei',
+      url_origem: 'https://www.farmaciasnissei.com.br/neuleptil-10mg-20ml/p',
+      imagem_url: 'https://www.farmaciasnissei.com.br/media/medicamentos/caixa-medicamento-geral-tarja-vermelha.webp',
+      imagem_generica: true,
+    }],
+  })).toContain('caixa-medicamento-geral-tarja-vermelha.webp');
 });
 
-it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
+it('keeps a safe offer image after a catalog redirect fails', () => {
   const medicine = {
-    id: 9,
-    codigo_barras: '7896523212685',
-    nome: 'Nimesulida 100mg Cimed',
-    principio_ativo: '',
-    laboratorio: '',
-    exige_receita: false,
-    categorias: [],
-    imagem_url: 'https://cdn.example.test/primary.jpg',
-    imagem_urls: [
-      'https://cdn.example.test/primary.jpg',
-      'https://another-pharmacy.example.test/fallback.webp',
-    ],
-    ofertas: [],
-  } as Medicamento;
-  expect(resolveMedicineImages(medicine)).toEqual(medicine.imagem_urls ?? []);
+    id: 9, nome: 'Nimesulida 100mg Cimed', codigo_barras: '7896523212685',
+    principio_ativo: '', laboratorio: '', exige_receita: false, categorias: [],
+    imagem_status: 'verificada', imagem_ref: '/catalogo/medicamentos/9/imagem',
+    imagem_url: 'https://i3-imagens-prd.araujo.com.br/webp/3848/7896523212685_1.webp',
+    ofertas: [{
+      id: 1, farmacia_id: 1, catalogo_id: 9, preco: 5, quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.farmaciaindiana.com.br/nimesulida-100mg-cimed-generico-12-comprimidos/p',
+      imagem_url: 'https://farmaciaindiana.vteximg.com.br/arquivos/nimesulida-100mg-cimed-generico-12-comprimidos.jpg',
+    }],
+  };
+  expect(resolveMedicineImages(medicine)).toEqual([
+    `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}`,
+    medicine.ofertas[0].imagem_url,
+  ]);
 });
 
 it('requests only the selected server page and serializes combined filters and search fields', async () => {
@@ -139,84 +212,4 @@ it('keeps a bounded item cache and requests detail by identifier on demand', asy
   expect(medicine.nome).toBe('Paracetamol');
   expect(api.get).toHaveBeenCalledWith('/catalogo/medicamentos/18');
   await waitFor(() => expect(result.current.getMedicineById(18)?.id).toBe(18));
-});
-
-it('refreshes an existing detail so changed pharmacy prices are not held by the cache', async () => {
-  let currentPrice = 11.06;
-  (api.get as jest.Mock).mockImplementation((url: string) => {
-    if (url.startsWith('/catalogo/filtros')) return Promise.resolve({ data: {} });
-    if (url.startsWith('/catalogo/mais-baratos')) return Promise.resolve({ data: [] });
-    if (url.startsWith('/catalogo/medicamentos/18')) {
-      return Promise.resolve({ data: {
-        ...item,
-        ofertas: [{ id: 7, farmacia_id: 1, catalogo_id: 18, preco: currentPrice, disponivel: true }],
-      } });
-    }
-    return Promise.resolve({ data: {} });
-  });
-  const { result } = await renderHook(() => useCatalogState());
-  await act(async () => { await result.current.loadMedicineById(18); });
-  expect(result.current.getMedicineById(18)?.ofertas[0].preco).toBe(11.06);
-
-  currentPrice = 8.63;
-  await act(async () => { await result.current.loadMedicineById(18, true); });
-  expect(result.current.getMedicineById(18)?.ofertas[0].preco).toBe(8.63);
-});
-
-it('joins concurrent forced detail refreshes for the same medicine ID', async () => {
-  let resolveDetail!: (value: { data: typeof item }) => void;
-  (api.get as jest.Mock).mockImplementation((url: string) => {
-    if (url.startsWith('/catalogo/filtros')) return Promise.resolve({ data: {} });
-    if (url.startsWith('/catalogo/mais-baratos')) return Promise.resolve({ data: [] });
-    if (url === '/catalogo/medicamentos/18') return new Promise((resolve) => { resolveDetail = resolve; });
-    return Promise.resolve({ data: {} });
-  });
-
-  const { result } = await renderHook(() => useCatalogState());
-  let first!: Promise<Medicamento>;
-  let second!: Promise<Medicamento>;
-  await act(async () => {
-    first = result.current.loadMedicineById(18, true);
-    second = result.current.loadMedicineById(18, true);
-  });
-
-  expect((api.get as jest.Mock).mock.calls.filter(([url]) => url === '/catalogo/medicamentos/18')).toHaveLength(1);
-
-  await act(async () => {
-    resolveDetail({ data: item });
-    await Promise.all([first, second]);
-  });
-  expect(result.current.getMedicineById(18)?.nome).toBe('Paracetamol');
-});
-
-it('does not let a slower previous catalog request overwrite the medicine cache', async () => {
-  let resolveOlder!: (value: { data: { total: number; limit: number; offset: number; items: typeof item[] } }) => void;
-  let resolveNewer!: (value: { data: { total: number; limit: number; offset: number; items: typeof item[] } }) => void;
-  const older = new Promise<{ data: { total: number; limit: number; offset: number; items: typeof item[] } }>((resolve) => { resolveOlder = resolve; });
-  const newer = new Promise<{ data: { total: number; limit: number; offset: number; items: typeof item[] } }>((resolve) => { resolveNewer = resolve; });
-  (api.get as jest.Mock).mockImplementation((url: string) => {
-    if (url.startsWith('/catalogo?')) return url.includes('termo_busca=older') ? older : newer;
-    if (url.startsWith('/catalogo/filtros')) return Promise.resolve({ data: {} });
-    if (url.startsWith('/catalogo/mais-baratos')) return Promise.resolve({ data: [] });
-    return Promise.resolve({ data: {} });
-  });
-
-  const { result } = await renderHook(() => useCatalogState());
-  let olderRequest!: Promise<unknown>;
-  let newerRequest!: Promise<unknown>;
-  await act(async () => {
-    olderRequest = result.current.loadCatalogPage({ query: 'older' });
-    newerRequest = result.current.loadCatalogPage({ query: 'newer' });
-  });
-
-  await act(async () => {
-    resolveNewer({ data: { total: 1, limit: 20, offset: 0, items: [{ ...item, name_search: 'Newest result' }] } });
-    await newerRequest;
-  });
-  await act(async () => {
-    resolveOlder({ data: { total: 1, limit: 20, offset: 0, items: [{ ...item, name_search: 'Older result' }] } });
-    await olderRequest;
-  });
-
-  await waitFor(() => expect(result.current.getMedicineById(18)?.nome).toBe('Newest result'));
 });

@@ -1,10 +1,11 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Linking,
   Platform,
   Pressable,
+  StyleSheet,
   Text,
   useWindowDimensions,
   View,
@@ -16,9 +17,7 @@ import { Screen } from '../../../components/Screen';
 import { SearchBar } from '../../../components/SearchBar';
 import { useCatalogContext, useFavoritesContext, useSessionContext } from '../../../context/AppContext';
 import { getLaboratoryDisplayName } from '../../../services/catalog';
-import { finishMedicineOpenTrace, markMedicineOpenTrace } from '../../../services/medicineOpenPerformance';
-import { radius, spacing } from '../../../theme';
-import { createThemedStyles, useAppTheme } from '../../../context/ThemeContext';
+import { palette, radius, spacing } from '../../../theme';
 import { Medicamento, Oferta } from '../../../types/api';
 
 type OfertaComExtras = Oferta & {
@@ -30,47 +29,26 @@ type OfertaComExtras = Oferta & {
 };
 
 function getOfferPrice(offer?: Oferta) {
-  if (!offer || offer.preco === null || offer.preco === undefined || offer.preco === '') return Infinity;
-  const price = Number(offer.preco);
-  return Number.isFinite(price) && price > 0 ? price : Infinity;
+  if (!offer) return Infinity;
+  return Number(offer.preco);
 }
 
-/** Keep the cheapest current offer from each pharmacy for this exact catalog medicine. */
-export function getComparableOffers(offers: Oferta[] = []) {
-  const cheapestByPharmacy = new Map<string, Oferta>();
-
-  for (const offer of offers) {
-    const price = getOfferPrice(offer);
-    if (offer.disponivel === false || !Number.isFinite(price)) continue;
-
-    const pharmacyName = getPharmacyName(offer as OfertaComExtras).trim();
-    const pharmacyKey = offer.farmacia_id
-      ? `id:${offer.farmacia_id}`
-      : `name:${pharmacyName.toLocaleLowerCase()}`;
-    const current = cheapestByPharmacy.get(pharmacyKey);
-    if (!current || price < getOfferPrice(current)) cheapestByPharmacy.set(pharmacyKey, offer);
-  }
-
-  return [...cheapestByPharmacy.values()].sort((a, b) => getOfferPrice(a) - getOfferPrice(b));
-}
-
-export function formatPrice(value?: number) {
+function formatPrice(value?: number) {
   if (value === undefined || !Number.isFinite(value)) {
     return 'Sem preço';
   }
 
-  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  return `R$ ${value.toFixed(2).replace('.', ',')}`;
 }
 
-export function normalizeOfferUrl(url?: string) {
+function normalizeUrl(url?: string) {
   if (!url) return '';
 
-  const trimmedUrl = url.trim();
-  if (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://')) {
-    return trimmedUrl;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
   }
 
-  return `https://${trimmedUrl}`;
+  return `https://${url}`;
 }
 
 function getPharmacyName(offer: OfertaComExtras) {
@@ -82,17 +60,7 @@ function getPharmacyName(offer: OfertaComExtras) {
   );
 }
 
-export function getMedicineDetails(medicine?: Medicamento, laboratoryName?: string) {
-  return [
-    { label: 'Princ\u00edpio ativo', value: medicine?.principio_ativo },
-    { label: 'Laborat\u00f3rio', value: laboratoryName || medicine?.laboratorio },
-    { label: 'C\u00f3digo de barras', value: medicine?.codigo_barras },
-  ].filter((item): item is { label: string; value: string } => Boolean(item.value?.trim()));
-}
-
 export default function MedicineDetailScreen() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string | string[] }>();
 
@@ -115,39 +83,32 @@ export default function MedicineDetailScreen() {
     return Number.isFinite(parsedId) ? parsedId : null;
   }, [params.id]);
 
-  const cachedMedicine = medicineId === null ? undefined : getMedicineById(medicineId);
-  const medicine = loadedMedicine?.id === medicineId ? loadedMedicine : cachedMedicine;
-  const hasMedicine = Boolean(medicine);
+  const cachedMedicine = useMemo(() => {
+    if (medicineId === null) {
+      return undefined;
+    }
+
+    return getMedicineById(medicineId);
+  }, [getMedicineById, medicineId]);
+
+  const medicine = cachedMedicine || loadedMedicine;
 
   useEffect(() => {
     let active = true;
-    if (medicineId !== null) markMedicineOpenTrace(medicineId, 'detail-mounted');
     if (medicineId === null) {
       setLoadedMedicine(undefined);
       setLoadingMedicine(false);
       return;
     }
+    setLoadedMedicine(undefined);
     setMedicineLoadError(false);
     setLoadingMedicine(true);
-    loadMedicineById(medicineId, true).then((item) => {
+    loadMedicineById(medicineId).then((item) => {
       if (active) { setLoadedMedicine(item); setMedicineLoadError(false); }
     }).catch(() => { if (active) setMedicineLoadError(true); })
       .finally(() => { if (active) setLoadingMedicine(false); });
     return () => { active = false; };
   }, [loadMedicineById, medicineId]);
-
-  useEffect(() => {
-    if (medicineId === null) return;
-    markMedicineOpenTrace(medicineId, hasMedicine ? 'content-committed' : 'loading-shell-committed');
-  }, [hasMedicine, medicine?.id, medicineId]);
-
-  useEffect(() => {
-    if (medicineId === null || !medicine) return;
-    markMedicineOpenTrace(medicineId, loadedMedicine?.id === medicineId ? 'content-usable' : 'cached-content-usable');
-    if (!loadingMedicine && (loadedMedicine?.id === medicineId || medicineLoadError)) {
-      finishMedicineOpenTrace(medicineId, 'content-ready');
-    }
-  }, [loadedMedicine, loadingMedicine, medicine, medicineId, medicineLoadError]);
 
   useEffect(() => {
     if (medicineId !== null) {
@@ -160,7 +121,7 @@ export default function MedicineDetailScreen() {
       return [];
     }
 
-    return getComparableOffers(medicine.ofertas);
+    return medicine.ofertas.filter((offer) => offer.disponivel !== false).sort((a, b) => getOfferPrice(a) - getOfferPrice(b));
   }, [medicine]);
 
   const lowest = offers[0];
@@ -171,9 +132,8 @@ export default function MedicineDetailScreen() {
   const isTablet = isWeb && width >= 850 && width < 1100;
   const laboratoryName = getLaboratoryDisplayName(medicine?.laboratorio);
 
-  const productUrl = normalizeOfferUrl(lowest?.url_origem);
+  const productUrl = normalizeUrl(lowest?.url_origem);
   const lowestPrice = lowest ? Number(lowest.preco) : undefined;
-  const medicineDetails = getMedicineDetails(medicine, laboratoryName);
 
 
   const handleToggleFavorite = () => {
@@ -188,7 +148,7 @@ export default function MedicineDetailScreen() {
   };
 
   const handleOpenProductSite = async (url?: string) => {
-    const normalized = normalizeOfferUrl(url);
+    const normalized = normalizeUrl(url);
 
     if (!normalized) {
       return;
@@ -205,6 +165,10 @@ export default function MedicineDetailScreen() {
     }
   };
 
+  if (!medicine && loadingMedicine) {
+    return <Screen><View style={styles.notFoundBox}><Text style={styles.notFoundText}>Carregando medicamento...</Text></View></Screen>;
+  }
+
   if (!medicine) {
     return (
       <Screen>
@@ -215,22 +179,13 @@ export default function MedicineDetailScreen() {
           onBack={() => router.back()}
         />
 
-        {loadingMedicine ? (
-          <View style={styles.loadingDetail} accessibilityRole="progressbar" accessibilityLabel="Carregando detalhes do medicamento">
-            <View style={styles.loadingImage} />
-            <View style={styles.loadingLine} />
-            <View style={styles.loadingLineShort} />
-            <Text style={styles.notFoundText}>Carregando detalhes do medicamento...</Text>
-          </View>
-        ) : (
-          <View style={styles.notFoundBox}>
-            <Ionicons name="alert-circle-outline" size={42} color={palette.primary} />
-            <Text style={styles.notFoundTitle}>Medicamento não encontrado</Text>
-            <Text style={styles.notFoundText}>
-              {medicineLoadError ? 'Não foi possível carregar este medicamento. Verifique a conexão e tente novamente.' : 'Esse medicamento não foi encontrado no catálogo.'}
-            </Text>
-          </View>
-        )}
+        <View style={styles.notFoundBox}>
+          <Ionicons name="alert-circle-outline" size={42} color={palette.primary} />
+          <Text style={styles.notFoundTitle}>Medicamento não encontrado</Text>
+          <Text style={styles.notFoundText}>
+            {medicineLoadError ? 'Não foi possível carregar este medicamento. Verifique a conexão e tente novamente.' : 'Esse medicamento não foi encontrado no catálogo.'}
+          </Text>
+        </View>
       </Screen>
     );
   }
@@ -245,126 +200,136 @@ export default function MedicineDetailScreen() {
       />
 
       <View style={[styles.layout, isDesktop && styles.layoutDesktop]}>
-        <View style={[styles.mainColumn, isDesktop && styles.mainColumnDesktop]}>
-          <View style={[styles.productOverview, isDesktop && styles.productOverviewDesktop]}>
-            <MedicineImage medicine={medicine} style={[styles.imageCard, isTablet && styles.imageCardTablet, isDesktop && styles.imageCardDesktop]} onLoad={() => markMedicineOpenTrace(medicine.id, 'image-loaded')} />
+        <View style={styles.mainColumn}>
+          <MedicineImage medicine={medicine} style={[styles.imageCard, isTablet && styles.imageCardTablet, isDesktop && styles.imageCardDesktop]} />
 
-            <View style={[styles.detailsColumn, isDesktop && styles.detailsColumnDesktop]}>
-              <View style={[styles.headerRow, isDesktop && styles.headerRowDesktop]}>
-                <View style={styles.infoBlock}>
-                  <Text accessibilityRole="header" style={[styles.name, isDesktop && styles.nameDesktop]}>
-                    {medicine.nome}
-                  </Text>
-                  {lowest ? <Text style={[styles.price, isDesktop && styles.priceDesktop]}>{formatPrice(lowestPrice)}</Text> : null}
-                  <Text style={styles.lowestStoreText}>
-                    {lowest
-                      ? `Menor pre\u00e7o em ${getPharmacyName(lowest as OfertaComExtras)}`
-                      : 'Nenhuma oferta dispon\u00edvel'}
-                  </Text>
-                  {loadingMedicine ? <Text style={styles.refreshStatus}>Atualizando ofertas...</Text> : null}
-                  {medicineLoadError ? <Text style={styles.refreshStatus}>Exibindo dados anteriores; não foi possível atualizar as ofertas.</Text> : null}
-                </View>
-
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={isFavorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
-                  accessibilityState={{ selected: isFavorite }}
-                  style={styles.favoriteButton}
-                  onPress={handleToggleFavorite}
-                >
-                  <Ionicons
-                    name={isFavorite ? 'heart' : 'heart-outline'}
-                    size={24}
-                    color={isFavorite ? palette.danger : palette.text}
-                  />
-                </Pressable>
-              </View>
-
-              {medicineDetails.length > 0 ? (
-                <View style={styles.descriptionSection}>
-                  <Text style={styles.sectionLabel}>{'Sobre o medicamento'}</Text>
-                  <View style={styles.descriptionBox}>
-                    {medicineDetails.map((item) => (
-                      <View key={item.label} style={styles.descriptionRow}>
-                        <Text style={styles.descriptionLabel}>{item.label}</Text>
-                        <Text style={styles.descriptionValue}>{item.value}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-
-              <View style={styles.buttonGroup}>
-                <Pressable
-                  accessibilityRole="link"
-                  style={[styles.siteButton, !productUrl && styles.disabledButton]}
-                  disabled={!productUrl}
-                  onPress={() => handleOpenProductSite(productUrl)}
-                >
-                  <Ionicons name="open-outline" size={19} color={palette.surface} />
-                  <Text style={styles.siteButtonText}>{'Ir para o site do rem\u00e9dio'}</Text>
-                </Pressable>
-
-                <Pressable
-                  accessibilityRole="button"
-                  style={styles.historyButton}
-                  onPress={() => router.push(`/history/${medicine.id}`)}
-                >
-                  <Ionicons name="stats-chart-outline" size={19} color={palette.primary} />
-                  <Text style={styles.historyButtonText}>{'Ver hist\u00f3rico de pre\u00e7os'}</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        <View style={[styles.offersPanel, isDesktop && styles.offersPanelDesktop]}>
-          <View style={styles.offersHeader}>
-            <Text style={styles.offersTitle}>Compare preços nas farmácias</Text>
-            {offers.length > 0 ? (
-              <Text style={styles.offersSubtitle}>
-                {offers.length === 1 ? 'Encontramos esta oferta para o medicamento.' : `${offers.length} farmácias disponíveis`}
+          <View style={styles.headerRow}>
+            <View style={styles.infoBlock}>
+              <Text numberOfLines={3} ellipsizeMode="tail" style={[styles.name, isDesktop && styles.nameDesktop]}>
+                {medicine.nome}
               </Text>
-            ) : null}
+
+              {lowest ? <Text style={[styles.price, isDesktop && styles.priceDesktop]}>{formatPrice(lowestPrice)}</Text> : null}
+
+              {lowest ? (
+                <Text style={styles.lowestStoreText}>
+                  Menor preço em {getPharmacyName(lowest as OfertaComExtras)}
+                </Text>
+              ) : (
+                <Text style={styles.lowestStoreText}>Nenhuma oferta disponível</Text>
+              )}
+            </View>
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={isFavorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+              accessibilityState={{ selected: isFavorite }}
+              style={styles.favoriteButton}
+              onPress={handleToggleFavorite}
+            >
+              <Ionicons
+                name={isFavorite ? 'heart' : 'heart-outline'}
+                size={30}
+                color={isFavorite ? palette.danger : palette.text}
+              />
+            </Pressable>
           </View>
 
-          {offers.length === 0 ? (
-            <Text style={styles.emptyOffers}>Nenhuma oferta com preço atual disponível no momento.</Text>
-          ) : (
-            <View style={styles.offersList}>
-              {offers.map((offer, index) => {
-                const pharmacyName = getPharmacyName(offer as OfertaComExtras);
-                const offerUrl = normalizeOfferUrl(offer.url_origem);
-                const updatedAt = offer.atualizado_em;
-                const updatedDate = updatedAt ? new Date(updatedAt) : null;
-                const formattedDate = updatedDate && !Number.isNaN(updatedDate.getTime())
-                  ? updatedDate.toLocaleDateString('pt-BR')
-                  : null;
-                const isLowest = index === 0;
+          <Text style={styles.sectionLabel}>Descrição</Text>
 
-                return (
-                  <View key={offer.id} style={[styles.offerRow, isLowest && styles.offerRowLowest]}>
-                    <View style={styles.offerLeft}>
-                      <View style={styles.offerInfo}>
-                        <View style={styles.offerNameRow}>
-                          <Text style={styles.offerName} numberOfLines={2}>{pharmacyName}</Text>
-                          {isLowest ? <Text style={styles.bestPriceBadge}>Menor preço</Text> : null}
-                        </View>
-                        <Text style={styles.offerPrice}>{formatPrice(getOfferPrice(offer))}</Text>
-                        {formattedDate ? <Text style={styles.offerUpdated}>Atualizado em {formattedDate}</Text> : null}
-                      </View>
-                    </View>
-                    {offerUrl ? (
-                      <Pressable accessibilityRole="link" style={styles.offerSiteButton} onPress={() => handleOpenProductSite(offerUrl)}>
-                        <Text style={styles.offerSiteButtonText}>Ver oferta</Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-                );
-              })}
-            </View>
-          )}
+          <View style={styles.descriptionBox}>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              Princípio ativo: {medicine.principio_ativo || 'Não informado'}
+            </Text>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              Laboratório: {laboratoryName || 'Não informado'}
+            </Text>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              Código de barras: {medicine.codigo_barras || 'Não informado'}
+            </Text>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              {medicine.categoria_regulatoria
+                ? `Categoria ANVISA: ${medicine.categoria_regulatoria}.`
+                : 'Categoria regulatória não confirmada pela ANVISA.'}
+            </Text>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              {medicine.referencia_anvisa === true
+                ? 'Consta na lista ANVISA de medicamentos de referência.'
+                : medicine.referencia_anvisa === false
+                  ? 'Não consta na lista ANVISA de medicamentos de referência.'
+                  : 'Status como medicamento de referência não confirmado.'}
+            </Text>
+            <Text style={[styles.description, isDesktop && styles.descriptionDesktop]}>
+              {medicine.exige_receita_confirmada === true
+                ? 'Receita confirmada na fonte CMED consultada.'
+                : medicine.exige_receita_confirmada === false
+                  ? 'Venda sem receita confirmada na fonte consultada.'
+                  : 'Exigência de receita não confirmada na fonte consultada.'}
+            </Text>
+          </View>
+
+          <View style={styles.buttonGroup}>
+            <Pressable
+              style={[
+                styles.siteButton,
+                !productUrl && styles.disabledButton,
+                isDesktop && styles.actionButtonDesktop,
+              ]}
+              disabled={!productUrl}
+              onPress={() => handleOpenProductSite(productUrl)}
+            >
+              <Ionicons name="open-outline" size={20} color={palette.surface} />
+              <Text style={styles.siteButtonText}>Ir para o site do remédio</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.historyButton, isDesktop && styles.actionButtonDesktop]}
+              onPress={() => router.push(`/history/${medicine.id}`)}
+            >
+              <Ionicons name="stats-chart-outline" size={20} color={palette.primary} />
+              <Text style={styles.historyButtonText}>Ver histórico de preços</Text>
+            </Pressable>
+          </View>
         </View>
+
+        {offers.length !== 1 ? <View style={[styles.offersPanel, isDesktop && styles.offersPanelDesktop]}>
+          {offers.length > 1 ? (
+            <View style={styles.offersHeader}>
+              <Text style={styles.offersTitle}>Comparar ofertas</Text>
+              <Text style={styles.offersSubtitle}>{offers.length} farmácias disponíveis</Text>
+            </View>
+          ) : null}
+
+          {lowest ? (
+            <View style={styles.lowestBox}>
+              <Text style={styles.lowestLabel}>Menor preço</Text>
+              <Text style={styles.lowestPharmacy}>{getPharmacyName(lowest as OfertaComExtras)}</Text>
+              <Text style={styles.lowestPrice}>{formatPrice(Number(lowest.preco))}</Text>
+            </View>
+          ) : (
+            <Text style={styles.emptyOffers}>Nenhuma oferta disponível no momento.</Text>
+          )}
+
+          {offers.length > 1 ? <View style={styles.offersList}>
+            {offers.slice(1).map((offer) => {
+              const pharmacyName = getPharmacyName(offer as OfertaComExtras);
+              const offerUrl = normalizeUrl(offer.url_origem);
+              return (
+                <View key={offer.id} style={styles.offerRow}>
+                  <View style={styles.offerLeft}>
+                    <View style={styles.offerInfo}>
+                      <Text style={styles.offerName} numberOfLines={1}>{pharmacyName}</Text>
+                      <Text style={styles.offerPrice}>{formatPrice(Number(offer.preco))}</Text>
+                    </View>
+                  </View>
+                  <Pressable style={[styles.offerSiteButton, !offerUrl && styles.disabledSmallButton]} disabled={!offerUrl} onPress={() => handleOpenProductSite(offerUrl)}>
+                    <Text style={styles.offerSiteButtonText}>Abrir site</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View> : null}
+        </View> : null}
       </View>
 
       <AuthRequiredModal
@@ -375,86 +340,123 @@ export default function MedicineDetailScreen() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
-  layout: { marginTop: spacing.md, gap: spacing.lg },
-  layoutDesktop: { flexDirection: 'row', alignItems: 'flex-start' },
-  mainColumn: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.md,
+const styles = StyleSheet.create({
+  layout: {
+    marginTop: spacing.md,
+    gap: spacing.xl,
   },
-  mainColumnDesktop: { flex: 1, minWidth: 0, padding: spacing.xl },
-  productOverview: { gap: spacing.lg },
-  productOverviewDesktop: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xl },
-  detailsColumn: { minWidth: 0 },
-  detailsColumnDesktop: { flex: 1 },
+  layoutDesktop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  mainColumn: {
+    flex: 1,
+  },
   imageCard: {
     width: '100%',
-    aspectRatio: 1.55,
+    aspectRatio: 1.35,
     borderRadius: radius.lg,
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: palette.surface,
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
   },
-  imageCardTablet: { aspectRatio: 1.7 },
-  imageCardDesktop: { width: '38%', height: 320, aspectRatio: undefined, maxWidth: 360, flexShrink: 0 },
+  imageCardTablet: {
+    aspectRatio: 1.55,
+  },
+  imageCardDesktop: {
+    height: 340,
+    aspectRatio: undefined,
+    maxWidth: 760,
+  },
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginTop: spacing.xs,
+    marginTop: spacing.lg,
     gap: spacing.md,
   },
-  headerRowDesktop: { marginTop: 0 },
-  infoBlock: { flex: 1, minWidth: 0 },
+  infoBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
   favoriteButton: {
     width: 48,
     height: 48,
-    flexShrink: 0,
-    borderRadius: radius.md,
+    borderRadius: radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: palette.surfaceBlue,
+    backgroundColor: palette.surface,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: '#E8E8E8',
   },
-  name: { fontSize: 24, color: palette.text, fontWeight: '500', marginBottom: spacing.xs },
-  nameDesktop: { fontSize: 32, lineHeight: 38 },
-  price: { fontSize: 24, color: palette.text, fontWeight: '700' },
-  priceDesktop: { fontSize: 30 },
-  lowestStoreText: { marginTop: 8, color: palette.textSoft, fontSize: 14, lineHeight: 20 },
-  descriptionSection: { marginTop: spacing.lg },
-  sectionLabel: { fontSize: 13, fontWeight: '700', color: palette.text, marginBottom: spacing.xs },
-  descriptionBox: { borderTopWidth: 1, borderTopColor: palette.border },
-  descriptionRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: palette.border,
+  name: {
+    fontSize: 24,
+    color: palette.text,
+    fontWeight: '500',
+    marginBottom: spacing.xs,
   },
-  descriptionLabel: { width: 104, flexShrink: 0, color: palette.textSoft, fontSize: 12, lineHeight: 19 },
-  descriptionValue: { flex: 1, minWidth: 0, color: palette.text, fontSize: 13, fontWeight: '500', lineHeight: 19 },
-  buttonGroup: { gap: spacing.md, marginTop: spacing.lg },
+  nameDesktop: {
+    fontSize: 42,
+    lineHeight: 48,
+  },
+  price: {
+    fontSize: 24,
+    color: palette.text,
+    fontWeight: '700',
+  },
+  priceDesktop: {
+    fontSize: 30,
+  },
+  lowestStoreText: {
+    marginTop: 8,
+    color: palette.textSoft,
+    fontSize: 15,
+  },
+  sectionLabel: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: palette.text,
+    marginTop: spacing.xl,
+    marginBottom: spacing.sm,
+  },
+  descriptionBox: {
+    gap: 6,
+    maxWidth: 760,
+  },
+  description: {
+    color: palette.textSoft,
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  descriptionDesktop: {
+    fontSize: 16,
+    lineHeight: 28,
+  },
+  buttonGroup: {
+    gap: spacing.md,
+    marginTop: spacing.xl,
+  },
+  actionButtonDesktop: {
+    maxWidth: 760,
+  },
   siteButton: {
     minHeight: 52,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.md,
+    borderRadius: radius.pill,
     backgroundColor: palette.primary,
     justifyContent: 'center',
     alignItems: 'center',
     flexDirection: 'row',
     gap: spacing.sm,
   },
-  siteButtonText: { color: palette.onPrimary, fontSize: 15, fontWeight: '700' },
+  siteButtonText: {
+    color: palette.surface,
+    fontSize: 16,
+    fontWeight: '700',
+  },
   historyButton: {
     minHeight: 52,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.md,
+    borderRadius: radius.pill,
     backgroundColor: palette.surface,
     borderWidth: 1.5,
     borderColor: palette.primary,
@@ -463,37 +465,67 @@ const useStyles = createThemedStyles((palette) => ({
     flexDirection: 'row',
     gap: spacing.sm,
   },
-  historyButtonText: { color: palette.primary, fontSize: 15, fontWeight: '700' },
-  disabledButton: { backgroundColor: palette.muted },
+  historyButtonText: {
+    color: palette.primary,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  disabledButton: {
+    backgroundColor: palette.muted,
+  },
   offersPanel: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.md,
+    backgroundColor: 'transparent',
+    borderRadius: 0,
+    borderWidth: 0,
+    padding: 0,
   },
   offersPanelDesktop: {
-    width: 360,
-    flexShrink: 0,
-    borderRadius: radius.xl,
-    padding: spacing.lg,
+    width: 390,
     position: 'sticky' as any,
     top: 24,
   },
-  offersHeader: { marginBottom: spacing.sm },
-  offersTitle: { fontSize: 20, fontWeight: '700', color: palette.text, marginBottom: 4 },
-  offersSubtitle: { fontSize: 13, color: palette.textSoft },
+  offersHeader: {
+    marginBottom: spacing.md,
+  },
+  offersTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: palette.text,
+    marginBottom: 4,
+  },
+  offersSubtitle: {
+    fontSize: 13,
+    color: palette.textSoft,
+  },
   emptyOffers: { color: palette.textSoft, fontSize: 14, lineHeight: 21, padding: spacing.md },
-  loadingDetail: { gap: spacing.md, padding: spacing.lg, backgroundColor: palette.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: palette.border },
-  loadingImage: { width: '100%', aspectRatio: 1.7, borderRadius: radius.md, backgroundColor: palette.surfaceAlt },
-  loadingLine: { width: '78%', height: 20, borderRadius: radius.sm, backgroundColor: palette.surfaceAlt },
-  loadingLineShort: { width: '48%', height: 14, borderRadius: radius.sm, backgroundColor: palette.surfaceAlt },
-  refreshStatus: { marginTop: 5, color: palette.textSoft, fontSize: 12, lineHeight: 17 },
-  offersList: { gap: spacing.sm },
-  offerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  lowestBox: {
+    borderRadius: radius.md,
+    backgroundColor: palette.backgroundSoft,
+    borderWidth: 0,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  lowestLabel: {
+    fontSize: 12,
+    color: palette.textSoft,
+    marginBottom: 4,
+  },
+  lowestPharmacy: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: palette.primary,
+    marginBottom: 4,
+  },
+  lowestPrice: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: palette.text,
+  },
+  offersList: {
     gap: spacing.sm,
+  },
+  offerRow: {
+    gap: spacing.md,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xs,
     borderRadius: 0,
@@ -501,25 +533,64 @@ const useStyles = createThemedStyles((palette) => ({
     borderBottomWidth: 1,
     borderBottomColor: palette.border,
   },
-  offerRowLowest: { backgroundColor: palette.surfaceBlue, borderRadius: radius.md, borderBottomWidth: 0, paddingHorizontal: spacing.sm },
-  offerLeft: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, flex: 1, minWidth: 0 },
-  offerInfo: { flex: 1, minWidth: 0 },
-  offerNameRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: spacing.xs, marginBottom: 6 },
-  offerName: { flexShrink: 1, fontSize: 14, color: palette.text, fontWeight: '600' },
-  bestPriceBadge: { overflow: 'hidden', borderRadius: radius.sm, backgroundColor: palette.primary, paddingHorizontal: 7, paddingVertical: 3, color: palette.onPrimary, fontSize: 10, fontWeight: '700' },
-  offerPrice: { fontSize: 20, fontWeight: '700', color: palette.text },
-  offerUpdated: { marginTop: 3, color: palette.textSoft, fontSize: 11 },
+  offerLeft: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    flex: 1,
+    minWidth: 0,
+  },
+  offerDot: {
+    width: 12,
+    height: 12,
+    borderRadius: radius.pill,
+    backgroundColor: palette.primary,
+    marginTop: 5,
+  },
+  offerInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  offerName: {
+    fontSize: 15,
+    color: palette.text,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  offerPrice: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: palette.text,
+  },
   offerSiteButton: {
     minHeight: 38,
-    minWidth: 92,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.sm,
+    borderRadius: radius.pill,
     backgroundColor: palette.primary,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  offerSiteButtonText: { color: palette.onPrimary, fontSize: 13, fontWeight: '700' },
-  notFoundBox: { alignItems: 'center', justifyContent: 'center', paddingVertical: 80, gap: spacing.md },
-  notFoundTitle: { fontSize: 24, color: palette.text, fontWeight: '700' },
-  notFoundText: { fontSize: 15, color: palette.textSoft, textAlign: 'center' },
-}));
+  offerSiteButtonText: {
+    color: palette.surface,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  disabledSmallButton: {
+    backgroundColor: palette.muted,
+  },
+  notFoundBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 80,
+    gap: spacing.md,
+  },
+  notFoundTitle: {
+    fontSize: 24,
+    color: palette.text,
+    fontWeight: '700',
+  },
+  notFoundText: {
+    fontSize: 15,
+    color: palette.textSoft,
+    textAlign: 'center',
+  },
+});

@@ -1,16 +1,8 @@
 import { create } from 'axios';
-import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-import { resolveApiUrl } from './apiConfig';
-
-export const API_URL = resolveApiUrl(
-  process.env.EXPO_PUBLIC_API_URL,
-  Platform.OS,
-  __DEV__,
-  Constants.expoConfig?.hostUri,
-);
+export const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 export const TOKEN_KEY = 'auth_token';
 
 /**
@@ -52,15 +44,11 @@ export const setUnauthorizedCallback = (callback: () => void) => {
 };
 
 export const api = create({
-  baseURL: API_URL || undefined,
-  timeout: 15_000,
+  baseURL: API_URL,
 });
 
 api.interceptors.request.use(
   async (config) => {
-    if (Platform.OS !== 'web' && !API_URL) {
-      throw new Error('Configure EXPO_PUBLIC_API_URL com uma URL HTTPS da API para este aplicativo.');
-    }
     try {
       const token = activeToken === undefined ? await tokenStorage.get() : activeToken;
       if (token) {

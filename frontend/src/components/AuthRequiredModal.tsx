@@ -9,8 +9,7 @@ import {
   View,
 } from 'react-native';
 
-import { radius, spacing } from '../theme';
-import { createThemedStyles } from '../context/ThemeContext';
+import { palette, radius, spacing } from '../theme';
 
 type AuthRequiredModalProps = {
   visible: boolean;
@@ -21,7 +20,6 @@ export function AuthRequiredModal({
   visible,
   onClose,
 }: AuthRequiredModalProps) {
-  const styles = useStyles();
   const isWeb = Platform.OS === 'web';
 
   const goToLogin = () => {
@@ -69,10 +67,10 @@ export function AuthRequiredModal({
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: palette.overlay,
+    backgroundColor: 'rgba(0, 0, 0, 0.32)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: spacing.lg,
@@ -86,7 +84,7 @@ const useStyles = createThemedStyles((palette) => ({
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: '#E7E7E7',
     padding: spacing.lg,
     zIndex: 2,
   },
@@ -116,7 +114,7 @@ const useStyles = createThemedStyles((palette) => ({
     marginBottom: spacing.sm,
   },
   primaryButtonText: {
-    color: palette.onPrimary,
+    color: palette.surface,
     fontSize: 16,
     fontWeight: '700',
   },
@@ -145,4 +143,4 @@ const useStyles = createThemedStyles((palette) => ({
     fontSize: 14,
     fontWeight: '600',
   },
-}));
+});

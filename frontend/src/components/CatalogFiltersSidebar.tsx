@@ -1,4 +1,4 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -6,6 +6,7 @@ import {
   Modal,
   Pressable,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   View,
@@ -15,8 +16,7 @@ import { FilterChip } from './FilterChip';
 import { FilterOption, useCatalogContext } from '../context/AppContext';
 import { api } from '../services/api';
 import { formatLaboratoryLabel, normalizeText } from '../services/catalog';
-import { radius, spacing } from '../theme';
-import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
+import { palette, radius, spacing } from '../theme';
 
 type Pharmacy = { id: number; nome_fantasia: string };
 type Section = 'categoria' | 'tipo_venda';
@@ -30,8 +30,6 @@ const labels: Record<Section, string> = {
 };
 
 export function CatalogFiltersSidebar() {
-  const styles = useStyles();
-  const { palette } = useAppTheme();
   const {
     selectedFilters,
     filterOptions,
@@ -242,7 +240,7 @@ export function CatalogFiltersSidebar() {
   );
 }
 
-const useStyles = createThemedStyles((palette) => ({
+const styles = StyleSheet.create({
   shell: {
     width: 276,
     flexShrink: 0,
@@ -284,9 +282,9 @@ const useStyles = createThemedStyles((palette) => ({
   clearButton: { minWidth: 74, minHeight: 42, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: palette.primary, borderRadius: radius.sm },
   clearText: { color: palette.primaryDark, fontSize: 12, fontWeight: '700' },
   applyButton: { flex: 1, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, backgroundColor: palette.primary },
-  applyText: { color: palette.onPrimary, fontSize: 12, fontWeight: '700' },
+  applyText: { color: palette.surface, fontSize: 12, fontWeight: '700' },
   pressed: { opacity: 0.8 },
-  modalOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, backgroundColor: palette.overlay },
+  modalOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, backgroundColor: 'rgba(23,32,51,0.38)' },
   modal: { width: '100%', maxWidth: 560, height: '78%', padding: spacing.lg, borderRadius: radius.lg, backgroundColor: palette.surface },
   modalHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md },
   modalTitle: { color: palette.text, fontSize: 19, fontWeight: '800' },
@@ -303,4 +301,4 @@ const useStyles = createThemedStyles((palette) => ({
   modalFooter: { flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: palette.border },
   modalClear: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm },
   modalDone: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, backgroundColor: palette.primary },
-}));
+});
