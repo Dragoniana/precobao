@@ -7,7 +7,7 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 
-from app.scrapers.offer_refresh import STATE_DIR, refresh
+from app.scrapers.offer_refresh import STATE_DIR, refresh, refresh_images
 
 
 def _due(source: str, now: datetime, interval_minutes: float) -> bool:
@@ -37,9 +37,31 @@ def serve() -> None:
         "indiana": int(os.getenv("OFFER_REFRESH_INDIANA_BATCH", "200")),
         "araujo": int(os.getenv("OFFER_REFRESH_ARAUJO_BATCH", "20")),
     }
-    if interval <= 0 or delay < 0 or any(limit <= 0 for limit in limits.values()):
+    image_limits = {
+        "indiana": int(os.getenv("OFFER_IMAGE_REFRESH_INDIANA_BATCH", "150")),
+        "araujo": int(os.getenv("OFFER_IMAGE_REFRESH_ARAUJO_BATCH", "20")),
+        "pacheco": int(os.getenv("OFFER_IMAGE_REFRESH_PACHECO_BATCH", "100")),
+    }
+    if (
+        interval <= 0
+        or delay < 0
+        or any(limit <= 0 for limit in [*limits.values(), *image_limits.values()])
+    ):
         raise ValueError("Invalid offer refresh schedule")
     while True:
+        for source, limit in image_limits.items():
+            state_key = f"images-{source}"
+            if not _due(state_key, datetime.now(UTC), interval):
+                continue
+            try:
+                result = refresh_images(source, limit, delay)
+                print(json.dumps(result, ensure_ascii=False), flush=True)
+            except Exception as error:
+                print(
+                    f"{state_key} refresh failed: {type(error).__name__}: {error}",
+                    flush=True,
+                )
+
         for source, limit in limits.items():
             if not _due(source, datetime.now(UTC), interval):
                 continue

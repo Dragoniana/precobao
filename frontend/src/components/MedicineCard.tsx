@@ -35,6 +35,7 @@ export function MedicineCard({ medicine, onPress, compact = false, wide = false,
   const { width, fontScale } = useWindowDimensions();
   const [focused, setFocused] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [favoriteHovered, setFavoriteHovered] = useState(false);
   const isCompactList = compact && width <= 480;
   const isNarrowCompactList = isCompactList && width <= 360;
   const isFavorite = favoriteIds.includes(medicine.id);
@@ -85,7 +86,7 @@ export function MedicineCard({ medicine, onPress, compact = false, wide = false,
       onBlur={() => setFocused(false)}
       style={({ pressed }) => [styles.card, (isCompactList || wide) && styles.cardCompactList, { width: cardWidth }, (hovered || focused) && styles.cardHighlighted, pressed && styles.cardPressed]}
     >
-      <MedicineImage medicine={medicine} style={[styles.imagePanel, (isCompactList || wide) && styles.imagePanelCompactList]} label={'Imagem n\u00e3o dispon\u00edvel'} />
+      <MedicineImage medicine={medicine} style={[styles.imagePanel, (isCompactList || wide) && styles.imagePanelCompactList]} label="Imagem não disponível" />
 
       <Pressable
         accessibilityRole="button"
@@ -93,9 +94,11 @@ export function MedicineCard({ medicine, onPress, compact = false, wide = false,
         accessibilityState={{ selected: isFavorite, disabled: sessionMode !== 'authenticated' }}
         accessibilityHint={sessionMode !== 'authenticated' ? 'Entre na sua conta para salvar favoritos' : undefined}
         onPress={handleFavoritePress}
+        onHoverIn={() => setFavoriteHovered(true)}
+        onHoverOut={() => setFavoriteHovered(false)}
         hitSlop={7}
         testID="medicine-card-favorite"
-        style={({ pressed, hovered }) => [styles.favoriteButton, isCompactList && styles.favoriteButtonCompactList, hovered && styles.favoriteHovered, pressed && styles.favoritePressed, sessionMode !== 'authenticated' && styles.favoriteDisabled]}
+        style={({ pressed }) => [styles.favoriteButton, isCompactList && styles.favoriteButtonCompactList, favoriteHovered && styles.favoriteHovered, pressed && styles.favoritePressed, sessionMode !== 'authenticated' && styles.favoriteDisabled]}
       >
         <Ionicons name={isFavorite ? 'heart' : 'heart-outline'} size={18} color={isFavorite ? palette.primary : palette.textSoft} />
       </Pressable>

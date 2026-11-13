@@ -97,3 +97,12 @@ Cada diretório principal possui seu próprio README com detalhes específicos:
 - [Frontend](frontend/README.md) — estrutura do app, hooks, componentes, comandos e endpoints consumidos
 - [Frontend src](frontend/src/README.md) — referência detalhada de hooks, componentes, serviços e tipos
 - [Bootstrap](bootstrap/README.md) — scripts de provisionamento e solução de problemas
+
+## Preparação para implantação na Azure
+
+A origem oficial para Azure é a branch `main` deste repositório. Consulte o
+[runbook Azure](docs/azure-deployment.md) para VM + Caddy, PostgreSQL gerenciado,
+Expo Web/Static Web Apps, backup e restauração, e o
+[relatório de prontidão](docs/azure-readiness-2026-11-07.md) para o estado da
+preparação e das validações locais. A publicação permanece desabilitada até
+autorização e configuração explícitas.

@@ -170,6 +170,7 @@ def adaptar_parser_rest(produtos_brutos: List[Dict[str, Any]]) -> List[Dict[str,
             item_principal,
             expected_ean=str(ean).strip() if ean else None,
             expected_sku=item_id,
+            allow_generic=True,
         )
 
         catalogo_limpo.append(

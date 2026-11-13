@@ -168,6 +168,8 @@ def upsert_image_reference(
     product_url: str | None,
     catalog_id: int | None,
     offer_id: int | None,
+    identity_confirmed: bool = False,
+    allow_generic: bool = False,
 ) -> bool:
     """Add/update a source-offer reference. Missing images never erase old refs."""
     return upsert_image_references(
@@ -182,6 +184,8 @@ def upsert_image_reference(
                 "product_url": product_url,
                 "catalog_id": catalog_id,
                 "offer_id": offer_id,
+                "identity_confirmed": identity_confirmed,
+                "allow_generic": allow_generic,
             }
         ]
     )[0]
@@ -249,6 +253,7 @@ def resolve_catalog_images(
     found: list[str] = []
     for record in records:
         offer_id = record.get("offer_id")
+        exact_offer_identity = False
         if record.get("catalog_id") != catalog_id:
             continue
         if offer_id is not None and linked and int(offer_id) not in linked:
@@ -267,6 +272,12 @@ def resolve_catalog_images(
                 offer_sku = getattr(offer, "sku_interno", None)
                 if record_sku and offer_sku and record_sku != offer_sku:
                     continue
+                exact_offer_identity = bool(
+                    record.get("identity_confirmed") is True
+                    and record_sku
+                    and offer_sku
+                    and record_sku == offer_sku
+                )
             elif linked_offers:
                 same_offer = any(
                     (
@@ -297,7 +308,8 @@ def resolve_catalog_images(
         ):
             continue
         url = normalize_image_url(record.get("image_url"), record.get("product_url"))
-        if not url or url in found or is_generic_image_url(url):
+        allow_generic = record.get("allow_generic") is True and exact_offer_identity
+        if not url or url in found or (is_generic_image_url(url) and not allow_generic):
             continue
 
         record_ean = record.get("ean")
@@ -307,10 +319,29 @@ def resolve_catalog_images(
         if image_eans and (
             not catalog_ean
             or not all(gtin_matches(catalog_ean, image_ean) for image_ean in image_eans)
-        ):
+        ) and not exact_offer_identity:
             continue
         found.append(url)
     return found
+
+
+def has_offer_image_reference(*, offer_id: int, catalog_id: int, sku: str) -> bool:
+    """Return whether this exact offer already has a displayable image reference."""
+    for record in _read_records():
+        if record.get("offer_id") != offer_id or record.get("catalog_id") != catalog_id:
+            continue
+        if record.get("sku") != sku:
+            continue
+        url = normalize_image_url(record.get("image_url"), record.get("product_url"))
+        if not url:
+            continue
+        if is_generic_image_url(url) and not (
+            record.get("allow_generic") is True
+            and record.get("identity_confirmed") is True
+        ):
+            continue
+        return True
+    return False
 
 
 def migrate_legacy_references(db: Any, backup_path: Path) -> dict[str, int]:

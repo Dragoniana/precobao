@@ -517,6 +517,7 @@ def select_vtex_item_image(
     *,
     expected_ean: str | None,
     expected_sku: str | None = None,
+    allow_generic: bool = False,
 ) -> str | None:
     """Select a photo attached to an exact VTEX SKU/EAN item.
 
@@ -533,10 +534,14 @@ def select_vtex_item_image(
     if not expected_ean and not expected_sku:
         return None
     images = item.get("images") or []
-    candidates: list[tuple[int, int, str]] = []
+    candidates: list[tuple[int, str]] = []
     for image in images:
         url = str(image.get("imageUrl") or "").strip()
-        if not url or image_delivery_rejection_reason(url):
+        if not url or (
+            image_delivery_rejection_reason(url)
+            if allow_generic
+            else image_rejection_reason(url)
+        ):
             continue
         ids = embedded_eans(url)
         ean_priority = (
@@ -546,12 +551,11 @@ def select_vtex_item_image(
             if not ids
             else 2
         )
-        generic_priority = 1 if image_rejection_reason(url) else 0
-        candidates.append((ean_priority, generic_priority, url))
+        candidates.append((ean_priority, url))
     if not candidates:
         return None
-    candidates.sort(key=lambda value: (value[0], value[1]))
-    return candidates[0][2]
+    candidates.sort(key=lambda value: value[0])
+    return candidates[0][1]
 
 
 def select_araujo_product_image(

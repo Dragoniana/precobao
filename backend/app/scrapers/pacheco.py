@@ -575,7 +575,7 @@ class PachecoScraper(BasePharmacyScraper):
 
     @staticmethod
     def _extrair_imagem(sku_data: dict[str, Any]) -> str | None:
-        """Keep the source's own image, including generic pharmacy artwork."""
+        """Keep the first image supplied for this exact source product."""
         for image in sku_data.get("images") or []:
             url = image.get("imageUrl")
             if not url:

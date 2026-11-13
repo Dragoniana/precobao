@@ -65,8 +65,21 @@ $RECYCLE.BIN/
 *.db
 *.db-shm
 *.db-wal
+*.dump
+*.sql
+*.gpg
+*.backup
 pgdata/
 mysql_data/
+
+# Runtime image registry and Azure deployment secrets/backups
+backend/data/image_references/references.json
+backend/data/image_references/*.lock
+backend/data/image_references/.images-*.tmp
+deploy/azure/.env.azure
+deploy/azure/certs/
+deploy/azure/backups/
+frontend/dist-android/
 
 # Ferramentas de Editor e IDEs
 .vscode/

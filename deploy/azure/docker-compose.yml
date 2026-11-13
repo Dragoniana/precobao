@@ -1,0 +1,71 @@
+services:
+  api:
+    build:
+      context: ../../backend
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips=${CADDY_API_IP:-172.29.240.2}
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET:?Set a new unique JWT_SECRET}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?Set exact Azure Static Web Apps HTTPS origins}
+      RATE_LIMIT_LOGIN_PER_MINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-10}
+      RATE_LIMIT_REGISTER_PER_HOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-5}
+      RATE_LIMIT_CATALOG_PER_MINUTE: ${RATE_LIMIT_CATALOG_PER_MINUTE:-120}
+      IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
+    volumes:
+      - image_references:/app/data/image_references
+      - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - api_edge
+
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set the public API domain}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      api_edge:
+        ipv4_address: ${CADDY_API_IP:-172.29.240.2}
+
+networks:
+  api_edge:
+    ipam:
+      config:
+        - subnet: ${CADDY_API_SUBNET:-172.29.240.0/24}
+
+volumes:
+  image_references:
+  caddy_data:
+  caddy_config:

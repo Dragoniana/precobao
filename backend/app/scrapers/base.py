@@ -18,6 +18,7 @@ from app.models.oferta_farmacia import OfertaFarmacia
 from app.schemas.oferta import ProdutoExtraidoSchema
 from app.services.enriquecimento import ServicoEnriquecimentoFarmacologico
 from app.services.image_registry import upsert_image_references
+from app.services.imagens import is_generic_image_url
 from app.services.preco_observacoes import registrar_observacao_preco
 
 
@@ -390,6 +391,8 @@ class BasePharmacyScraper(ABC):
                         "product_url": prod.link,
                         "catalog_id": data["catalogo_id"],
                         "offer_id": offer.id if offer else None,
+                        "identity_confirmed": bool(offer and prod.sku_interno),
+                        "allow_generic": is_generic_image_url(prod.imagem_url or ""),
                     }
                 )
             try:

@@ -40,6 +40,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
   const insets = useSafeAreaInsets();
   const { sessionMode, currentUserName, logout } = useSessionContext();
   const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [hoveredNavPath, setHoveredNavPath] = useState<string | null>(null);
   const isWeb = Platform.OS === 'web';
   const isDesktop = isWeb && width >= 900;
 
@@ -76,7 +77,7 @@ export function Screen({ children, hideBottomNav = false, scroll = true, content
               {navigation.map((item) => {
                 const active = activeTab === item.path.slice(1);
                 return (
-                  <Pressable key={item.path} onPress={() => goTo(item.path)} accessibilityRole="button" accessibilityLabel={item.label} accessibilityState={{ selected: active }} style={({ hovered, pressed }) => [styles.desktopNavItem, active && styles.desktopNavItemActive, hovered && styles.desktopNavItemHover, pressed && styles.pressed]}>
+                  <Pressable key={item.path} onPress={() => goTo(item.path)} onHoverIn={() => setHoveredNavPath(item.path)} onHoverOut={() => setHoveredNavPath(null)} accessibilityRole="button" accessibilityLabel={item.label} accessibilityState={{ selected: active }} style={({ pressed }) => [styles.desktopNavItem, active && styles.desktopNavItemActive, hoveredNavPath === item.path && styles.desktopNavItemHover, pressed && styles.pressed]}>
                     <Ionicons name={active ? item.activeIcon : item.icon} size={17} color={active ? palette.primaryDark : palette.textSoft} />
                     <Text style={[styles.desktopNavText, active && styles.desktopNavTextActive]}>{item.label}</Text>
                   </Pressable>
