@@ -33,7 +33,7 @@ Copy the Azure PostgreSQL CA certificate/bundle from Microsoft's supported certi
 
 ## 3. Database and API start
 
-The Azure Compose file contains exactly `api` and `caddy`. FastAPI is reachable only on the internal Compose network. Caddy is the only service publishing ports 80 and 443. PostgreSQL, frontend, workers and scrapers are not Compose services here. A named Docker volume persists `IMAGE_REFERENCE_STORE_PATH` independently from PostgreSQL.
+The Azure Compose file contains FastAPI, Caddy and two private background workers. FastAPI is reachable only on the internal Compose network. Caddy is the only service publishing ports 80 and 443. PostgreSQL and frontend are not Compose services here. Named Docker volumes persist the image reference registry and each worker's resumable state independently from PostgreSQL.
 
 Before the first migration, create the managed database and a least-privilege application user. Take and verify an Azure managed backup or another approved recoverable copy first. The migration script requires a deliberate shell confirmation and never migrates as a side effect of starting the stack:
 
@@ -45,6 +45,21 @@ docker compose --project-name preco-bao-azure --env-file .env.azure ps
 ```
 
 Run those commands only after reviewing the target server and maintenance window. Readiness is exposed at `/health/ready`; confirm it over HTTPS after startup. Do not expose port 8000 or PostgreSQL publicly. Apply OS security updates, SSH key-only access, firewall rules, Docker log rotation and host monitoring as part of VM operations.
+
+The Compose startup also enables:
+
+- `offer-refresh`: every 30 minutes, resumes bounded price observations for existing Indiana/Araújo offers and image lookup for existing Indiana/Araújo/Pacheco offers. Price changes are written to offer and history tables; unchanged prices do not create duplicate history events. The worker shares the persistent image registry with FastAPI.
+- `pacheco-scheduler`: runs the existing full Pacheco catalog scraper immediately on first startup, then every 24 hours (with a 60-minute retry after an incomplete run). This can insert/update Pacheco catalog entries, offers, images and price history in the configured database. The worker keeps its checkpoint in a named volume.
+
+Both workers use the same managed PostgreSQL URL with the mounted read-only CA bundle, wait for API/database readiness, have bounded CPU/memory, and publish no host ports. Their logs and resumable state can be checked with:
+
+```sh
+docker compose --project-name preco-bao-azure --env-file .env.azure logs --tail=200 offer-refresh pacheco-scheduler
+docker compose --project-name preco-bao-azure --env-file .env.azure exec offer-refresh python -c 'import json,pathlib; p=pathlib.Path("/app/data/offer_refresh"); print("\\n".join(str(f.name)+": "+str(json.loads(f.read_text()).get("checked",0))+" checked" for f in sorted(p.glob("*.json"))))'
+docker compose --project-name preco-bao-azure --env-file .env.azure exec pacheco-scheduler python -c 'import json, pathlib; p=pathlib.Path("/app/data/pacheco/checkpoint.json"); print(json.dumps({k: json.loads(p.read_text()).get(k) for k in ("status", "products_enqueued", "pages_succeeded", "finished_at", "stop_reason")}, ensure_ascii=False) if p.exists() else "first run pending")'
+```
+
+The price/image refresh worker does not discover new Indiana or Araújo catalog items. The Pacheco job only discovers products offered by Pacheco. Therefore this deployment change restores automatic behavior for existing offers and Pacheco discovery, but does not copy the development PostgreSQL database or claim identical catalog counts across environments. A count difference must be diagnosed against the source database and pharmacy coverage; it must not be fixed by copying local user data or a development dump into production.
 
 ## 4. Static Web Apps and Android
 
@@ -84,4 +99,4 @@ Restore only into a newly created, empty, separate managed database, after revie
 - The repository contains no real Azure credentials, database password, deploy token, CA private key or production `.env`.
 - Set up Azure Monitor/VM monitoring, log retention, alerting, GPG key custody, backup offsite retention, restore drills, DNS, domain ownership, NSGs and secrets outside this repository.
 - Review current Azure pricing and service quotas before provisioning; this repository cannot guarantee Azure-hosting costs.
-- Scrapers and schedulers are intentionally absent from this stack.
+- Indiana/Araújo new-item discovery remains manual; their existing-offer prices/images are refreshed automatically.

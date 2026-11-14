@@ -25,9 +25,17 @@ from urllib.parse import parse_qs, urlsplit
 
 config = json.load(sys.stdin)
 services = config.get("services", {})
-if set(services) != {"api", "caddy"}:
-    raise SystemExit("Azure Compose must contain only FastAPI and Caddy.")
+required_services = {"api", "caddy", "offer-refresh", "pacheco-scheduler"}
+if set(services) != required_services:
+    raise SystemExit("Azure Compose must contain FastAPI, Caddy and both automatic catalog workers.")
 api, caddy = services["api"], services["caddy"]
+environment = api.get("environment", {})
+api_image_mount = next(
+    (m for m in api.get("volumes", []) if m.get("target") == "/app/data/image_references"),
+    None,
+)
+if not api_image_mount or api_image_mount.get("type") != "volume":
+    raise SystemExit("The image reference JSON must use a persistent named volume.")
 if api.get("ports"):
     raise SystemExit("The FastAPI port must not be published to the VM host.")
 published = {str(item.get("published")) for item in caddy.get("ports", [])}
@@ -35,8 +43,37 @@ if published != {"80", "443"}:
     raise SystemExit("Only Caddy may publish TCP ports 80 and 443.")
 if "api_edge" not in api.get("networks", {}) or "api_edge" not in caddy.get("networks", {}):
     raise SystemExit("FastAPI and Caddy must share the isolated proxy network.")
+for worker_name in ("offer-refresh", "pacheco-scheduler"):
+    worker = services[worker_name]
+    if worker.get("ports"):
+        raise SystemExit(f"The {worker_name} worker must not publish host ports.")
+    if worker.get("restart") != "unless-stopped":
+        raise SystemExit(f"The {worker_name} worker must restart automatically.")
+    if worker.get("environment", {}).get("DATABASE_URL") != environment.get("DATABASE_URL"):
+        raise SystemExit(f"The {worker_name} worker must use the configured managed database.")
+    worker_image_mount = next(
+        (m for m in worker.get("volumes", []) if m.get("target") == "/app/data/image_references"),
+        None,
+    )
+    if not worker_image_mount or worker_image_mount.get("source") != api_image_mount.get("source"):
+        raise SystemExit(f"The {worker_name} worker must share the persistent image registry with FastAPI.")
+    if not any(m.get("target") == "/run/secrets/azure-postgres-root-ca.pem" and m.get("read_only") for m in worker.get("volumes", [])):
+        raise SystemExit(f"The {worker_name} worker must verify PostgreSQL TLS using the read-only CA bundle.")
+    if worker.get("depends_on", {}).get("api", {}).get("condition") != "service_healthy":
+        raise SystemExit(f"The {worker_name} worker must wait until FastAPI/database readiness.")
+for service_name, variable in (
+    ("offer-refresh", "OFFER_REFRESH_ENABLED"),
+    ("pacheco-scheduler", "PACHECO_SCHEDULER_ENABLED"),
+):
+    if services[service_name].get("environment", {}).get(variable, "").casefold() not in {"1", "true", "yes", "on"}:
+        raise SystemExit(f"{variable} must enable the Azure background worker.")
+for service_name, state_path in (
+    ("offer-refresh", "/app/data/offer_refresh"),
+    ("pacheco-scheduler", "/app/data/pacheco"),
+):
+    if not any(m.get("type") == "volume" and m.get("target") == state_path for m in services[service_name].get("volumes", [])):
+        raise SystemExit(f"The {service_name} checkpoint must use a persistent named volume.")
 
-environment = api.get("environment", {})
 if environment.get("APP_ENV") != "production" or str(environment.get("DEBUG", "")).casefold() != "false":
     raise SystemExit("FastAPI must run with APP_ENV=production and DEBUG=false.")
 jwt = environment.get("JWT_SECRET", "")

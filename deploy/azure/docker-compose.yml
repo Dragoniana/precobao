@@ -40,6 +40,60 @@ services:
     networks:
       - api_edge
 
+  offer-refresh:
+    build:
+      context: ../../backend
+    command: ["python", "-m", "app.scrapers.offer_refresh_scheduler"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
+      IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
+      OFFER_REFRESH_STATE_DIR: /app/data/offer_refresh
+      OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:-true}
+      OFFER_REFRESH_INTERVAL_MINUTES: ${OFFER_REFRESH_INTERVAL_MINUTES:-30}
+      OFFER_REFRESH_INDIANA_BATCH: ${OFFER_REFRESH_INDIANA_BATCH:-200}
+      OFFER_REFRESH_ARAUJO_BATCH: ${OFFER_REFRESH_ARAUJO_BATCH:-20}
+      OFFER_REFRESH_REQUEST_DELAY_SECONDS: ${OFFER_REFRESH_REQUEST_DELAY_SECONDS:-1}
+      OFFER_IMAGE_REFRESH_INDIANA_BATCH: ${OFFER_IMAGE_REFRESH_INDIANA_BATCH:-150}
+      OFFER_IMAGE_REFRESH_ARAUJO_BATCH: ${OFFER_IMAGE_REFRESH_ARAUJO_BATCH:-20}
+      OFFER_IMAGE_REFRESH_PACHECO_BATCH: ${OFFER_IMAGE_REFRESH_PACHECO_BATCH:-100}
+    volumes:
+      - image_references:/app/data/image_references
+      - offer_refresh_state:/app/data/offer_refresh
+      - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    cpus: 1.0
+    mem_limit: 1g
+
+  pacheco-scheduler:
+    build:
+      context: ../../backend
+    command: ["python", "-m", "app.scrapers.pacheco_scheduler"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
+      IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
+      PACHECO_STATE_DIR: /app/data/pacheco
+      PACHECO_SCHEDULER_ENABLED: ${PACHECO_SCHEDULER_ENABLED:-true}
+      PACHECO_INTERVAL_HOURS: ${PACHECO_INTERVAL_HOURS:-24}
+      PACHECO_FAILURE_RETRY_MINUTES: ${PACHECO_FAILURE_RETRY_MINUTES:-60}
+      PACHECO_REQUEST_DELAY_SECONDS: ${PACHECO_REQUEST_DELAY_SECONDS:-1}
+    volumes:
+      - image_references:/app/data/image_references
+      - pacheco_state:/app/data/pacheco
+      - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    cpus: 1.0
+    mem_limit: 1g
+
   caddy:
     image: caddy:2.10-alpine
     environment:
@@ -67,5 +121,7 @@ networks:
 
 volumes:
   image_references:
+  offer_refresh_state:
+  pacheco_state:
   caddy_data:
   caddy_config:
