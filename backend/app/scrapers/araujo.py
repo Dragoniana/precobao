@@ -3,14 +3,17 @@ Scraper especializado para extração de dados da Drogaria Araujo via HTML parsi
 """
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List
 
 from bs4 import BeautifulSoup
-from curl_cffi import requests
 
 from app.scrapers.base import BasePharmacyScraper
+from app.scrapers.partner_feed import load_authorized_partner_feed
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -24,83 +27,66 @@ class AraujoScraper(BasePharmacyScraper):
             num_workers=num_workers,
             batch_size=batch_size,
         )
-        self.url_base = "https://www.araujo.com.br/medicamentos?page={}"
+        self.feed_prefix = "ARAUJO_PARTNER_FEED"
+        self.state_dir = Path(os.getenv("ARAUJO_STATE_DIR", "data/araujo"))
+        self.products_queued = 0
+
+    @contextlib.contextmanager
+    def _run_lock(self):
+        """Prevent manual and scheduled imports from running concurrently."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with (self.state_dir / "scraper.lock").open("a+b") as lock_file:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    lock_file.seek(0)
+                    if not lock_file.read(1):
+                        lock_file.write(b"0")
+                        lock_file.flush()
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise RuntimeError(
+                    "Outra coleta Araújo já está em execução."
+                ) from error
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    async def run(self) -> None:
+        """Run the shared importer under a host/container-wide file lock."""
+        with self._run_lock():
+            await super().run()
 
     async def extrair_catalogo(self) -> None:
         """
-        Método principal do scraper da Araujo.
-        Varre as páginas e envia os produtos limpos para a fila base.
+        Importa apenas um feed da Araujo fornecido por canal autorizado.
+
+        A coleta direta do site público não é iniciada: os termos oficiais vedam
+        mineração de dados, e a VM recebe HTTP 403 em requisição convencional.
         """
-        pagina = 1
-        processando = True
-
-        # Usando AsyncSession do curl_cffi para imitar o comportamento de browser
-        # Headers de navegação ajudam a evitar bloqueios de automação.
-        headers = {
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,image/apng,*/*;q=0.8,"
-                "application/signed-exchange;v=b3;q=0.7"
-            ),
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://www.araujo.com.br/",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
-        }
-
-        async with requests.AsyncSession(
-            impersonate="chrome110", verify=False, headers=headers
-        ) as session:
-            while processando:
-                print(f"Buscando Drogaria Araujo - Página {pagina}...")
-
-                try:
-                    url = self.url_base.format(pagina)
-
-                    # Envolvemos a requisição no mecanismo de backoff
-                    async def fetch():
-                        return await session.get(url, timeout=30.0)
-
-                    response = await self.executar_com_backoff(fetch)
-
-                    if response.status_code == 404:
-                        print("Fim do catálogo (404).")
-                        break
-
-                    html_content = response.text
-                    print(f"DEBUG: Tamanho do HTML recebido: {len(html_content)} bytes")
-
-                    # Se não encontrar o wrapper principal de produtos, provável fim
-                    if "productTile" not in html_content:
-                        print(f"Página {pagina} sem produtos. Varredura finalizada.")
-                        break
-
-                    produtos_limpos = self.adaptar_parser_araujo_html(html_content)
-
-                    if not produtos_limpos:
-                        print(
-                            f"Nenhum produto extraído na página {pagina}. "
-                            "Varredura finalizada."
-                        )
-                        break
-
-                    # Envia os produtos para a fila assíncrona
-                    for prod in produtos_limpos:
-                        await self.fila.put(prod)
-
-                    print(
-                        f"✓ {len(produtos_limpos)} medicamentos enfileirados "
-                        f"da página {pagina}."
-                    )
-
-                    pagina += 1
-
-                except Exception as e:
-                    print(f"Falha inesperada no scraper da Araujo: {e}")
-                    break
+        products = await load_authorized_partner_feed(
+            prefix=self.feed_prefix, sku_prefix="ARJ"
+        )
+        if products is None:
+            raise RuntimeError(
+                "A coleta Araújo exige um feed autorizado; configure "
+                "ARAUJO_PARTNER_FEED_FILE ou ARAUJO_PARTNER_FEED_URL."
+            )
+        for product in products:
+            await self.fila.put(product)
+        self.products_queued = len(products)
+        print(f"Araújo partner feed validated: {len(products)} products queued.")
 
     def adaptar_parser_araujo_html(self, html_content: str) -> List[Dict[str, Any]]:
         """

@@ -7,6 +7,11 @@ from app.scrapers.pacheco import PachecoScraper
 from app.scrapers.pacheco_scheduler import _next_run
 
 
+@pytest.fixture(autouse=True)
+def enable_mocked_pacheco_source(monkeypatch):
+    monkeypatch.setenv("PACHECO_PUBLIC_API_AUTHORIZED", "true")
+
+
 def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
     tmp_path, monkeypatch
 ):
@@ -21,6 +26,14 @@ def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
                 "itemId": "100",
                 "ean": "7891721201806",
                 "name": "Medicamento 100",
+                "images": [
+                    {
+                        "imageUrl": (
+                            "https://drogariaspacheco.vteximg.com.br/arquivos/"
+                            "7891721201806.jpg"
+                        )
+                    }
+                ],
                 "sellers": [
                     {
                         "commertialOffer": {
@@ -40,6 +53,10 @@ def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
     assert extracted["disponivel"] is False
     assert extracted["quantidade_estoque"] == 0
     assert extracted["preco"] == 12.5
+    assert extracted["sku_interno"] == "PCH100"
+    assert extracted["ean"] == "7891721201806"
+    assert extracted["link"] == "https://www.drogariaspacheco.com.br/medicamento-100/p"
+    assert extracted["imagem_url"].endswith("7891721201806.jpg")
 
 
 @pytest.mark.asyncio
@@ -91,7 +108,7 @@ async def test_pacheco_paginates_past_pages_without_parseable_offers(
             return Response(page_rows[offset])
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.requests, "AsyncSession", lambda **_: session)
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -150,7 +167,7 @@ async def test_pacheco_stops_on_a_repeated_page_instead_of_looping(
             return Response()
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.requests, "AsyncSession", lambda **_: session)
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -181,7 +198,7 @@ async def test_pacheco_marks_http_400_as_incomplete(tmp_path, monkeypatch):
         async def get(self, *_args, **_kwargs):
             return Response()
 
-    monkeypatch.setattr(pacheco_module.requests, "AsyncSession", lambda **_: Session())
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: Session())
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -196,7 +213,7 @@ async def test_pacheco_marks_http_400_as_incomplete(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_shared_backoff_retries_429_before_accepting_success(monkeypatch):
+async def test_shared_backoff_stops_on_429_without_retrying(monkeypatch):
     class Response:
         def __init__(self, status_code):
             self.status_code = status_code
@@ -206,7 +223,7 @@ async def test_shared_backoff_retries_429_before_accepting_success(monkeypatch):
     async def request():
         nonlocal calls
         calls += 1
-        return Response(429 if calls == 1 else 200)
+        return Response(429)
 
     async def no_wait(_):
         return None
@@ -215,8 +232,95 @@ async def test_shared_backoff_retries_429_before_accepting_success(monkeypatch):
     scraper = PachecoScraper(request_delay=0)
     response = await scraper.executar_com_backoff(request, initial_delay=0)
 
-    assert response.status_code == 200
-    assert calls == 2
+    assert response.status_code == 429
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pacheco_stops_after_403_without_requesting_facets(tmp_path, monkeypatch):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+
+    class Response:
+        status_code = 403
+        headers = {}
+
+    class Session:
+        requests = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, **_kwargs):
+            self.requests.append(url)
+            return Response()
+
+    session = Session()
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    scraper = PachecoScraper(request_delay=0)
+
+    await scraper.run()
+
+    assert len(session.requests) == 1
+    assert scraper.stats["last_http_status"] == 403
+    assert scraper.stats["retryable"] is False
+    assert scraper.stats["stop_reason"] == "http_403"
+
+
+@pytest.mark.asyncio
+async def test_pacheco_stops_after_429_and_records_retry_after(tmp_path, monkeypatch):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "3600"}
+
+    class Session:
+        requests = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, **_kwargs):
+            self.requests.append(url)
+            return Response()
+
+    session = Session()
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    scraper = PachecoScraper(request_delay=0)
+
+    await scraper.run()
+
+    assert len(session.requests) == 1
+    assert scraper.stats["last_http_status"] == 429
+    assert scraper.stats["retry_after_seconds"] == 3600
+    assert scraper.stats["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_pacheco_requires_authorized_source_before_network_access(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("PACHECO_PUBLIC_API_AUTHORIZED", "false")
+
+    def unexpected_network(**_kwargs):
+        raise AssertionError("The source must not be contacted without authorization.")
+
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", unexpected_network)
+    scraper = PachecoScraper(request_delay=0)
+
+    await scraper.run()
+
+    assert scraper.stats["stop_reason"] == (
+        "source_authorization_required: configure an authorized partner feed"
+    )
+    assert scraper.stats["products_enqueued"] == 0
 
 
 @pytest.mark.asyncio
@@ -276,3 +380,20 @@ def test_scheduler_uses_durable_daily_interval(monkeypatch):
     )
 
     assert due.isoformat() == "2026-10-25T08:00:00+00:00"
+
+
+def test_scheduler_waits_at_least_the_source_retry_after(monkeypatch):
+    from datetime import UTC, datetime
+
+    monkeypatch.setenv("PACHECO_FAILURE_RETRY_MINUTES", "60")
+    now = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    due = _next_run(
+        now,
+        {
+            "finished_at": "2026-10-24T08:00:00+00:00",
+            "status": "incomplete",
+            "retry_after_seconds": 18_000,
+        },
+    )
+
+    assert due.isoformat() == "2026-10-24T13:00:00+00:00"

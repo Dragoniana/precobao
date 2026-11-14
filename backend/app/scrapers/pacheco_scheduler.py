@@ -11,6 +11,21 @@ from pathlib import Path
 from app.scrapers.pacheco import PachecoScraper
 
 
+def _log(event: str, **fields: object) -> None:
+    print(
+        json.dumps(
+            {
+                "service": "pacheco-scheduler",
+                "event": event,
+                "time": datetime.now(UTC).isoformat(),
+                **fields,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
 def _state_path() -> Path:
     state_dir = Path(
         os.getenv(
@@ -41,7 +56,12 @@ def _next_run(now: datetime, state: dict) -> datetime:
             minutes=float(os.getenv("PACHECO_FAILURE_RETRY_MINUTES", "60"))
         )
         status = state.get("status")
-        return finished_at + (interval if status in {"complete", "partial"} else retry)
+        if status in {"complete", "partial"}:
+            return finished_at + interval
+        source_retry = timedelta(
+            seconds=max(0, int(state.get("retry_after_seconds") or 0))
+        )
+        return finished_at + max(retry, source_retry)
 
     # First run only occurs when explicitly enabled after a controlled run.
     if state:
@@ -59,7 +79,7 @@ def _next_run(now: datetime, state: dict) -> datetime:
 async def serve() -> None:
     enabled = os.getenv("PACHECO_SCHEDULER_ENABLED", "false").casefold()
     if enabled not in {"1", "true", "yes", "on"}:
-        print("Pacheco scheduler disabled (PACHECO_SCHEDULER_ENABLED=false)")
+        _log("disabled", reason="PACHECO_SCHEDULER_ENABLED=false")
         while True:
             await asyncio.sleep(3600)
 
@@ -69,26 +89,40 @@ async def serve() -> None:
         raise ValueError("Pacheco scheduler intervals must be positive")
 
     while True:
+        state = _checkpoint()
+        if state.get("stop_reason") in {
+            "http_403",
+            "source_authorization_required: configure an authorized partner feed",
+        }:
+            _log("paused", reason="authorized_source_access_required")
+            await asyncio.sleep(3600)
+            continue
+
         now = datetime.now(UTC)
-        due = _next_run(now, _checkpoint())
+        due = _next_run(now, state)
         delay = max(0.0, (due - now).total_seconds())
         if delay:
-            print(f"Pacheco next run at {due.isoformat()}")
+            _log("waiting", next_run=due.isoformat())
             await asyncio.sleep(delay)
 
         started = datetime.now(UTC)
-        print(f"Pacheco scheduled run started at {started.isoformat()}")
+        _log("run_started", started_at=started.isoformat())
         try:
             await PachecoScraper().run()
         except Exception as error:
-            print(f"Pacheco scheduled run failed: {type(error).__name__}: {error}")
+            _log(
+                "run_failed",
+                error_type=type(error).__name__,
+                error=str(error),
+            )
         finished = datetime.now(UTC)
         elapsed = (finished - started).total_seconds()
         state = _checkpoint()
-        print(
-            "Pacheco scheduled run ended: "
-            f"status={state.get('status', 'unknown')} "
-            f"products={state.get('products_enqueued', 0)} duration_s={elapsed:.1f}"
+        _log(
+            "run_finished",
+            status=state.get("status", "unknown"),
+            products=state.get("products_enqueued", 0),
+            duration_seconds=round(elapsed, 1),
         )
 
 
@@ -96,4 +130,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:
-        print("Pacheco scheduler stopped")
+        _log("stopped")

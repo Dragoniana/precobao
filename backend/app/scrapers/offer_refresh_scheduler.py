@@ -10,7 +10,20 @@ from datetime import UTC, datetime, timedelta
 from app.scrapers.offer_refresh import STATE_DIR, refresh, refresh_images
 
 
+def _source_authorized(source: str) -> bool:
+    source = source.removeprefix("images-")
+    variable = {
+        "araujo": "ARAUJO_PUBLIC_CATALOG_AUTHORIZED",
+        "pacheco": "PACHECO_PUBLIC_API_AUTHORIZED",
+    }.get(source)
+    if variable is None:
+        return True
+    return os.getenv(variable, "false").casefold() in {"1", "true", "yes", "on"}
+
+
 def _due(source: str, now: datetime, interval_minutes: float) -> bool:
+    if not _source_authorized(source):
+        return False
     try:
         state = json.loads((STATE_DIR / f"{source}.json").read_text(encoding="utf-8"))
         if state.get("stop_reason") == "http_403":
@@ -18,7 +31,9 @@ def _due(source: str, now: datetime, interval_minutes: float) -> bool:
         last = datetime.fromisoformat(state["updated_at"])
     except (OSError, ValueError, KeyError, TypeError):
         return True
-    return now >= last + timedelta(minutes=interval_minutes)
+    interval = timedelta(minutes=interval_minutes)
+    retry_after = timedelta(seconds=max(0, int(state.get("retry_after_seconds") or 0)))
+    return now >= last + max(interval, retry_after)
 
 
 def serve() -> None:

@@ -323,6 +323,7 @@ class BasePharmacyScraper(ABC):
                         "quantidade_estoque": prod.quantidade_estoque,
                         "disponivel": prod.disponivel,
                         "url_origem": prod.link,
+                        "fonte_observado_em": prod.fonte_observado_em,
                         "farmacia_id": farmacia.id,
                         "catalogo_id": catalogo_id,
                     }
@@ -344,6 +345,7 @@ class BasePharmacyScraper(ABC):
                     offer.quantidade_estoque = oferta_data["quantidade_estoque"]
                     offer.disponivel = oferta_data["disponivel"]
                     offer.url_origem = oferta_data["url_origem"]
+                    offer.fonte_observado_em = oferta_data["fonte_observado_em"]
                 changes.append((offer, previous_price, oferta_data))
 
             # IDs for new offers are needed to retain the exact offer lineage.
@@ -429,7 +431,13 @@ class BasePharmacyScraper(ABC):
 
                 # Avalia o status no objeto de resposta se existir
                 status = getattr(response, "status_code", 200)
-                if status == 429 or status >= 500:
+                if status in {403, 429}:
+                    print(
+                        f"HTTP {status} recebido; encerrando a consulta "
+                        "sem retry automático."
+                    )
+                    return response
+                if status >= 500:
                     retries += 1
                     if retries > max_retries:
                         print(f"Max retries excedido para o status HTTP {status}.")
@@ -448,7 +456,13 @@ class BasePharmacyScraper(ABC):
                 status_obj = getattr(e, "response", None)
                 if status_obj is not None:
                     status_code = getattr(status_obj, "status_code", 0)
-                    if status_code == 429 or status_code >= 500:
+                    if status_code in {403, 429}:
+                        print(
+                            f"HTTP {status_code} recebido; encerrando a consulta "
+                            "sem retry automático."
+                        )
+                        raise
+                    if status_code >= 500:
                         retries += 1
                         if retries > max_retries:
                             print(

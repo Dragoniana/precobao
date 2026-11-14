@@ -7,6 +7,7 @@ same SKU and, when available, the same catalog EAN before it can change data.
 from __future__ import annotations
 
 import argparse
+import email.utils
 import json
 import os
 import tempfile
@@ -50,9 +51,29 @@ USER_AGENT = "Preco Bao catalog audit/1.0"
 class SourceUnavailable(Exception):
     """A source could not be checked; this is not evidence of a missing price."""
 
+    def __init__(self, reason: str, retry_after_seconds: int | None = None):
+        super().__init__(reason)
+        self.retry_after_seconds = retry_after_seconds
+
 
 class IdentityMismatch(Exception):
     """The source response does not identify this exact offer."""
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        try:
+            retry_at = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = int((retry_at - datetime.now(UTC)).total_seconds())
+    return max(0, seconds)
 
 
 def _price(value: object) -> Decimal:
@@ -67,9 +88,7 @@ def _price(value: object) -> Decimal:
 
 def _identity(offer: OfertaFarmacia, sku: str, ean: str | None) -> None:
     expected_sku = (
-        offer.sku_interno.removeprefix("IND")
-        .removeprefix("ARJ")
-        .removeprefix("PCH")
+        offer.sku_interno.removeprefix("IND").removeprefix("ARJ").removeprefix("PCH")
     )
     if sku != expected_sku:
         raise IdentityMismatch("sku_mismatch")
@@ -264,7 +283,10 @@ def fetch_image_candidate(
     except httpx.HTTPError as error:
         raise SourceUnavailable(type(error).__name__) from error
     if response.status_code != 200:
-        raise SourceUnavailable(f"http_{response.status_code}")
+        raise SourceUnavailable(
+            f"http_{response.status_code}",
+            _retry_after_seconds(response.headers.get("Retry-After")),
+        )
     if source == "araujo":
         return parse_araujo_image(offer, response.text)
     try:
@@ -285,7 +307,10 @@ def fetch_observation(
     except httpx.HTTPError as error:
         raise SourceUnavailable(type(error).__name__) from error
     if response.status_code != 200:
-        raise SourceUnavailable(f"http_{response.status_code}")
+        raise SourceUnavailable(
+            f"http_{response.status_code}",
+            _retry_after_seconds(response.headers.get("Retry-After")),
+        )
     if source == "indiana":
         try:
             payload = response.json()
@@ -348,6 +373,17 @@ def _state_path(source: str) -> Path:
 
 def _image_state_path(source: str) -> Path:
     return STATE_DIR / f"images-{source}.json"
+
+
+def _source_authorized(source: str) -> bool:
+    """Require an explicit source authorization before recurring direct access."""
+    variable = {
+        "araujo": "ARAUJO_PUBLIC_CATALOG_AUTHORIZED",
+        "pacheco": "PACHECO_PUBLIC_API_AUTHORIZED",
+    }.get(source)
+    if variable is None:
+        return True
+    return os.getenv(variable, "false").casefold() in {"1", "true", "yes", "on"}
 
 
 def _read_cursor(source: str) -> int:
@@ -439,6 +475,9 @@ def refresh(source: str, limit: int, delay: float = 1.0) -> dict:
         "cursor": 0,
         "errors": [],
     }
+    if not _source_authorized(source):
+        stats["stop_reason"] = "source_authorization_required"
+        return stats
     with (
         _run_lock(),
         SessionLocal() as db,
@@ -500,6 +539,7 @@ def refresh(source: str, limit: int, delay: float = 1.0) -> dict:
             except SourceUnavailable as error:
                 db.rollback()
                 stats["unavailable"] += 1
+                stats["retry_after_seconds"] = error.retry_after_seconds
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
                 if str(error) in {"http_403", "http_429"}:
                     stats["stop_reason"] = str(error)
@@ -530,6 +570,9 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
         "errors": [],
         "cursor": 0,
     }
+    if not _source_authorized(source):
+        stats["stop_reason"] = "source_authorization_required"
+        return stats
     with (
         _run_lock(),
         SessionLocal() as db,
@@ -583,6 +626,7 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
             except SourceUnavailable as error:
                 stats["unavailable"] += 1
+                stats["retry_after_seconds"] = error.retry_after_seconds
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
                 if str(error) in {"http_403", "http_429"}:
                     stats["stop_reason"] = str(error)

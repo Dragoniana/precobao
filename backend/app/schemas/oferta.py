@@ -55,6 +55,10 @@ class ProdutoExtraidoSchema(BaseModel):
     imagem_url: str | None = Field(
         default=None, max_length=500, description="URL da imagem do produto"
     )
+    fonte_observado_em: datetime | None = Field(
+        default=None,
+        description="Data/hora em que a fonte parceira observou preço e estoque",
+    )
 
 
 class OfertaBaseSchema(BaseModel):

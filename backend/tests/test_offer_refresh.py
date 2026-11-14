@@ -21,6 +21,8 @@ from app.scrapers.offer_refresh import (
     parse_araujo,
     parse_indiana,
     record_observation,
+    refresh,
+    refresh_images,
 )
 
 
@@ -31,12 +33,47 @@ def _offer(source="indiana"):
         if source == "indiana"
         else "https://www.araujo.com.br/item/101392.html"
     )
+
     ean = "7896523227443" if source == "indiana" else "7897705203095"
     return SimpleNamespace(
         sku_interno=sku,
         url_origem=url,
         produto_catalogo=SimpleNamespace(codigo_barras=ean),
     )
+
+
+@pytest.mark.parametrize(
+    ("refresh_function", "source"),
+    [(refresh, "araujo"), (refresh_images, "araujo"), (refresh_images, "pacheco")],
+)
+def test_recurring_refresh_fails_closed_without_source_authorization(
+    refresh_function, source, monkeypatch
+):
+    monkeypatch.delenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", raising=False)
+    monkeypatch.delenv("PACHECO_PUBLIC_API_AUTHORIZED", raising=False)
+
+    def unexpected_database_access():
+        raise AssertionError("database must not be accessed while source is disabled")
+
+    monkeypatch.setattr(
+        "app.scrapers.offer_refresh.SessionLocal", unexpected_database_access
+    )
+
+    result = refresh_function(source, limit=1, delay=0)
+
+    assert result["stop_reason"] == "source_authorization_required"
+    assert result["checked"] == 0
+
+
+@pytest.mark.parametrize("source", ["araujo", "images-araujo", "images-pacheco"])
+def test_offer_refresh_scheduler_skips_sources_without_authorization(
+    source, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(offer_refresh_scheduler, "STATE_DIR", tmp_path)
+    monkeypatch.delenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", raising=False)
+    monkeypatch.delenv("PACHECO_PUBLIC_API_AUTHORIZED", raising=False)
+
+    assert not offer_refresh_scheduler._due(source, datetime.now(UTC), 30)
 
 
 def test_indiana_requires_exact_sku_ean_and_official_seller():

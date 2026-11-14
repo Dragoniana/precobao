@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import email.utils
 import hashlib
 import json
 import os
@@ -14,10 +15,31 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from curl_cffi import requests
+import httpx
 
 from app.scrapers.base import BasePharmacyScraper
+from app.scrapers.partner_feed import (
+    PartnerFeedForbidden,
+    PartnerFeedRateLimited,
+    load_authorized_partner_feed,
+)
 from app.services.imagens import image_delivery_rejection_reason
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        try:
+            retry_at = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = int((retry_at - datetime.now(UTC)).total_seconds())
+    return max(0, seconds)
 
 
 class PachecoScraper(BasePharmacyScraper):
@@ -28,7 +50,9 @@ class PachecoScraper(BasePharmacyScraper):
         "https://www.drogariaspacheco.com.br"
         "/api/catalog_system/pub/products/search/medicamentos"
     )
-    API_SEARCH = "https://www.drogariaspacheco.com.br/api/catalog_system/pub/products/search"
+    API_SEARCH = (
+        "https://www.drogariaspacheco.com.br/api/catalog_system/pub/products/search"
+    )
     FACETS_API = (
         "https://www.drogariaspacheco.com.br"
         "/api/catalog_system/pub/facets/search/medicamentos?map=c"
@@ -99,6 +123,8 @@ class PachecoScraper(BasePharmacyScraper):
             "source_coverage_gap": None,
             "root_search_capped": False,
             "retryable": False,
+            "last_http_status": None,
+            "retry_after_seconds": None,
             "partition_errors": [],
             "partition_discrepancies": [],
             "persistence": {},
@@ -192,9 +218,10 @@ class PachecoScraper(BasePharmacyScraper):
                         self.stats["status"] = "complete"
                     elif self.stats["stop_reason"] == "configured_item_limit":
                         self.stats["status"] = "limited"
-                    elif not self.stats["retryable"] and self.stats[
-                        "source_coverage_gap"
-                    ]:
+                    elif (
+                        not self.stats["retryable"]
+                        and self.stats["source_coverage_gap"]
+                    ):
                         self.stats["status"] = "partial"
                     else:
                         self.stats["status"] = "incomplete"
@@ -209,14 +236,58 @@ class PachecoScraper(BasePharmacyScraper):
 
     async def extrair_catalogo(self) -> None:
         """Scan the broad category, then its official brand partitions."""
+        try:
+            feed_products = await load_authorized_partner_feed(
+                prefix="PACHECO_PARTNER_FEED", sku_prefix="PCH"
+            )
+        except PartnerFeedForbidden as error:
+            self.stats["last_http_status"] = 403
+            self.stats["retryable"] = False
+            self.stats["stop_reason"] = "http_403"
+            self.stats["errors"].append(str(error))
+            return
+        except PartnerFeedRateLimited as error:
+            self.stats["last_http_status"] = 429
+            self.stats["retry_after_seconds"] = error.retry_after_seconds
+            self.stats["retryable"] = False
+            self.stats["stop_reason"] = "http_429"
+            self.stats["errors"].append(str(error))
+            return
+        if feed_products is not None:
+            for product in feed_products:
+                await self.fila.put(product)
+            self.stats["products_seen"] = len(feed_products)
+            self.stats["unique_source_products"] = len(feed_products)
+            self.stats["products_enqueued"] = len(feed_products)
+            self.items_enqueued = len(feed_products)
+            self.stats["complete"] = True
+            self.stats["stop_reason"] = "authorized_partner_feed_validated"
+            self._write_checkpoint()
+            print(f"Pacheco authorized feed validated: {len(feed_products)} products.")
+            return
+
+        if os.getenv("PACHECO_PUBLIC_API_AUTHORIZED", "false").casefold() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            self._page_failed(
+                "source_authorization_required: configure an authorized partner feed",
+                retryable=False,
+            )
+            return
+
         headers = {
             "Accept": "application/json",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://www.drogariaspacheco.com.br/medicamentos",
         }
 
-        async with requests.AsyncSession(
-            impersonate="chrome110", verify=True, headers=headers
+        async with httpx.AsyncClient(
+            headers=headers,
+            verify=True,
+            follow_redirects=False,
+            timeout=30.0,
         ) as session:
             root_complete = await self._scan_partition(
                 session,
@@ -228,6 +299,8 @@ class PachecoScraper(BasePharmacyScraper):
                 return
             if not root_complete:
                 self.stats["partition_errors"].append("medicamentos")
+                if self.stats.get("last_http_status") in {403, 429}:
+                    return
 
             self.stats["facet_requests"] = self.stats.get("facet_requests", 0) + 1
             try:
@@ -235,8 +308,9 @@ class PachecoScraper(BasePharmacyScraper):
                     session.get, self.FACETS_API, timeout=30.0
                 )
                 if facets_response.status_code not in (200, 206):
-                    self._page_failed(
-                        f"Facet request HTTP {facets_response.status_code}"
+                    self._record_http_failure(
+                        facets_response,
+                        f"Facet request HTTP {facets_response.status_code}",
                     )
                     return
                 facets = facets_response.json()
@@ -292,6 +366,8 @@ class PachecoScraper(BasePharmacyScraper):
                     self.stats["brands_processed"] += 1
                 else:
                     self.stats["partition_errors"].append(str(brand.get("Name")))
+                    if self.stats.get("last_http_status") in {403, 429}:
+                        break
                 self._write_checkpoint()
 
             if self._limit_reached():
@@ -301,9 +377,7 @@ class PachecoScraper(BasePharmacyScraper):
             expected_total = self.stats["facet_reported_total"]
             found_total = self.stats["unique_source_products"]
             if expected_total is not None:
-                self.stats["source_coverage_gap"] = max(
-                    0, expected_total - found_total
-                )
+                self.stats["source_coverage_gap"] = max(0, expected_total - found_total)
             partitions_ok = not self.stats["partition_errors"]
             source_covered = (
                 expected_total is not None and found_total >= expected_total
@@ -354,8 +428,9 @@ class PachecoScraper(BasePharmacyScraper):
                     session.get, url, timeout=30.0
                 )
                 if response.status_code not in (200, 206):
-                    self._page_failed(
-                        f"HTTP {response.status_code} at {partition} offset {offset}"
+                    self._record_http_failure(
+                        response,
+                        f"HTTP {response.status_code} at {partition} offset {offset}",
                     )
                     return False
                 raw_products = response.json()
@@ -480,9 +555,28 @@ class PachecoScraper(BasePharmacyScraper):
         self.stats["stop_reason"] = "configured_item_limit"
         return True
 
-    def _page_failed(self, reason: str) -> None:
+    def _record_http_failure(self, response: Any, reason: str) -> None:
+        status = int(response.status_code)
+        if status in {403, 429}:
+            self.stats["last_http_status"] = status
+            self.stats["retryable"] = False
+            self.stats["stop_reason"] = f"http_{status}"
+            if status == 429:
+                self.stats["retry_after_seconds"] = _retry_after_seconds(
+                    getattr(response, "headers", {}).get("Retry-After")
+                )
+            self.stats["pages_failed"] += 1
+            self.stats["errors"].append(reason)
+            self._write_checkpoint()
+            print(
+                f"Pacheco scan stopped after HTTP {status}; no further source requests."
+            )
+            return
+        self._page_failed(reason)
+
+    def _page_failed(self, reason: str, *, retryable: bool = True) -> None:
         self.stats["pages_failed"] += 1
-        self.stats["retryable"] = True
+        self.stats["retryable"] = retryable
         self.stats["errors"].append(reason)
         self.stats["stop_reason"] = reason
         self._write_checkpoint()
@@ -544,7 +638,9 @@ class PachecoScraper(BasePharmacyScraper):
         quantity = (
             max(0, int(available_quantity))
             if available and available_quantity is not None
-            else 1 if available else 0
+            else 1
+            if available
+            else 0
         )
 
         sku_id = str(sku_data.get("itemId") or item.get("productId") or "")
@@ -603,9 +699,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     limit_label = str(args.max_items) if args.max_items is not None else "sem limite"
     print(f"Starting Pacheco catalog scan ({limit_label})")
-    scraper = PachecoScraper(
-        max_items=args.max_items, request_delay=args.request_delay
-    )
+    scraper = PachecoScraper(max_items=args.max_items, request_delay=args.request_delay)
     try:
         asyncio.run(scraper.run())
     except KeyboardInterrupt:

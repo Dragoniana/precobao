@@ -56,6 +56,8 @@ services:
       OFFER_IMAGE_REFRESH_INDIANA_BATCH: ${OFFER_IMAGE_REFRESH_INDIANA_BATCH:-150}
       OFFER_IMAGE_REFRESH_ARAUJO_BATCH: ${OFFER_IMAGE_REFRESH_ARAUJO_BATCH:-20}
       OFFER_IMAGE_REFRESH_PACHECO_BATCH: ${OFFER_IMAGE_REFRESH_PACHECO_BATCH:-100}
+      ARAUJO_PUBLIC_CATALOG_AUTHORIZED: ${ARAUJO_PUBLIC_CATALOG_AUTHORIZED:-false}
+      PACHECO_PUBLIC_API_AUTHORIZED: ${PACHECO_PUBLIC_API_AUTHORIZED:-false}
     volumes:
       - image_references:/app/data/image_references
       - offer_refresh_state:/app/data/offer_refresh
@@ -69,6 +71,38 @@ services:
     cpus: 1.0
     mem_limit: 1g
 
+  araujo-scheduler:
+    build:
+      context: ../../backend
+    command: ["python", "-m", "app.scrapers.araujo_scheduler"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
+      IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
+      ARAUJO_STATE_DIR: /app/data/araujo
+      ARAUJO_SCHEDULER_ENABLED: ${ARAUJO_SCHEDULER_ENABLED:-false}
+      ARAUJO_INTERVAL_HOURS: ${ARAUJO_INTERVAL_HOURS:-24}
+      ARAUJO_FAILURE_RETRY_MINUTES: ${ARAUJO_FAILURE_RETRY_MINUTES:-60}
+      ARAUJO_PARTNER_FEED_FILE: ${ARAUJO_PARTNER_FEED_FILE:-}
+      ARAUJO_PARTNER_FEED_URL: ${ARAUJO_PARTNER_FEED_URL:-}
+      ARAUJO_PARTNER_FEED_FORMAT: ${ARAUJO_PARTNER_FEED_FORMAT:-}
+      ARAUJO_PARTNER_FEED_TOKEN: ${ARAUJO_PARTNER_FEED_TOKEN:-}
+      ARAUJO_PARTNER_FEED_USERNAME: ${ARAUJO_PARTNER_FEED_USERNAME:-}
+      ARAUJO_PARTNER_FEED_PASSWORD: ${ARAUJO_PARTNER_FEED_PASSWORD:-}
+      PARTNER_FEED_MAX_AGE_HOURS: ${PARTNER_FEED_MAX_AGE_HOURS:-24}
+    volumes:
+      - image_references:/app/data/image_references
+      - araujo_state:/app/data/araujo
+      - ${AUTHORIZED_PARTNER_FEED_DIR:-/opt/preco-bao/partner-feeds}:/run/partner-feeds:ro
+      - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    cpus: 0.5
+    mem_limit: 512m
+
   pacheco-scheduler:
     build:
       context: ../../backend
@@ -77,13 +111,22 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       PACHECO_STATE_DIR: /app/data/pacheco
-      PACHECO_SCHEDULER_ENABLED: ${PACHECO_SCHEDULER_ENABLED:-true}
+      PACHECO_SCHEDULER_ENABLED: ${PACHECO_SCHEDULER_ENABLED:-false}
       PACHECO_INTERVAL_HOURS: ${PACHECO_INTERVAL_HOURS:-24}
       PACHECO_FAILURE_RETRY_MINUTES: ${PACHECO_FAILURE_RETRY_MINUTES:-60}
       PACHECO_REQUEST_DELAY_SECONDS: ${PACHECO_REQUEST_DELAY_SECONDS:-1}
+      PACHECO_PUBLIC_API_AUTHORIZED: ${PACHECO_PUBLIC_API_AUTHORIZED:-false}
+      PACHECO_PARTNER_FEED_FILE: ${PACHECO_PARTNER_FEED_FILE:-}
+      PACHECO_PARTNER_FEED_URL: ${PACHECO_PARTNER_FEED_URL:-}
+      PACHECO_PARTNER_FEED_FORMAT: ${PACHECO_PARTNER_FEED_FORMAT:-}
+      PACHECO_PARTNER_FEED_TOKEN: ${PACHECO_PARTNER_FEED_TOKEN:-}
+      PACHECO_PARTNER_FEED_USERNAME: ${PACHECO_PARTNER_FEED_USERNAME:-}
+      PACHECO_PARTNER_FEED_PASSWORD: ${PACHECO_PARTNER_FEED_PASSWORD:-}
+      PARTNER_FEED_MAX_AGE_HOURS: ${PARTNER_FEED_MAX_AGE_HOURS:-24}
     volumes:
       - image_references:/app/data/image_references
       - pacheco_state:/app/data/pacheco
+      - ${AUTHORIZED_PARTNER_FEED_DIR:-/opt/preco-bao/partner-feeds}:/run/partner-feeds:ro
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
     depends_on:
       api:
@@ -122,6 +165,7 @@ networks:
 volumes:
   image_references:
   offer_refresh_state:
+  araujo_state:
   pacheco_state:
   caddy_data:
   caddy_config:
