@@ -43,6 +43,7 @@ class AraujoScraper(BasePharmacyScraper):
         request_delay: float | None = None,
         max_pages: int | None = None,
         allow_page_limit: bool = False,
+        stop_requested_callback: Callable[[], bool] | None = None,
     ):
         super().__init__(
             farmacia_cnpj="17256512000116",
@@ -69,6 +70,7 @@ class AraujoScraper(BasePharmacyScraper):
             os.getenv("ARAUJO_MAX_PAGES", "200") if max_pages is None else max_pages
         )
         self.allow_page_limit = allow_page_limit
+        self.stop_requested_callback = stop_requested_callback
         self.http_timeout = source_http_config("araujo").timeout
         if self.request_delay < 0 or self.max_pages < 1:
             raise ValueError("Invalid Araújo request delay or page limit")
@@ -195,6 +197,14 @@ class AraujoScraper(BasePharmacyScraper):
                         updated_at=datetime.now(UTC).isoformat(),
                     )
                     self._write_direct_checkpoint(state)
+                    if self.stop_requested_callback and self.stop_requested_callback():
+                        state.update(
+                            status="STOPPED",
+                            stop_reason="safe_stop_requested",
+                            finished_at=datetime.now(UTC).isoformat(),
+                        )
+                        self._write_direct_checkpoint(state)
+                        return
                     if source_cards < self.PAGE_SIZE:
                         break
                     if self.request_delay:

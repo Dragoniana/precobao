@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from contextlib import nullcontext
 
 import pytest
 
@@ -159,3 +160,66 @@ def test_corrupt_collector_checkpoint_fails_closed(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="CHECKPOINT_INVALID"):
         scraper_collector._read_state("araujo")
+
+
+def test_collector_safe_stop_marker_is_observed(tmp_path, monkeypatch):
+    marker = tmp_path / "stop.requested"
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STOP_FILE", str(marker))
+    assert scraper_collector._stop_requested() is False
+    marker.write_text("stop after current synced page", encoding="utf-8")
+    assert scraper_collector._stop_requested() is True
+
+
+@pytest.mark.asyncio
+async def test_collector_replays_pending_outbox_before_source_collection(
+    tmp_path, monkeypatch
+):
+    secret = "collector-outbox-recovery-secret-over-32-bytes"
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SCRAPER_COLLECTOR_ENABLED", "true")
+    monkeypatch.setenv("SCRAPER_COLLECTION_ENV_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", secret)
+    pending = {
+        "batch_id": "f242bf8f-06a2-4d4b-8f12-80af0ff90650",
+        "source": "araujo",
+        "observed_at": "2026-11-15T12:00:00+00:00",
+        "products": [{"id": "42"}],
+    }
+    scraper_collector._write_outbox("araujo", pending)
+    posted = []
+    source_calls = []
+
+    async def fake_post(_client, payload):
+        posted.append(payload)
+        return {"status": "COMPLETE", "product_count": len(payload["products"])}
+
+    class FakeAraujoScraper:
+        products_queued = 0
+        allow_page_limit = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        @staticmethod
+        def _run_lock():
+            return nullcontext()
+
+        async def _extract_direct_catalog(self):
+            source_calls.append("called")
+
+    monkeypatch.setattr(scraper_collector, "post_batch", fake_post)
+    monkeypatch.setattr(
+        "app.scrapers.araujo.AraujoScraper", FakeAraujoScraper
+    )
+
+    result = await scraper_collector.collect_source("araujo")
+
+    assert result["status"] == "COMPLETE"
+    assert result["products_sent"] == 1
+    assert posted == [pending]
+    assert source_calls == ["called"]
+    assert not scraper_collector._outbox_path("araujo").exists()

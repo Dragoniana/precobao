@@ -105,6 +105,7 @@ class PachecoScraper(BasePharmacyScraper):
         self.products_callback: (
             Callable[[list[dict[str, Any]]], Awaitable[None]] | None
         ) = None
+        self.stop_requested_callback: Callable[[], bool] | None = None
         self.collector_delivery_failed = False
 
     @staticmethod
@@ -310,6 +311,8 @@ class PachecoScraper(BasePharmacyScraper):
                 partition="medicamentos",
                 max_offset=self.MAX_BROAD_SEARCH_OFFSET,
             )
+            if self.stats.get("stop_reason") == "safe_stop_requested":
+                return
             if self._limit_reached():
                 return
             if not root_complete:
@@ -380,6 +383,8 @@ class PachecoScraper(BasePharmacyScraper):
                     max_offset=self.MAX_BROAD_SEARCH_OFFSET,
                     query_map="c,b",
                 )
+                if self.stats.get("stop_reason") == "safe_stop_requested":
+                    break
                 if succeeded:
                     self.stats["brands_processed"] += 1
                 else:
@@ -493,6 +498,10 @@ class PachecoScraper(BasePharmacyScraper):
                     except Exception:
                         self.collector_delivery_failed = True
                         raise
+                if self.stop_requested_callback and self.stop_requested_callback():
+                    self.stats["stop_reason"] = "safe_stop_requested"
+                    self._write_checkpoint()
+                    return True
                 self.stats["pages_succeeded"] += 1
                 self.stats["last_completed_offset"] = offset
                 self._write_checkpoint()

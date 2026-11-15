@@ -41,6 +41,11 @@ def _outbox_path(source: str) -> Path:
     return _state_dir() / "outbox" / f"{source}.pending.json"
 
 
+def _stop_requested() -> bool:
+    marker = os.getenv("SCRAPER_COLLECTOR_STOP_FILE", "").strip()
+    return bool(marker and Path(marker).exists())
+
+
 def _read_state(source: str) -> dict[str, Any]:
     path = _source_state_path(source)
     try:
@@ -270,11 +275,15 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                         .casefold()
                         in {"1", "true", "yes", "on"}
                     ),
+                    stop_requested_callback=_stop_requested,
                 )
                 scraper.products_callback = send_page
                 with scraper._run_lock():
                     await scraper._extract_direct_catalog()
                 state["source_products"] = scraper.products_queued
+                if _stop_requested():
+                    state["status"] = "STOPPED"
+                    state["stop_reason"] = "safe_stop_requested_after_synced_page"
                 if (
                     scraper.allow_page_limit
                     and scraper.products_queued
@@ -297,6 +306,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                     source_mode=SourceMode.DIRECT,
                 )
                 scraper.products_callback = send_page
+                scraper.stop_requested_callback = _stop_requested
                 with scraper._run_lock():
                     scraper._start_run()
                     try:
@@ -331,6 +341,9 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 elif scraper.collector_delivery_failed:
                     state["status"] = state.get("status", "SYNC_FAILED")
                     state["stop_reason"] = state.get("stop_reason", "sync_failed")
+                elif scraper.stats.get("stop_reason") == "safe_stop_requested":
+                    state["status"] = "STOPPED"
+                    state["stop_reason"] = "safe_stop_requested_after_synced_page"
                 elif scraper.stats.get("complete"):
                     state["status"] = "COMPLETE"
                 else:
@@ -395,6 +408,15 @@ async def collect_source(source: str) -> dict[str, Any]:
         raise ValueError("source must be araujo or pacheco")
     lock_path = _state_dir() / "locks" / f"{source}.lock"
     with _exclusive_lock(lock_path):
+        if _stop_requested():
+            state = {
+                "source": source,
+                "status": "STOPPED",
+                "stop_reason": "safe_stop_requested_before_source_start",
+                "finished_at": datetime.now(UTC).isoformat(),
+            }
+            _write_state(source, state)
+            return state
         return await _collect_and_sync(source)
 
 

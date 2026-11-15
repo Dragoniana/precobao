@@ -211,6 +211,20 @@ def test_ingest_enforces_batch_size_and_secret_configuration(
     )
 
 
+def test_ingest_streaming_limit_applies_when_content_length_is_understated(
+    ingest_client, monkeypatch
+):
+    client, _sessions = ingest_client
+    body = _body()
+    monkeypatch.setenv("SCRAPER_INGEST_MAX_BODY_BYTES", "100")
+    request_headers = _headers(body)
+    request_headers["Content-Length"] = "1"
+
+    response = client.post(ENDPOINT, content=body, headers=request_headers)
+
+    assert response.status_code == 413
+
+
 def test_ingest_rejects_source_when_server_allowlist_is_empty(
     ingest_client, monkeypatch
 ):

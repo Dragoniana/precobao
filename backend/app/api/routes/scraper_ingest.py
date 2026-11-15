@@ -170,9 +170,12 @@ async def ingest_scraper_batch(
                 status_code=400, detail="invalid_content_length"
             ) from error
 
-    body = await request.body()
-    if len(body) > max_bytes:
-        raise HTTPException(status_code=413, detail="batch_too_large")
+    body_parts = bytearray()
+    async for chunk in request.stream():
+        if len(body_parts) + len(chunk) > max_bytes:
+            raise HTTPException(status_code=413, detail="batch_too_large")
+        body_parts.extend(chunk)
+    body = bytes(body_parts)
     _authenticate_request(request, body)
 
     try:
