@@ -64,6 +64,7 @@ async def test_curl_cffi_client_receives_historical_settings(monkeypatch):
     assert captured["impersonate"] == "chrome110"
     assert captured["verify"] is False
     assert captured["allow_redirects"] is False
+    assert captured["trust_env"] is False
     assert captured["headers"] == {"Accept": "text/html"}
 
 
@@ -92,6 +93,7 @@ async def test_httpx_client_uses_verified_tls_and_disables_redirects(monkeypatch
     assert captured["verify"] is True
     assert captured["follow_redirects"] is False
     assert captured["timeout"] == 30
+    assert captured["trust_env"] is False
 
 
 def test_source_http_rejects_invalid_client_or_timeout(monkeypatch):

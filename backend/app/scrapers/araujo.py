@@ -10,7 +10,7 @@ import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
@@ -71,6 +71,9 @@ class AraujoScraper(BasePharmacyScraper):
         if self.request_delay < 0 or self.max_pages < 1:
             raise ValueError("Invalid Araújo request delay or page limit")
         self.products_queued = 0
+        self.products_callback: (
+            Callable[[list[dict[str, Any]]], Awaitable[None]] | None
+        ) = None
 
     @contextlib.contextmanager
     def _run_lock(self):
@@ -178,8 +181,11 @@ class AraujoScraper(BasePharmacyScraper):
                     products = self.adaptar_parser_araujo_html(response.text)
                     if not products:
                         raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
-                    for product in products:
-                        await self.fila.put(product)
+                    if self.products_callback is not None:
+                        await self.products_callback(products)
+                    else:
+                        for product in products:
+                            await self.fila.put(product)
                     self.products_queued += len(products)
                     state.update(
                         last_completed_page=page,
@@ -357,6 +363,7 @@ class AraujoScraper(BasePharmacyScraper):
                             "quantidade_estoque": 1 if is_available else 0,
                             "link": link,
                             "imagem_url": imagem_url,
+                            "fonte_observado_em": datetime.now(UTC),
                         }
                     )
             except Exception as e:

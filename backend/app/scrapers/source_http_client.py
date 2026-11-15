@@ -75,6 +75,7 @@ async def open_source_http_client(
             verify=config.verify,
             follow_redirects=False,
             timeout=config.timeout,
+            trust_env=False,
         ) as client:
             yield client
         return
@@ -87,5 +88,6 @@ async def open_source_http_client(
         verify=config.verify,
         timeout=config.timeout,
         allow_redirects=False,
+        trust_env=False,
     ) as client:
         yield client

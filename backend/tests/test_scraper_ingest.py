@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.api.routes import scraper_ingest
+from app.core.database import get_db
+from app.main import app
+from app.models import Base, CatalogoBase, HistoricoPreco, OfertaFarmacia
+from app.scrapers import base as scraper_base
+from app.services.enriquecimento import ServicoEnriquecimentoFarmacologico
+
+SECRET = "test-collector-hmac-secret-with-more-than-32-bytes"
+ENDPOINT = "/api/v1/internal/scraper-batches"
+
+
+@pytest.fixture
+def ingest_client(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    testing_sessions = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override_get_db():
+        db = testing_sessions()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    monkeypatch.setattr(scraper_base, "SessionLocal", testing_sessions)
+    monkeypatch.setattr(
+        scraper_base,
+        "upsert_image_references",
+        lambda references: [
+            bool(reference.get("image_url")) for reference in references
+        ],
+    )
+    monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", SECRET)
+    monkeypatch.setenv("SCRAPER_INGEST_ALLOWED_SOURCES", "araujo,pacheco")
+    monkeypatch.setenv("SCRAPER_INGEST_RATE_LIMIT_PER_HOUR", "100")
+    ServicoEnriquecimentoFarmacologico._cache_ean.clear()
+    try:
+        yield TestClient(app, base_url="https://testserver"), testing_sessions
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def _product(*, price: float = 12.5) -> dict:
+    return {
+        "id": "101392",
+        "sku_interno": "ARJ101392",
+        "ean": "7897705203095",
+        "name_search": "Medicamento de teste 1 mg",
+        "preco": price,
+        "disponivel": True,
+        "quantidade_estoque": 1,
+        "link": "https://www.araujo.com.br/produto/101392.html",
+        "imagem_url": "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
+        "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+    }
+
+
+def _body(*, batch_id: str = "b2e4c2b2-23bd-4137-99d4-d0130a3a82b9", price=12.5):
+    return json.dumps(
+        {
+            "batch_id": batch_id,
+            "source": "araujo",
+            "observed_at": "2026-11-15T10:00:00-03:00",
+            "products": [_product(price=price)],
+        },
+        separators=(",", ":"),
+    ).encode()
+
+
+def _headers(body: bytes, *, timestamp: int | None = None) -> dict[str, str]:
+    issued_at = str(int(time.time()) if timestamp is None else timestamp)
+    digest = hmac.new(
+        SECRET.encode(), issued_at.encode() + b"." + body, hashlib.sha256
+    ).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-Scraper-Timestamp": issued_at,
+        "X-Scraper-Signature": f"sha256={digest}",
+    }
+
+
+def test_ingest_is_authenticated_audited_and_idempotent(ingest_client):
+    client, sessions = ingest_client
+    body = _body()
+
+    first = client.post(ENDPOINT, content=body, headers=_headers(body))
+    repeated = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "COMPLETE"
+    assert first.json()["catalog_created"] == 1
+    assert first.json()["catalog_created"] == 1
+    assert first.json()["offers_created"] == 1
+    assert first.json()["price_observations"] == 1
+    assert first.json()["images_registered"] == 1
+    assert repeated.status_code == 200
+    assert repeated.json()["duplicate"] is True
+    with sessions() as db:
+        offer = db.query(OfertaFarmacia).one()
+        assert offer.fonte_observado_em.isoformat().startswith("2026-11-15T13:00:00")
+        assert db.query(OfertaFarmacia).count() == 1
+        assert db.query(HistoricoPreco).count() == 1
+
+
+def test_ingest_rejects_reused_batch_id_with_different_payload(ingest_client):
+    client, sessions = ingest_client
+    first = _body()
+    client.post(ENDPOINT, content=first, headers=_headers(first))
+    changed = _body(price=13.0)
+
+    response = client.post(ENDPOINT, content=changed, headers=_headers(changed))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "batch_id_payload_conflict"
+    with sessions() as db:
+        offer = db.query(OfertaFarmacia).one()
+        assert float(offer.preco) == 12.5
+        assert db.query(HistoricoPreco).count() == 1
+
+
+def test_new_batch_with_unchanged_price_does_not_add_price_history(ingest_client):
+    client, sessions = ingest_client
+    first = _body()
+    client.post(ENDPOINT, content=first, headers=_headers(first))
+    second = _body(batch_id="4515f77c-d8c0-4ac8-8cf8-71f33c468132")
+
+    response = client.post(ENDPOINT, content=second, headers=_headers(second))
+
+    assert response.status_code == 200
+    assert response.json()["offers_updated"] == 1
+    assert response.json()["price_changes"] == 0
+    with sessions() as db:
+        assert db.query(OfertaFarmacia).count() == 1
+        assert db.query(HistoricoPreco).count() == 1
+
+
+def test_ingest_rejects_bad_signature_stale_timestamp_and_non_https(ingest_client):
+    client, _sessions = ingest_client
+    body = _body()
+    bad_signature = _headers(body)
+    bad_signature["X-Scraper-Signature"] = "sha256=" + "0" * 64
+    assert client.post(ENDPOINT, content=body, headers=bad_signature).status_code == 401
+
+    stale = _headers(body, timestamp=int(time.time()) - 600)
+    assert client.post(ENDPOINT, content=body, headers=stale).status_code == 401
+
+    http_client = TestClient(app, base_url="http://testserver")
+    assert (
+        http_client.post(ENDPOINT, content=body, headers=_headers(body)).status_code
+        == 400
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload["products"][0].update(
+            link="https://example.test/unrelated"
+        ),
+        lambda payload: payload["products"][0].update(sku_interno="PCH101392"),
+        lambda payload: payload["products"][0].update(preco=0),
+    ],
+)
+def test_ingest_rejects_source_identity_and_invalid_price(ingest_client, mutation):
+    client, sessions = ingest_client
+    payload = json.loads(_body())
+    mutation(payload)
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == 422
+    with sessions() as db:
+        assert db.query(OfertaFarmacia).count() == 0
+
+
+def test_ingest_enforces_batch_size_and_secret_configuration(
+    ingest_client, monkeypatch
+):
+    client, _sessions = ingest_client
+    body = _body()
+    monkeypatch.setenv("SCRAPER_INGEST_MAX_BODY_BYTES", "10")
+    assert (
+        client.post(ENDPOINT, content=body, headers=_headers(body)).status_code == 413
+    )
+
+    monkeypatch.setenv("SCRAPER_INGEST_MAX_BODY_BYTES", "1000000")
+    monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", "short")
+    assert (
+        client.post(ENDPOINT, content=body, headers=_headers(body)).status_code == 503
+    )
+
+
+def test_ingest_rejects_source_when_server_allowlist_is_empty(
+    ingest_client, monkeypatch
+):
+    client, sessions = ingest_client
+    monkeypatch.setenv("SCRAPER_INGEST_ALLOWED_SOURCES", "")
+    body = _body()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == 403
+    with sessions() as db:
+        assert db.query(scraper_ingest.ScraperImportBatch).count() == 0
+
+
+def test_ingest_clears_invalid_ean_before_persistence(ingest_client):
+    client, sessions = ingest_client
+    payload = json.loads(_body())
+    payload["products"][0]["ean"] = "7897705203094"
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == 200
+    with sessions() as db:
+        assert db.query(CatalogoBase).one().codigo_barras is None
+
+
+def test_ingest_accepts_associated_generic_pacheco_image(ingest_client):
+    client, sessions = ingest_client
+    payload = {
+        "batch_id": "a7791c70-28cc-49bd-9a65-152e1adfc35a",
+        "source": "pacheco",
+        "observed_at": "2026-11-15T10:00:00-03:00",
+        "products": [
+            {
+                "id": "155349",
+                "sku_interno": "PCH155349",
+                "ean": "7891721027468",
+                "name_search": "Glifage XR 500mg 30 comprimidos",
+                "preco": 9.4,
+                "disponivel": True,
+                "quantidade_estoque": 1,
+                "link": "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+                "imagem_url": "https://drogariaspacheco.vteximg.com.br/arquivos/de-referencia-tarja-vermelha-em-comprimido-pacheco.jpg",
+                "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+            }
+        ],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == 200
+    assert response.json()["images_registered"] == 1
+    with sessions() as db:
+        assert db.query(OfertaFarmacia).one().sku_interno == "PCH155349"
+
+
+def test_failed_batch_retries_with_same_id_after_recovery(ingest_client, monkeypatch):
+    client, sessions = ingest_client
+    body = _body()
+    calls = 0
+
+    async def fail_once(_batch):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated persistence interruption")
+        return {
+            "persistence_errors": 0,
+            "unassociated_products": 0,
+            "catalog_items_created": 0,
+            "offers_created": 0,
+            "offers_updated": 1,
+        }
+
+    monkeypatch.setattr(scraper_ingest, "_persist_batch", fail_once)
+    failed = client.post(ENDPOINT, content=body, headers=_headers(body))
+    recovered = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert failed.status_code == 503
+    assert recovered.status_code == 200
+    assert recovered.json()["status"] == "COMPLETE"
+    with sessions() as db:
+        batch = db.query(scraper_ingest.ScraperImportBatch).one()
+        assert batch.attempt_count == 2
+        assert batch.status == "COMPLETE"

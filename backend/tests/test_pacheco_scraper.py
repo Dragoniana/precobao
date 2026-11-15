@@ -129,6 +129,12 @@ async def test_pacheco_paginates_past_pages_without_parseable_offers(
         if "/EMS?" not in url and "/facets/" not in url
     ]
     assert root_offsets == [0, 50]
+    root_urls = [
+        url
+        for url in session.requested_urls
+        if "/EMS?" not in url and "/facets/" not in url
+    ]
+    assert parse_qs(urlsplit(root_urls[0]).query)["map"] == ["c"]
     assert scraper.stats["pages_succeeded"] == 3
     assert scraper.stats["products_seen"] == 54
     assert scraper.stats["unique_source_products"] == 53

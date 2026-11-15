@@ -27,6 +27,7 @@ from .farmacia import Farmacia
 from .historico import HistoricoPreco
 from .identidade_catalogo_fonte import IdentidadeCatalogoFonte
 from .oferta_farmacia import OfertaFarmacia
+from .scraper_import_batch import ScraperImportBatch
 from .usuario import Usuario, usuario_farmacia_favorita, usuario_medicamento_favorito
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "Farmacia",
     "CatalogoBase",
     "OfertaFarmacia",
+    "ScraperImportBatch",
     "HistoricoPreco",
     "IdentidadeCatalogoFonte",
     "AnvisaMedicamento",
