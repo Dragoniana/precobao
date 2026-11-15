@@ -105,6 +105,15 @@ sudo ./preflight.sh
 sudo docker compose --project-name preco-bao-azure --env-file .env.azure ps
 ```
 
+The preflight requires `INDIANA_SCRAPER_ENABLED=true` and
+`OFFER_REFRESH_ENABLED=true`. Missing values stop Compose interpolation; false
+values stop preflight. `SCRAPER_STATE_HOST_DIR` defaults to
+`/var/lib/preco-bao/scraper-state`, shared by the Indiana and offer-refresh
+checkpoints. Preserve this directory and the named image-reference and Caddy
+volumes. Preflight resolves the Compose configuration and checks Caddy routes;
+it does not build or start containers. Run `bash test-preflight.sh` to test a
+valid fixture and the required failure when Indiana is disabled.
+
 Para acompanhar um serviço:
 
 ```sh

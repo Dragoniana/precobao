@@ -92,6 +92,15 @@ for service_name, variable in (
 ):
     if variable not in services[service_name].get("environment", {}):
         raise SystemExit(f"{variable} must be explicitly configured.")
+for service_name, variable in (
+    ("scraper-indiana", "INDIANA_SCRAPER_ENABLED"),
+    ("offer-refresh", "OFFER_REFRESH_ENABLED"),
+):
+    worker_enabled = str(
+        services[service_name].get("environment", {}).get(variable, "false")
+    ).casefold()
+    if worker_enabled not in {"1", "true", "yes", "on"}:
+        raise SystemExit(f"{variable} must remain enabled for production.")
 for pharmacy in ("ARAUJO", "PACHECO"):
     service_name = f"{pharmacy.lower()}-scheduler"
     settings = services[service_name].get("environment", {})
@@ -175,7 +184,7 @@ else:
 if api_domain not in {urlsplit(origin).hostname for origin in origins}:
     raise SystemExit("CORS must allow the exact HTTPS origin hosting the web app.")
 
-caddyfile = (Path(__file__).with_name("Caddyfile")).read_text(encoding="utf-8")
+caddyfile = Path(sys.argv[1]).read_text(encoding="utf-8")
 for required_route in (
     "handle_path /backend/*",
     "reverse_proxy api:8000",
@@ -191,4 +200,4 @@ if len(cert_mounts) != 1 or cert_mounts[0].get("type") != "bind" or not Path(cer
 if not any(m.get("type") == "volume" and m.get("target") == "/app/data/image_references" for m in api.get("volumes", [])):
     raise SystemExit("The image reference JSON must use a persistent named volume.")
 print("Azure preflight passed. No images were built, no containers were started, and no Azure resources were changed.")
-'
+' "$script_dir/Caddyfile"

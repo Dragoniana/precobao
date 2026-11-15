@@ -1,0 +1,72 @@
+name: Pull request validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [codex/integrate-direct-scrapers-20261114]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install backend dependencies
+        working-directory: backend
+        run: poetry install --with dev --no-interaction
+      - name: Ruff
+        working-directory: backend
+        run: poetry run ruff check app tests
+      - name: Backend tests, including DIRECT, FEED and DISABLED modes
+        working-directory: backend
+        run: poetry run pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Frontend tests
+        run: npm test -- --runInBand
+      - name: TypeScript
+        run: npx tsc --noEmit --project tsconfig.json
+      - name: Static web build
+        env:
+          EXPO_PUBLIC_API_URL: https://precobao.app/backend
+        run: npm run export:web
+
+  azure-compose-and-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate Compose and complete preflight with non-production fixtures
+        run: bash deploy/azure/test-preflight.sh

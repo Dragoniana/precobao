@@ -48,7 +48,7 @@ services:
     environment:
       APP_ENV: production
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
-      INDIANA_SCRAPER_ENABLED: ${INDIANA_SCRAPER_ENABLED:-false}
+      INDIANA_SCRAPER_ENABLED: ${INDIANA_SCRAPER_ENABLED:?Set INDIANA_SCRAPER_ENABLED=true for production}
       INDIANA_REQUEST_DELAY_SECONDS: ${INDIANA_REQUEST_DELAY_SECONDS:-2}
       INDIANA_REFRESH_BATCH: ${INDIANA_REFRESH_BATCH:-250}
       INDIANA_REFRESH_DELAY_SECONDS: ${INDIANA_REFRESH_DELAY_SECONDS:-2}
@@ -58,7 +58,7 @@ services:
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       LOG_LEVEL: ${SCRAPER_LOG_LEVEL:-INFO}
     volumes:
-      - /var/lib/preco-bao/scraper-state:/app/data/scraper_state
+      - ${SCRAPER_STATE_HOST_DIR:-/var/lib/preco-bao/scraper-state}:/app/data/scraper_state
       - image_references:/app/data/image_references
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
     restart: unless-stopped
@@ -78,7 +78,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       OFFER_REFRESH_STATE_DIR: /app/data/offer_refresh
-      OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:-true}
+      OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:?Set OFFER_REFRESH_ENABLED=true for production}
       OFFER_REFRESH_SOURCES: ${OFFER_REFRESH_SOURCES:-indiana}
       OFFER_IMAGE_REFRESH_SOURCES: ${OFFER_IMAGE_REFRESH_SOURCES:-indiana}
       OFFER_REFRESH_DAILY_SOURCES: ${OFFER_REFRESH_DAILY_SOURCES:-araujo,pacheco}
@@ -98,7 +98,7 @@ services:
       PACHECO_SOURCE_MODE: ${PACHECO_SOURCE_MODE:-DISABLED}
     volumes:
       - image_references:/app/data/image_references
-      - /var/lib/preco-bao/scraper-state:/app/data/offer_refresh
+      - ${SCRAPER_STATE_HOST_DIR:-/var/lib/preco-bao/scraper-state}:/app/data/offer_refresh
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
     depends_on:
       api:

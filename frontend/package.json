@@ -47,6 +47,10 @@
     "testMatch": [
       "**/__tests__/**/*.test.ts",
       "**/__tests__/**/*.test.tsx"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules[/\\\\](?!(\\.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry[/\\\\]react-native|native-base|query-string|split-on-first|filter-obj))",
+      "node_modules[/\\\\]react-native-reanimated[/\\\\]plugin[/\\\\]"
     ]
   },
   "devDependencies": {
@@ -61,5 +65,10 @@
     "react-test-renderer": "^19.2.0",
     "test-renderer": "1.2.0",
     "typescript": "~5.9.2"
+  },
+  "overrides": {
+    "expo-router": {
+      "query-string": "10.0.0"
+    }
   }
 }
