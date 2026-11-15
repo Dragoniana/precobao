@@ -239,7 +239,7 @@ def resolve_catalog_images(
     catalog_ean: str | None = None,
     require_offer_match: bool = False,
 ) -> list[str]:
-    """Resolve offer references with matching identity and non-generic artwork."""
+    """Resolve images with matching offer or exact catalog identity."""
     linked = {
         int(o.id): o for o in (offers or []) if getattr(o, "id", None) is not None
     }
@@ -254,6 +254,14 @@ def resolve_catalog_images(
     for record in records:
         offer_id = record.get("offer_id")
         exact_offer_identity = False
+        record_ean = record.get("ean")
+        exact_catalog_identity = bool(
+            offer_id is None
+            and record.get("identity_confirmed") is True
+            and catalog_ean
+            and record_ean
+            and gtin_matches(catalog_ean, record_ean)
+        )
         if record.get("catalog_id") != catalog_id:
             continue
         if offer_id is not None and linked and int(offer_id) not in linked:
@@ -290,10 +298,9 @@ def resolve_catalog_images(
                     )
                     for offer in linked_offers
                 )
-                if not same_offer:
+                if not same_offer and not exact_catalog_identity:
                     continue
             else:
-                record_ean = record.get("ean")
                 if (
                     not catalog_ean
                     or not record_ean
@@ -305,21 +312,29 @@ def resolve_catalog_images(
             and linked_pharmacy_ids
             and record.get("pharmacy_id") is not None
             and int(record["pharmacy_id"]) not in linked_pharmacy_ids
+            and not exact_catalog_identity
         ):
             continue
         url = normalize_image_url(record.get("image_url"), record.get("product_url"))
-        allow_generic = record.get("allow_generic") is True and exact_offer_identity
-        if not url or url in found or (is_generic_image_url(url) and not allow_generic):
+        allow_generic = record.get("allow_generic") is True and (
+            exact_offer_identity or exact_catalog_identity
+        )
+        generic_art = bool(url and is_generic_image_url(url))
+        if not url or url in found or (generic_art and not allow_generic):
             continue
 
         record_ean = record.get("ean")
         if catalog_ean and record_ean and not gtin_matches(catalog_ean, record_ean):
             continue
         image_eans = embedded_eans(url)
-        if image_eans and (
-            not catalog_ean
-            or not all(gtin_matches(catalog_ean, image_ean) for image_ean in image_eans)
-        ) and not exact_offer_identity:
+        if (
+            image_eans
+            and catalog_ean
+            and not any(
+                gtin_matches(catalog_ean, image_ean) for image_ean in image_eans
+            )
+            and not (generic_art and allow_generic)
+        ):
             continue
         found.append(url)
     return found

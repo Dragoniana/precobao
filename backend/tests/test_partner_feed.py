@@ -11,6 +11,7 @@ from app.scrapers.partner_feed import (
     load_authorized_partner_feed,
     parse_partner_feed,
 )
+from app.scrapers.source_modes import SourceHTTPError
 
 
 def _product(**overrides):
@@ -49,6 +50,137 @@ def test_legacy_araujo_html_parser_remains_available_for_offline_fixtures():
     assert product["preco"] == 12.5
     assert product["link"] == "https://www.araujo.com.br/dipirona-500mg.html"
     assert product["imagem_url"].endswith("7891234567895_1.webp")
+
+
+def test_araujo_parser_marks_unavailable_cards_and_rejects_missing_identity():
+    scraper = AraujoScraper()
+    html = """
+    <div class="productTile" data-url="/dipirona.html" data-pid="123">
+      <div class="gtmContainer__productTile"
+        data-gtmga4data='{"item_name":"Dipirona 500 mg","price":12.5}'></div>
+      <span>Produto indisponível</span>
+    </div>
+    <div class="productTile" data-url="/bad.html">
+      <div class="gtmContainer__productTile"
+        data-gtmga4data='{"item_name":"Sem SKU","price":1}'></div>
+    </div>
+    """
+
+    [product] = scraper.adaptar_parser_araujo_html(html)
+
+    assert product["sku_interno"] == "ARJ123"
+    assert product["disponivel"] is False
+    assert product["quantidade_estoque"] == 0
+
+
+@pytest.mark.asyncio
+async def test_araujo_direct_mode_works_without_feed_and_persists_page_checkpoint(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.delenv("ARAUJO_PARTNER_FEED_FILE", raising=False)
+    monkeypatch.delenv("ARAUJO_PARTNER_FEED_URL", raising=False)
+    monkeypatch.setenv("ARAUJO_STATE_DIR", str(tmp_path))
+    captured = {}
+
+    class Response:
+        status_code = 200
+        headers = {}
+        text = '<div class="productTile" data-pid="1"></div>'
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["request"] = kwargs
+            return Response()
+
+    monkeypatch.setattr("app.scrapers.araujo.httpx.AsyncClient", Client)
+    scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
+    monkeypatch.setattr(
+        scraper,
+        "adaptar_parser_araujo_html",
+        lambda _html: [
+            {
+                "id": "1",
+                "sku_interno": "ARJ1",
+                "name_search": "Produto",
+                "preco": 10,
+                "link": "https://www.araujo.com.br/produto/1.html",
+            }
+        ],
+    )
+
+    await scraper.extrair_catalogo()
+
+    assert captured["verify"] is True
+    assert captured["follow_redirects"] is False
+    assert captured["url"] == scraper.CATALOG_URL
+    assert captured["request"]["params"] == {"page": 1}
+    assert scraper.fila.get_nowait()["sku_interno"] == "ARJ1"
+    checkpoint = json.loads(scraper.source_checkpoint_path.read_text())
+    assert checkpoint["status"] == "COMPLETE"
+    assert checkpoint["resume_strategy"] == "replay_from_first_page"
+
+
+@pytest.mark.asyncio
+async def test_araujo_direct_403_stops_without_advancing_checkpoint(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("ARAUJO_STATE_DIR", str(tmp_path))
+
+    class Response:
+        status_code = 403
+        headers = {}
+        text = "denied"
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("app.scrapers.araujo.httpx.AsyncClient", Client)
+    scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
+
+    with pytest.raises(SourceHTTPError) as error:
+        await scraper.extrair_catalogo()
+
+    checkpoint = json.loads(scraper.source_checkpoint_path.read_text())
+    assert error.value.status_code == 403
+    assert checkpoint["status"] == "ACCESS_BLOCKED"
+    assert checkpoint["last_completed_page"] == 0
+
+
+def test_source_modes_are_explicit_and_default_disabled(monkeypatch):
+    from app.scrapers.source_modes import SourceMode, source_mode
+
+    monkeypatch.delenv("ARAUJO_SOURCE_MODE", raising=False)
+    assert source_mode("araujo") is SourceMode.DISABLED
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "direct")
+    assert source_mode("araujo") is SourceMode.DIRECT
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "unknown")
+    with pytest.raises(ValueError, match="DIRECT, FEED or DISABLED"):
+        source_mode("araujo")
 
 
 def test_csv_feed_maps_to_validated_scraper_contract():
@@ -118,6 +250,7 @@ def test_invalid_feed_row_rejects_the_whole_document(overrides):
 async def test_file_feed_is_validated_before_araujo_queues_products(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "FEED")
     source_file = tmp_path / "araujo.json"
     source_file.write_text(json.dumps([_product()]), encoding="utf-8")
     monkeypatch.setenv("ARAUJO_PARTNER_FEED_FILE", str(source_file))
@@ -133,9 +266,26 @@ async def test_file_feed_is_validated_before_araujo_queues_products(
 
 @pytest.mark.asyncio
 async def test_araujo_without_partner_feed_fails_closed():
-    scraper = AraujoScraper()
-    with pytest.raises(RuntimeError, match="feed autorizado"):
+    scraper = AraujoScraper(source_mode="FEED")
+    with pytest.raises(RuntimeError, match="ARAUJO_PARTNER_FEED_NOT_CONFIGURED"):
         await scraper.extrair_catalogo()
+
+
+@pytest.mark.asyncio
+async def test_araujo_disabled_mode_never_falls_back_to_direct(monkeypatch):
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DISABLED")
+    scraper = AraujoScraper()
+    monkeypatch.setattr(
+        "app.scrapers.araujo.httpx.AsyncClient",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("DISABLED mode must not contact the source")
+        ),
+    )
+
+    await scraper.extrair_catalogo()
+
+    assert scraper.fila.empty()
+    assert scraper.products_queued == 0
 
 
 @pytest.mark.asyncio
@@ -220,6 +370,7 @@ async def test_partner_api_403_is_not_retried_or_exposed_with_credentials(monkey
 async def test_pacheco_feed_is_used_without_contacting_public_site(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("PACHECO_SOURCE_MODE", "FEED")
     source_file = tmp_path / "pacheco.csv"
     source_file.write_text(
         "id,sku,name,price,currency,available,quantity,url,observed_at\n"

@@ -7,18 +7,42 @@ import contextlib
 import json
 import os
 import re
+import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urljoin, urlsplit
 
+import httpx
 from bs4 import BeautifulSoup
 
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import load_authorized_partner_feed
+from app.scrapers.source_modes import (
+    SourceHTTPError,
+    SourceMode,
+    direct_access_ready,
+    validate_source_response,
+)
+from app.scrapers.source_modes import (
+    source_mode as configured_source_mode,
+)
 from app.services.imagens import image_delivery_rejection_reason
 
 
 class AraujoScraper(BasePharmacyScraper):
-    def __init__(self, num_workers: int = 3, batch_size: int = 50):
+    CATALOG_URL = "https://www.araujo.com.br/medicamentos"
+    PAGE_SIZE = 48
+
+    def __init__(
+        self,
+        num_workers: int = 3,
+        batch_size: int = 50,
+        *,
+        source_mode: SourceMode | str | None = None,
+        request_delay: float | None = None,
+        max_pages: int | None = None,
+    ):
         super().__init__(
             farmacia_cnpj="17256512000116",
             farmacia_razao_social="Drogaria Araujo S.A",
@@ -27,8 +51,24 @@ class AraujoScraper(BasePharmacyScraper):
             num_workers=num_workers,
             batch_size=batch_size,
         )
+        self.source_mode = (
+            SourceMode(source_mode.upper())
+            if isinstance(source_mode, str)
+            else source_mode or configured_source_mode("araujo")
+        )
         self.feed_prefix = "ARAUJO_PARTNER_FEED"
         self.state_dir = Path(os.getenv("ARAUJO_STATE_DIR", "data/araujo"))
+        self.source_checkpoint_path = self.state_dir / "source-checkpoint.json"
+        self.request_delay = float(
+            os.getenv("ARAUJO_REQUEST_DELAY_SECONDS", "1")
+            if request_delay is None
+            else request_delay
+        )
+        self.max_pages = int(
+            os.getenv("ARAUJO_MAX_PAGES", "200") if max_pages is None else max_pages
+        )
+        if self.request_delay < 0 or self.max_pages < 1:
+            raise ValueError("Invalid Araújo request delay or page limit")
         self.products_queued = 0
 
     @contextlib.contextmanager
@@ -69,24 +109,129 @@ class AraujoScraper(BasePharmacyScraper):
             await super().run()
 
     async def extrair_catalogo(self) -> None:
-        """
-        Importa apenas um feed da Araujo fornecido por canal autorizado.
-
-        A coleta direta do site público não é iniciada: os termos oficiais vedam
-        mineração de dados, e a VM recebe HTTP 403 em requisição convencional.
-        """
-        products = await load_authorized_partner_feed(
-            prefix=self.feed_prefix, sku_prefix="ARJ"
-        )
-        if products is None:
-            raise RuntimeError(
-                "A coleta Araújo exige um feed autorizado; configure "
-                "ARAUJO_PARTNER_FEED_FILE ou ARAUJO_PARTNER_FEED_URL."
+        """Use exactly one explicitly selected source path; never fall back."""
+        if self.source_mode is SourceMode.DISABLED:
+            return
+        if self.source_mode is SourceMode.FEED:
+            products = await load_authorized_partner_feed(
+                prefix=self.feed_prefix, sku_prefix="ARJ"
             )
-        for product in products:
-            await self.fila.put(product)
-        self.products_queued = len(products)
-        print(f"Araújo partner feed validated: {len(products)} products queued.")
+            if products is None:
+                raise RuntimeError("ARAUJO_PARTNER_FEED_NOT_CONFIGURED")
+            for product in products:
+                await self.fila.put(product)
+            self.products_queued = len(products)
+            print(f"Araújo partner feed validated: {len(products)} products queued.")
+            return
+        if not direct_access_ready("araujo"):
+            raise RuntimeError("ARAUJO_DIRECT_ACCESS_NOT_CONFIRMED")
+        await self._extract_direct_catalog()
+
+    def _write_direct_checkpoint(self, state: dict[str, Any]) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=".araujo-source-", suffix=".tmp", dir=self.state_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.source_checkpoint_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    async def _extract_direct_catalog(self) -> None:
+        """Page the current public catalog using normal TLS-verified HTTP."""
+        state: dict[str, Any] = {
+            "source": "araujo",
+            "mode": SourceMode.DIRECT.value,
+            "status": "RUNNING",
+            "started_at": datetime.now(UTC).isoformat(),
+            "resume_strategy": "replay_from_first_page",
+            "last_completed_page": 0,
+            "products_queued": 0,
+        }
+        self._write_direct_checkpoint(state)
+        headers = {
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
+            "User-Agent": "PrecoBao authorized catalog client/1.0",
+        }
+        try:
+            async with httpx.AsyncClient(
+                headers=headers, verify=True, follow_redirects=False, timeout=30.0
+            ) as client:
+                for page in range(1, self.max_pages + 1):
+                    response = await self.executar_com_backoff(
+                        client.get,
+                        self.CATALOG_URL,
+                        params={"page": page},
+                        timeout=30.0,
+                    )
+                    validate_source_response(response, accepted={200})
+                    source_cards = self._catalog_card_count(response.text)
+                    if source_cards == 0:
+                        if page == 1:
+                            raise RuntimeError("ARAUJO_CATALOG_SELECTOR_MISMATCH")
+                        break
+                    products = self.adaptar_parser_araujo_html(response.text)
+                    if not products:
+                        raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
+                    for product in products:
+                        await self.fila.put(product)
+                    self.products_queued += len(products)
+                    state.update(
+                        last_completed_page=page,
+                        products_queued=self.products_queued,
+                        updated_at=datetime.now(UTC).isoformat(),
+                    )
+                    self._write_direct_checkpoint(state)
+                    if source_cards < self.PAGE_SIZE:
+                        break
+                    if self.request_delay:
+                        await asyncio.sleep(self.request_delay)
+                else:
+                    raise RuntimeError("ARAUJO_MAX_PAGES_REACHED")
+            state.update(
+                status="COMPLETE",
+                finished_at=datetime.now(UTC).isoformat(),
+                next_run_replays_from_page=1,
+            )
+            self._write_direct_checkpoint(state)
+            print(
+                f"Araújo direct catalog completed: "
+                f"{self.products_queued} products queued."
+            )
+        except SourceHTTPError as error:
+            state.update(
+                status=(
+                    "ACCESS_BLOCKED"
+                    if error.status_code == 403
+                    else "RATE_LIMITED"
+                    if error.status_code == 429
+                    else "ERROR"
+                ),
+                stop_reason=f"http_{error.status_code}",
+                retry_after_seconds=error.retry_after_seconds,
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            self._write_direct_checkpoint(state)
+            raise
+        except Exception as error:
+            state.update(
+                status="ERROR",
+                stop_reason=type(error).__name__,
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            self._write_direct_checkpoint(state)
+            raise
+
+    @staticmethod
+    def _catalog_card_count(html_content: str) -> int:
+        soup = BeautifulSoup(markup=html_content, features="html.parser")
+        return len(soup.find_all(name="div", class_="productTile"))
 
     def adaptar_parser_araujo_html(self, html_content: str) -> List[Dict[str, Any]]:
         """
@@ -96,24 +241,6 @@ class AraujoScraper(BasePharmacyScraper):
         """
         catalogo_limpo = []
         soup = BeautifulSoup(markup=html_content, features="html.parser")
-        # DEBUG: Liste as classes de todas as divs para ver se o nome mudou
-        divs = soup.find_all("div")
-        classes_encontradas = set()
-        for div in divs:
-            if div.get("class"):
-                classes_encontradas.update(div.get("class"))
-
-        print(
-            "DEBUG: Classes CSS encontradas na página: "
-            f"{list(classes_encontradas)[:20]}..."
-        )
-        # Verifica se o seletor antigo ainda existe
-        tem_product_tile = soup.find_all(class_="productTile")
-        print(
-            "DEBUG: Quantidade de elementos 'productTile' encontrados: "
-            f"{len(tem_product_tile)}"
-        )
-
         cards_produtos = soup.find_all(name="div", class_="productTile")
 
         for card in cards_produtos:
@@ -127,7 +254,13 @@ class AraujoScraper(BasePharmacyScraper):
                 else:
                     link_path = ""
 
-                link = f"https://www.araujo.com.br{link_path}" if link_path else ""
+                link = urljoin("https://www.araujo.com.br/", link_path)
+                parsed_link = urlsplit(link)
+                if (
+                    parsed_link.scheme != "https"
+                    or parsed_link.hostname != "www.araujo.com.br"
+                ):
+                    continue
 
                 # 2. Dados GTM
                 gtm_tag = card.find("div", class_="gtmContainer__productTile")
@@ -201,14 +334,28 @@ class AraujoScraper(BasePharmacyScraper):
                     if match:
                         ean = match.group(1).strip().replace("-", "")
 
-                if link:
+                if link and id_interno.isdigit() and nome and float(preco) > 0:
+                    unavailable_markers = (
+                        "indisponível",
+                        "indisponivel",
+                        "esgotado",
+                        "sem estoque",
+                    )
+                    card_text = card.get_text(" ", strip=True).casefold()
+                    is_available = not any(
+                        marker in card_text for marker in unavailable_markers
+                    ) and not card.select_one(
+                        ".productTile__unavailable, [data-available='false']"
+                    )
                     catalogo_limpo.append(
                         {
                             "id": id_interno,
                             "sku_interno": f"ARJ{id_interno}",
                             "ean": ean,
-                            "name_search": nome,
+                            "name_search": str(nome)[:150],
                             "preco": float(preco),
+                            "disponivel": is_available,
+                            "quantidade_estoque": 1 if is_available else 0,
                             "link": link,
                             "imagem_url": imagem_url,
                         }

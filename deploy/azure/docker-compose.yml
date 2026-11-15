@@ -38,6 +38,36 @@ services:
       start_period: 15s
     restart: unless-stopped
     networks:
+      api_edge:
+        ipv4_address: ${API_CONTAINER_IP:-172.29.240.3}
+
+  scraper-indiana:
+    build:
+      context: ../../backend
+    command: ["python", "-m", "app.scrapers.indiana_worker"]
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
+      INDIANA_SCRAPER_ENABLED: ${INDIANA_SCRAPER_ENABLED:?Set INDIANA_SCRAPER_ENABLED=true for production}
+      INDIANA_REQUEST_DELAY_SECONDS: ${INDIANA_REQUEST_DELAY_SECONDS:-2}
+      INDIANA_REFRESH_BATCH: ${INDIANA_REFRESH_BATCH:-250}
+      INDIANA_REFRESH_DELAY_SECONDS: ${INDIANA_REFRESH_DELAY_SECONDS:-2}
+      SCRAPER_INTERVAL_HOURS: ${SCRAPER_INTERVAL_HOURS:-24}
+      SCRAPER_STATE_DIR: /app/data/scraper_state
+      OFFER_REFRESH_STATE_DIR: /app/data/scraper_state
+      IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
+      LOG_LEVEL: ${SCRAPER_LOG_LEVEL:-INFO}
+    volumes:
+      - ${SCRAPER_STATE_HOST_DIR:-/var/lib/preco-bao/scraper-state}:/app/data/scraper_state
+      - image_references:/app/data/image_references
+      - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+    restart: unless-stopped
+    cpus: 0.50
+    mem_limit: 512m
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
       - api_edge
 
   offer-refresh:
@@ -48,7 +78,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       OFFER_REFRESH_STATE_DIR: /app/data/offer_refresh
-      OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:-true}
+      OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:?Set OFFER_REFRESH_ENABLED=true for production}
+      OFFER_REFRESH_SOURCES: ${OFFER_REFRESH_SOURCES:-indiana}
+      OFFER_IMAGE_REFRESH_SOURCES: ${OFFER_IMAGE_REFRESH_SOURCES:-indiana}
+      OFFER_REFRESH_DAILY_SOURCES: ${OFFER_REFRESH_DAILY_SOURCES:-araujo,pacheco}
+      OFFER_REFRESH_SCHEDULE_TIMES: ${OFFER_REFRESH_SCHEDULE_TIMES:-08:00,20:00}
       OFFER_REFRESH_INTERVAL_MINUTES: ${OFFER_REFRESH_INTERVAL_MINUTES:-30}
       OFFER_REFRESH_INDIANA_BATCH: ${OFFER_REFRESH_INDIANA_BATCH:-200}
       OFFER_REFRESH_ARAUJO_BATCH: ${OFFER_REFRESH_ARAUJO_BATCH:-20}
@@ -58,9 +92,13 @@ services:
       OFFER_IMAGE_REFRESH_PACHECO_BATCH: ${OFFER_IMAGE_REFRESH_PACHECO_BATCH:-100}
       ARAUJO_PUBLIC_CATALOG_AUTHORIZED: ${ARAUJO_PUBLIC_CATALOG_AUTHORIZED:-false}
       PACHECO_PUBLIC_API_AUTHORIZED: ${PACHECO_PUBLIC_API_AUTHORIZED:-false}
+      ARAUJO_ACCESS_CONFIRMED: ${ARAUJO_ACCESS_CONFIRMED:-false}
+      PACHECO_ACCESS_CONFIRMED: ${PACHECO_ACCESS_CONFIRMED:-false}
+      ARAUJO_SOURCE_MODE: ${ARAUJO_SOURCE_MODE:-DISABLED}
+      PACHECO_SOURCE_MODE: ${PACHECO_SOURCE_MODE:-DISABLED}
     volumes:
       - image_references:/app/data/image_references
-      - offer_refresh_state:/app/data/offer_refresh
+      - ${SCRAPER_STATE_HOST_DIR:-/var/lib/preco-bao/scraper-state}:/app/data/offer_refresh
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
     depends_on:
       api:
@@ -79,9 +117,14 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       ARAUJO_STATE_DIR: /app/data/araujo
+      ARAUJO_SOURCE_MODE: ${ARAUJO_SOURCE_MODE:-DISABLED}
       ARAUJO_SCHEDULER_ENABLED: ${ARAUJO_SCHEDULER_ENABLED:-false}
       ARAUJO_INTERVAL_HOURS: ${ARAUJO_INTERVAL_HOURS:-24}
       ARAUJO_FAILURE_RETRY_MINUTES: ${ARAUJO_FAILURE_RETRY_MINUTES:-60}
+      ARAUJO_REQUEST_DELAY_SECONDS: ${ARAUJO_REQUEST_DELAY_SECONDS:-1}
+      ARAUJO_MAX_PAGES: ${ARAUJO_MAX_PAGES:-200}
+      ARAUJO_PUBLIC_CATALOG_AUTHORIZED: ${ARAUJO_PUBLIC_CATALOG_AUTHORIZED:-false}
+      ARAUJO_ACCESS_CONFIRMED: ${ARAUJO_ACCESS_CONFIRMED:-false}
       ARAUJO_PARTNER_FEED_FILE: ${ARAUJO_PARTNER_FEED_FILE:-}
       ARAUJO_PARTNER_FEED_URL: ${ARAUJO_PARTNER_FEED_URL:-}
       ARAUJO_PARTNER_FEED_FORMAT: ${ARAUJO_PARTNER_FEED_FORMAT:-}
@@ -111,11 +154,13 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set the managed Azure PostgreSQL DATABASE_URL}
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       PACHECO_STATE_DIR: /app/data/pacheco
+      PACHECO_SOURCE_MODE: ${PACHECO_SOURCE_MODE:-DISABLED}
       PACHECO_SCHEDULER_ENABLED: ${PACHECO_SCHEDULER_ENABLED:-false}
       PACHECO_INTERVAL_HOURS: ${PACHECO_INTERVAL_HOURS:-24}
       PACHECO_FAILURE_RETRY_MINUTES: ${PACHECO_FAILURE_RETRY_MINUTES:-60}
       PACHECO_REQUEST_DELAY_SECONDS: ${PACHECO_REQUEST_DELAY_SECONDS:-1}
       PACHECO_PUBLIC_API_AUTHORIZED: ${PACHECO_PUBLIC_API_AUTHORIZED:-false}
+      PACHECO_ACCESS_CONFIRMED: ${PACHECO_ACCESS_CONFIRMED:-false}
       PACHECO_PARTNER_FEED_FILE: ${PACHECO_PARTNER_FEED_FILE:-}
       PACHECO_PARTNER_FEED_URL: ${PACHECO_PARTNER_FEED_URL:-}
       PACHECO_PARTNER_FEED_FORMAT: ${PACHECO_PARTNER_FEED_FORMAT:-}
@@ -137,6 +182,25 @@ services:
     cpus: 1.0
     mem_limit: 1g
 
+  web:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile.web
+      args:
+        EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL:?Set the public HTTPS API base URL}
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      api_edge:
+        ipv4_address: ${WEB_CONTAINER_IP:-172.29.240.4}
+
   caddy:
     image: caddy:2.10-alpine
     environment:
@@ -150,6 +214,8 @@ services:
       - caddy_config:/config
     depends_on:
       api:
+        condition: service_healthy
+      web:
         condition: service_healthy
     restart: unless-stopped
     networks:

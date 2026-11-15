@@ -25,13 +25,21 @@ def _available_offer_options(farmacia_id: int | None = None):
     return selectinload(offers).selectinload(OfertaFarmacia.farmacia)
 
 
+def _available_min_prices(farmacia_id: int | None = None):
+    """Aggregate the available minimum once per medicine instead of per row."""
+    query = select(
+        OfertaFarmacia.catalogo_id.label("catalogo_id"),
+        func.min(OfertaFarmacia.preco).label("menor_preco"),
+    ).where(OfertaFarmacia.disponivel.is_(True))
+    if farmacia_id is not None:
+        query = query.where(OfertaFarmacia.farmacia_id == farmacia_id)
+    return query.group_by(OfertaFarmacia.catalogo_id).subquery("preco_por_medicamento")
+
+
 @router.get("/farmacias", response_model=list[FarmaciaOut])
 def listar_farmacias(db: Session = Depends(get_db)):
     return (
-        db.execute(
-            select(Farmacia)
-            .order_by(Farmacia.nome_fantasia, Farmacia.id)
-        )
+        db.execute(select(Farmacia).order_by(Farmacia.nome_fantasia, Farmacia.id))
         .scalars()
         .all()
     )
@@ -42,21 +50,13 @@ def listar_mais_baratos(
     limit: int = Query(6, ge=1, le=30),
     db: Session = Depends(get_db),
 ):
-    menor_preco = (
-        select(func.min(OfertaFarmacia.preco))
-        .where(
-            OfertaFarmacia.catalogo_id == CatalogoBase.id,
-            OfertaFarmacia.disponivel.is_(True),
-        )
-        .correlate(CatalogoBase)
-        .scalar_subquery()
-    )
+    precos = _available_min_prices()
     products = (
         db.execute(
             select(CatalogoBase)
-            .where(menor_preco.is_not(None))
+            .join(precos, precos.c.catalogo_id == CatalogoBase.id)
             .options(_available_offer_options())
-            .order_by(menor_preco, CatalogoBase.id)
+            .order_by(precos.c.menor_preco.asc(), CatalogoBase.id.asc())
             .limit(limit)
         )
         .scalars()
@@ -193,31 +193,14 @@ def listar_catalogo_completo(
     total_stmt = select(func.count()).select_from(stmt.subquery())
     total = db.execute(total_stmt).scalar() or 0
 
-    menor_preco = (
-        select(func.min(OfertaFarmacia.preco))
-        .where(
-            OfertaFarmacia.catalogo_id == CatalogoBase.id,
-            OfertaFarmacia.disponivel.is_(True),
-        )
-        .correlate(CatalogoBase)
-        .scalar_subquery()
-    )
-    if farmacia_id is not None:
-        menor_preco = (
-            select(func.min(OfertaFarmacia.preco))
-            .where(
-                OfertaFarmacia.catalogo_id == CatalogoBase.id,
-                OfertaFarmacia.farmacia_id == farmacia_id,
-                OfertaFarmacia.disponivel.is_(True),
-            )
-            .correlate(CatalogoBase)
-            .scalar_subquery()
-        )
-
     if ordenar == "menor_preco":
-        order_by = (menor_preco.asc().nullslast(), CatalogoBase.id.asc())
+        precos = _available_min_prices(farmacia_id)
+        stmt = stmt.outerjoin(precos, precos.c.catalogo_id == CatalogoBase.id)
+        order_by = (precos.c.menor_preco.asc().nullslast(), CatalogoBase.id.asc())
     elif ordenar == "maior_preco":
-        order_by = (menor_preco.desc().nullslast(), CatalogoBase.id.asc())
+        precos = _available_min_prices(farmacia_id)
+        stmt = stmt.outerjoin(precos, precos.c.catalogo_id == CatalogoBase.id)
+        order_by = (precos.c.menor_preco.desc().nullslast(), CatalogoBase.id.asc())
     elif ordenar == "nome":
         order_by = (func.lower(CatalogoBase.name_search).asc(), CatalogoBase.id.asc())
     else:
