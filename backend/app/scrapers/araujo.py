@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urljoin, urlsplit
 
-import httpx
 from bs4 import BeautifulSoup
 
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import load_authorized_partner_feed
+from app.scrapers.source_http_client import open_source_http_client, source_http_config
 from app.scrapers.source_modes import (
     SourceHTTPError,
     SourceMode,
@@ -67,6 +67,7 @@ class AraujoScraper(BasePharmacyScraper):
         self.max_pages = int(
             os.getenv("ARAUJO_MAX_PAGES", "200") if max_pages is None else max_pages
         )
+        self.http_timeout = source_http_config("araujo").timeout
         if self.request_delay < 0 or self.max_pages < 1:
             raise ValueError("Invalid Araújo request delay or page limit")
         self.products_queued = 0
@@ -143,7 +144,7 @@ class AraujoScraper(BasePharmacyScraper):
                 os.unlink(temporary)
 
     async def _extract_direct_catalog(self) -> None:
-        """Page the current public catalog using normal TLS-verified HTTP."""
+        """Page the current public catalog with the configured source client."""
         state: dict[str, Any] = {
             "source": "araujo",
             "mode": SourceMode.DIRECT.value,
@@ -160,15 +161,13 @@ class AraujoScraper(BasePharmacyScraper):
             "User-Agent": "PrecoBao authorized catalog client/1.0",
         }
         try:
-            async with httpx.AsyncClient(
-                headers=headers, verify=True, follow_redirects=False, timeout=30.0
-            ) as client:
+            async with open_source_http_client("araujo", headers=headers) as client:
                 for page in range(1, self.max_pages + 1):
                     response = await self.executar_com_backoff(
                         client.get,
                         self.CATALOG_URL,
                         params={"page": page},
-                        timeout=30.0,
+                        timeout=self.http_timeout,
                     )
                     validate_source_response(response, accepted={200})
                     source_cards = self._catalog_card_count(response.text)

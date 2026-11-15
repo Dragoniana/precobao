@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-import httpx
-
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import (
     PartnerFeedForbidden,
     PartnerFeedRateLimited,
     load_authorized_partner_feed,
 )
+from app.scrapers.source_http_client import open_source_http_client, source_http_config
 from app.scrapers.source_modes import (
     SourceMode,
     direct_access_ready,
@@ -92,6 +91,7 @@ class PachecoScraper(BasePharmacyScraper):
         )
         self.max_items = max_items
         self.request_delay = request_delay
+        self.http_timeout = source_http_config("pacheco").timeout
         self.source_mode = (
             SourceMode(source_mode.upper())
             if isinstance(source_mode, str)
@@ -299,12 +299,7 @@ class PachecoScraper(BasePharmacyScraper):
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
 
-        async with httpx.AsyncClient(
-            headers=headers,
-            verify=True,
-            follow_redirects=False,
-            timeout=30.0,
-        ) as session:
+        async with open_source_http_client("pacheco", headers=headers) as session:
             root_complete = await self._scan_partition(
                 session,
                 self.API_BASE,
@@ -321,7 +316,7 @@ class PachecoScraper(BasePharmacyScraper):
             self.stats["facet_requests"] = self.stats.get("facet_requests", 0) + 1
             try:
                 facets_response = await self.executar_com_backoff(
-                    session.get, self.FACETS_API, timeout=30.0
+                    session.get, self.FACETS_API, timeout=self.http_timeout
                 )
                 if facets_response.status_code not in (200, 206):
                     self._record_http_failure(
@@ -441,7 +436,7 @@ class PachecoScraper(BasePharmacyScraper):
             print(f"Pacheco {partition}: items {offset}-{end}")
             try:
                 response = await self.executar_com_backoff(
-                    session.get, url, timeout=30.0
+                    session.get, url, timeout=self.http_timeout
                 )
                 if response.status_code not in (200, 206):
                     self._record_http_failure(

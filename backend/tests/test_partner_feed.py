@@ -105,7 +105,7 @@ async def test_araujo_direct_mode_works_without_feed_and_persists_page_checkpoin
             captured["request"] = kwargs
             return Response()
 
-    monkeypatch.setattr("app.scrapers.araujo.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.scrapers.source_http_client.httpx.AsyncClient", Client)
     scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
     monkeypatch.setattr(
         scraper,
@@ -159,7 +159,7 @@ async def test_araujo_direct_403_stops_without_advancing_checkpoint(
         async def get(self, _url, **_kwargs):
             return Response()
 
-    monkeypatch.setattr("app.scrapers.araujo.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.scrapers.source_http_client.httpx.AsyncClient", Client)
     scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
 
     with pytest.raises(SourceHTTPError) as error:
@@ -276,7 +276,7 @@ async def test_araujo_disabled_mode_never_falls_back_to_direct(monkeypatch):
     monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DISABLED")
     scraper = AraujoScraper()
     monkeypatch.setattr(
-        "app.scrapers.araujo.httpx.AsyncClient",
+        "app.scrapers.source_http_client.httpx.AsyncClient",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("DISABLED mode must not contact the source")
         ),
