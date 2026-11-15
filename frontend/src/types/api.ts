@@ -50,6 +50,7 @@ export interface Medicamento {
   imagem_url?: string | null;
   imagem_urls?: string[];
   imagem_ref?: string | null;
+  imagem_armazenada?: boolean;
   imagem_fonte?: string | null;
   imagem_status?: string | null;
   imagem_motivo_rejeicao?: string | null;

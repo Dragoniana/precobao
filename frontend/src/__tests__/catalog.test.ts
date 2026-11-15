@@ -38,6 +38,22 @@ it('renders only API-resolved registry URLs without pharmacy-specific rules', ()
   expect(resolveMedicineImages({ ...medicine, imagem_urls: [] })).toEqual([]);
 });
 
+it('prefers the API-served database image while keeping legacy URLs as fallback', () => {
+  const medicine = {
+    ...item,
+    id: 42,
+    imagem_armazenada: true,
+    imagem_ref: '/catalogo/medicamentos/42/imagem?v=abc123',
+    imagem_urls: ['https://cdn.example.test/legacy-pack.jpg'],
+    imagem_url: 'https://shop.example.test/older-pack.jpg',
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toContain('/catalogo/medicamentos/42/imagem?v=abc123');
+  expect(images).toContain('https://cdn.example.test/legacy-pack.jpg');
+  expect(images).toContain('https://shop.example.test/older-pack.jpg');
+});
+
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
   const medicine = {
     id: 9,
