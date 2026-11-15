@@ -18,6 +18,8 @@ Ao retomar uma coleta interrompida, os parsers repetem a descoberta desde a prim
 
 O endpoint é `POST /api/v1/internal/scraper-batches` (na URL pública atual, prefixe o caminho com `/backend`). O coletor exige URL HTTPS, usa HTTPX com verificação TLS e `trust_env=False`, não segue redirecionamentos e assina o corpo exato com HMAC-SHA256 e timestamp de curta duração. Em staging com CA privada, `SCRAPER_INGEST_CA_BUNDLE` aponta para o bundle confiável sem desativar a validação. A API verifica a assinatura, HTTPS, janela temporal, origem, SKU, tamanho e schema antes de processar.
 
+Depois que cada lote é confirmado, o coletor baixa as imagens em série no computador local, valida o host da farmácia e normaliza cada arquivo para WebP ou JPEG com limite padrão de 512 KiB e 1200 px. O upload binário assinado é enviado separadamente para `POST /api/v1/internal/medicine-images`; a API valida novamente os bytes e a associação exata com a oferta já ingerida, guarda o conteúdo em `BYTEA` e deduplica por SHA-256. A assinatura inclui metadados e bytes. Cada envio tem ID idempotente; os metadados e bytes ficam no outbox local até a confirmação da API e são reenviados antes de iniciar nova coleta. Imagens inválidas ou indisponíveis mantêm a referência legada como fallback.
+
 Use uma chave aleatória exclusiva de pelo menos 32 bytes, criada e armazenada num gerenciador de segredos. Configure o mesmo valor em `SCRAPER_INGEST_HMAC_SECRET` somente no host do coletor e no container da API de staging. Configure `SCRAPER_INGEST_ALLOWED_SOURCES` explicitamente no servidor; por padrão nenhum coletor é aceito. Não use JWT, senha de usuário nem token de sessão. Não grave a chave neste repositório. O limite padrão é 100 produtos, 1 MB por lote e 120 lotes por hora; a API responde `Retry-After` ao excedente. Credenciais de feeds não são utilizadas.
 
 O modelo de auditoria guarda `batch_id`, origem, hash do corpo, estado, contadores e tempos, sem armazenar a carga ou segredo. A persistência reaproveita a política existente: associa ofertas por URL/SKU/EAN, mantém referências de imagem e histórico de preço somente para mudanças reais. Timestamps de observação recebidos são preservados.
@@ -36,7 +38,12 @@ SCRAPER_COLLECTOR_SOURCES=araujo,pacheco
 ARAUJO_STATE_DIR=/var/lib/preco-bao-collector/araujo
 PACHECO_STATE_DIR=/var/lib/preco-bao-collector/pacheco
 SCRAPER_INGEST_URL=https://STAGING_HOST/backend/api/v1/internal/scraper-batches
+# Opcional; quando omitida, deriva o endpoint de imagem da URL do lote.
+SCRAPER_IMAGE_INGEST_URL=https://STAGING_HOST/backend/api/v1/internal/medicine-images
 SCRAPER_INGEST_HMAC_SECRET=
+SCRAPER_IMAGE_MAX_BYTES=524288
+SCRAPER_IMAGE_MAX_DIMENSION=1200
+SCRAPER_IMAGE_DOWNLOAD_MAX_BYTES=8388608
 ARAUJO_SOURCE_MODE=DISABLED
 ARAUJO_HTTP_CLIENT=httpx
 ARAUJO_TLS_VERIFY=true
@@ -49,6 +56,10 @@ Para homologação limitada, configure cada fonte para `DIRECT`, confirme os con
 
 ## Migração e staging
 
-Aplicar a migration `f81c3a2d9b10` somente no PostgreSQL de staging. Validar no staging o endpoint, repetição do mesmo lote, mudança e preço inalterado, atualização de estoque, referência de imagem e falha/recuperação antes de configurar qualquer tarefa recorrente. Esta branch não contém credenciais de staging; o staging local temporário usa PostgreSQL dedicado.
+Aplicar a migration `f81c3a2d9b10` e a migration seguinte de blobs somente no PostgreSQL de staging. Validar no staging o endpoint, repetição do mesmo lote e upload binário, deduplicação, leitura/ETag, atualização de preço e estoque, e falha/recuperação do outbox antes de configurar qualquer tarefa recorrente. A migration de blobs não remove as referências antigas; a rota da API as redireciona enquanto a cópia binária não existe.
+
+### Rollback da API
+
+A migration `9a6d2f81c4b7` é aditiva. Em rollback da aplicação, volte a imagem anterior da API e mantenha as tabelas e os bytes armazenados: a versão anterior ignora essas tabelas e as referências de imagem já existentes continuam disponíveis. Não execute `alembic downgrade` como parte do rollback, pois isso apagaria os blobs e vínculos. Reavalie remoção de schema apenas numa manutenção posterior, com backup validado e aprovação própria.
 
 Não habilite schedulers Araújo/Pacheco da VM Azure bloqueada. Não habilite o coletor externo até a autorização ambiental e o staging serem confirmados.

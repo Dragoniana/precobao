@@ -100,7 +100,8 @@ def list_medicamentos_favoritos(
             .options(
                 selectinload(
                     CatalogoBase.ofertas.and_(OfertaFarmacia.disponivel.is_(True))
-                ).selectinload(OfertaFarmacia.farmacia)
+                ).selectinload(OfertaFarmacia.farmacia),
+                selectinload(CatalogoBase.image_links),
             )
             .order_by(CatalogoBase.id)
         )

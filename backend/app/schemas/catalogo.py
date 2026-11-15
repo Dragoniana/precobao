@@ -4,7 +4,6 @@ Módulo responsável pela definição dos contratos de dados (Schemas) do Catál
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
@@ -50,11 +49,17 @@ class CatalogoOut(CatalogoBaseSchema):
     imagem_fonte: str | None = None
     imagem_status: str | None = None
     imagem_motivo_rejeicao: str | None = None
+    imagem_armazenada: bool = False
+    imagem_hash: str | None = Field(default=None, exclude=True)
 
     @computed_field(return_type=str | None)
     @property
     def imagem_ref(self) -> str | None:
+        if self.imagem_armazenada and self.imagem_hash:
+            return f"/catalogo/medicamentos/{self.id}/imagem?v={self.imagem_hash[:12]}"
         if self.imagem_url and not image_delivery_rejection_reason(self.imagem_url):
+            from hashlib import sha256
+
             version = sha256(self.imagem_url.encode("utf-8")).hexdigest()[:12]
             return f"/catalogo/medicamentos/{self.id}/imagem?v={version}"
         return None

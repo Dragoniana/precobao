@@ -10,6 +10,8 @@ Este pacote executa os coletores existentes no Windows e envia somente os lotes 
 4. Guarde o mesmo segredo HMAC exclusivo do coletor/API com `.\deploy\windows-scraper-collector\Set-CollectorSecret.ps1`. O arquivo fica cifrado via DPAPI para o usuário atual e ACL da pasta restrita; o segredo não entra no Git nem nos logs.
 5. Antes de cada atualização do repositório, pare o agendamento, atualize a branch e reinstale dependências com `Install-Collector.ps1`.
 
+Após a confirmação de cada lote de produtos, o coletor baixa e normaliza as imagens em série no Windows e as envia em requisições binárias HMAC separadas; o endpoint deriva da URL configurada do lote. O outbox mantém metadados e bytes da imagem até a API confirmar o armazenamento, permitindo retomar um upload sem reenviar ofertas. O estado e o outbox ficam sob a mesma pasta local com ACL restrita. Imagens inválidas ou indisponíveis não interrompem o lote de preço e a aplicação mantém as referências legadas como fallback.
+
 Não habilite as fontes antes da instalação da API/migration aprovada e da homologação final. A API Azure precisa continuar com TLS verificado; o coletor rejeita HTTP e não usa variáveis de proxy (`trust_env=False`).
 
 ## Comandos

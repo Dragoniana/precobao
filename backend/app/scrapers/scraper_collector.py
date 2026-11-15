@@ -19,6 +19,10 @@ os.environ["DATABASE_URL"] = "sqlite://"
 import httpx
 
 from app.scrapers.scraper_batch_client import BatchSyncError, post_batch
+from app.scrapers.scraper_image_client import (
+    download_and_upload_product_image,
+    sync_pending_image_outbox,
+)
 from app.scrapers.source_modes import (
     SourceHTTPError,
     SourceMode,
@@ -187,6 +191,8 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "price_changes": 0,
         "images_registered": 0,
         "images_missing": 0,
+        "image_blobs_uploaded": 0,
+        "image_download_failures": 0,
     }
     _write_state(source, state)
     timeout = float(os.getenv("SCRAPER_INGEST_TIMEOUT_SECONDS", "30"))
@@ -229,6 +235,18 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 raise
             _log("pending_batch_replayed", source=source, batch_id=pending["batch_id"])
 
+        try:
+            replayed_images = await sync_pending_image_outbox(client, source)
+            state["image_blobs_uploaded"] += replayed_images
+            if replayed_images:
+                _write_state(source, state)
+                _log("pending_images_replayed", source=source, images=replayed_images)
+        except BatchSyncError as error:
+            state["status"] = "SYNC_FAILED"
+            state["stop_reason"] = str(error)
+            _write_state(source, state)
+            raise
+
         async def send_page(products: list[dict[str, Any]]) -> None:
             observed_at = datetime.now(UTC)
             normalized = []
@@ -251,6 +269,26 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 state["status"] = (
                     "SYNC_BLOCKED" if error.status_code == 403 else "SYNC_FAILED"
                 )
+                state["stop_reason"] = str(error)
+                _write_state(source, state)
+                raise
+            try:
+                for product in normalized:
+                    if not product.get("imagem_url"):
+                        continue
+                    image_result = await download_and_upload_product_image(
+                        client, source, product
+                    )
+                    if image_result is None:
+                        state["image_download_failures"] += 1
+                        continue
+                    state["image_blobs_uploaded"] += 1
+                    state["image_bytes_uploaded"] = int(
+                        state.get("image_bytes_uploaded", 0)
+                    ) + int(image_result["normalized_size_bytes"])
+                    _write_state(source, state)
+            except BatchSyncError as error:
+                state["status"] = "SYNC_FAILED"
                 state["stop_reason"] = str(error)
                 _write_state(source, state)
                 raise
