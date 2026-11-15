@@ -97,4 +97,4 @@ Path(sys.argv[1]).write_text(json.dumps({
 PY
 mv "$base.manifest.tmp" "$base.manifest.json"
 chmod 600 "$base".*
-echo "Encrypted backup created: $base (store an off-VM copy)."
+echo "Encrypted local backup created: $base (verify it before migration)."

@@ -4,7 +4,7 @@
 
 O branch `codex/restore-historical-http-clients` é descendente direto de `origin/main`; no início da preparação ele estava três commits à frente e zero atrás. A rota já passa pelo Caddy em `https://precobao.app/backend/api/v1/internal/scraper-batches` porque `handle_path /backend/*` remove o prefixo e encaminha o restante à API. Caddy, frontend, PostgreSQL, Indiana e volumes não precisam de mudança estrutural.
 
-Para a futura ativação do coletor local, atualizar somente a imagem/container `api` e o worker `offer-refresh` (mantém Indiana, mas deixa `OFFER_REFRESH_DAILY_SOURCES` vazio para Araújo/Pacheco não fazerem coleta direta na VM). Os serviços legados `araujo-scheduler` e `pacheco-scheduler` ficam desativados. Não usar `--remove-orphans`. Não recriar banco, web/Caddy ou containers Indiana. O `offer-refresh` permanece ligado com `OFFER_REFRESH_SOURCES=indiana` e `OFFER_IMAGE_REFRESH_SOURCES=indiana`.
+Para o rollout das imagens, atualizar somente os containers `api` e `web`: a API recebe a migration e serve bytes do PostgreSQL, e o frontend prioriza a rota da API. Manter `offer-refresh` e Indiana em execução sem recriá-los; Araújo/Pacheco na Azure continuam desativados. Não usar `--remove-orphans`. Caddy, banco e volumes não precisam de alteração estrutural.
 
 O Compose recebeu uma tag explícita de imagem para a API (`API_IMAGE`, padrão `preco-bao-api:latest`) e o padrão seguro para a coleta diária Araújo/Pacheco é vazio. Isso só muda a configuração versionada; nenhum arquivo `.env.azure` nem container de produção foi alterado.
 
@@ -46,17 +46,17 @@ Após deploy e homologação aprovados, configurar URL HTTPS e fonte em `DIRECT`
 
 ## Procedimento proposto para aprovação de deploy
 
-1. Confirmar janela, operador, acesso de emergência, configuração real do proxy/DNS e backup GPG fora da VM. Não copiar `.env.azure` para artefato nem mostrar segredos nos logs.
+1. Confirmar janela, operador, acesso de emergência e configuração real do proxy/DNS. Não copiar `.env.azure` para artefato nem mostrar segredos nos logs.
 2. Atualizar o checkout da VM para este commit/branch após aprovação e executar o preflight de `deploy/azure/preflight.sh`.
-3. Fazer backup com `deploy/azure/backup.sh`; validar SHA/GPG por `verify-backup.sh` e testar restauração em servidor/banco gerenciado separado e vazio. Confirmar também o backup restaurável do volume `image_references`.
-4. Confirmar em `.env.azure` `SCRAPER_INGEST_HMAC_SECRET` exclusivo e `SCRAPER_INGEST_ALLOWED_SOURCES=araujo,pacheco`; manter TLS/URL do PostgreSQL atual. Definir `OFFER_REFRESH_DAILY_SOURCES=` para parar a coleta direta A/P no worker Azure, mantendo Indiana.
-5. Construir a imagem API; usar `API_IMAGE=preco-bao-api:<release>` como tag aprovada e registrar o digest. A imagem candidata local foi criada e seu import/rota foi smoke-tested, mas precisa ser reconstruída/identificada no ambiente de release.
-6. Aplicar migration usando `deploy/azure/migrate.sh`, que exige confirmação literal após backup. Verificar `alembic current` e `alembic check`.
-7. Recriar apenas `api` e `offer-refresh` com o nome do projeto e env file existentes, em comandos explícitos, sem `--remove-orphans`. Antes do apply, revisar `docker compose config --services` e o diff para assegurar que Caddy, web, banco, Indiana, volumes e workers desligados não serão reiniciados.
-8. Checar `/health/live`, `/health/ready`, logs sem segredo e rota de ingestão com lote de homologação autorizado. Fazer requests com HMAC inválida, timestamp antigo, source não allowlisted e corpo acima do limite: esperar 401/403/413/422; lote válido deve gerar auditoria `COMPLETE` e replay deve ser `duplicate=true`.
-9. Só após validação controlada, habilitar cliente Windows e executar lote pequeno por origem. Conferir contadores, amostra de preço, contexto, imagens e auditoria. Só então obter aprovação separada para registrar tarefa 08/20.
+3. Criar backup consistente local com `deploy/azure/backup.sh`; executar `verify-backup.sh` para checar hashes, GPG, manifest e legibilidade do dump e do registro de imagens. A cópia fora da VM não é requisito para este rollout. Manter os arquivos locais criptografados e com acesso restrito durante a janela aprovada.
+4. Confirmar no `.env.azure` a URL/TLS atuais do PostgreSQL e configurar um HMAC exclusivo para o coletor, com allowlist limitada a `araujo,pacheco`. Não mostrar nem copiar valores secretos para artefatos ou logs.
+5. Construir e registrar a imagem candidata da API; preparar também a imagem do `web` com a URL pública atual da API. Preservar a imagem/digest anterior de ambos para rollback. Não alterar Caddy nem abrir portas novas.
+6. Aplicar, com confirmação literal e backup verificado, as migrations `f81c3a2d9b10` e `9a6d2f81c4b7` via `deploy/azure/migrate.sh`. Verificar `alembic current`, `alembic check`, tabelas, índices e espaço livre antes de prosseguir.
+7. Atualizar somente `api` e `web`, usando o projeto e env file existentes e sem `--remove-orphans`. Revisar a configuração resolvida para confirmar que PostgreSQL, Caddy, volumes, Indiana, `offer-refresh` e schedulers Araújo/Pacheco não serão recriados ou reiniciados. A migration roda isoladamente antes da troca da API.
+8. Checar `/health/live`, `/health/ready`, logs sem segredo e rotas de upload/leitura. Enviar uma imagem de teste HMAC inválida para confirmar rejeição e, após configuração, usar apenas dados do piloto autorizado.
+9. Instalar/atualizar o coletor Windows com agendamento desativado. Após aprovação específica do piloto, coletar até 10 produtos por origem, conferir preços, disponibilidade, vínculos, bytes, deduplicação e renderização no site. Não ampliar o catálogo nem registrar horários recorrentes sem nova aprovação.
 
-O deploy da migration/API, alteração de `.env.azure`, restart de containers, configuração real de HMAC, criação de backup de produção e ativação do agendamento exigem aprovação explícita e ainda não foram executados.
+O deploy da migration/API/frontend, alteração de `.env.azure`, restart dos containers, configuração real de HMAC, criação de backup de produção e execução do piloto exigem aprovação explícita e ainda não foram executados. Nenhuma cópia externa de backup é exigida nesta etapa.
 
 ## Rollback
 
