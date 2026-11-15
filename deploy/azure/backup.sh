@@ -59,7 +59,7 @@ PY
 
 docker compose --project-name preco-bao-azure --project-directory "$script_dir" \
   --env-file "$env_file" -f "$script_dir/docker-compose.yml" \
-  exec -T api python -c 'import os,shutil; p=os.environ["IMAGE_REFERENCE_STORE_PATH"]; shutil.copyfile(p, "/tmp/image-references-backup.json") if os.path.exists(p) else open("/tmp/image-references-backup.json","w").write("{\"schema\":\"preco-bao.image-registry\",\"version\":1,\"records\":[]}\")' \
+  exec -T api python -c 'import json,os,shutil; p=os.environ["IMAGE_REFERENCE_STORE_PATH"]; shutil.copyfile(p, "/tmp/image-references-backup.json") if os.path.exists(p) else json.dump({"schema":"preco-bao.image-registry","version":1,"records":[]}, open("/tmp/image-references-backup.json", "w"))' \
   >/dev/null
 docker compose --project-name preco-bao-azure --project-directory "$script_dir" \
   --env-file "$env_file" -f "$script_dir/docker-compose.yml" \
