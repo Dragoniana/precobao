@@ -42,6 +42,7 @@ it('prefers the API-served database image while keeping legacy URLs as fallback'
   const medicine = {
     ...item,
     id: 42,
+    nome: 'Paracetamol',
     imagem_armazenada: true,
     imagem_ref: '/catalogo/medicamentos/42/imagem?v=abc123',
     imagem_urls: ['https://cdn.example.test/legacy-pack.jpg'],
