@@ -50,6 +50,14 @@ def _stop_requested() -> bool:
     return bool(marker and Path(marker).exists())
 
 
+def _select_page_products(
+    products: list[dict[str, Any]], selected: int, limit: int | None
+) -> list[dict[str, Any]]:
+    if limit is None:
+        return products
+    return products[: max(0, limit - selected)]
+
+
 def _read_state(source: str) -> dict[str, Any]:
     path = _source_state_path(source)
     try:
@@ -177,6 +185,16 @@ def _require_direct_collection(source: str) -> None:
 
 async def _collect_and_sync(source: str) -> dict[str, Any]:
     _require_direct_collection(source)
+    configured_product_limit = os.getenv(
+        "SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", ""
+    ).strip()
+    max_products_per_run = (
+        int(configured_product_limit) if configured_product_limit else None
+    )
+    if max_products_per_run is not None and max_products_per_run < 1:
+        raise RuntimeError("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN_MUST_BE_POSITIVE")
+    products_selected = 0
+    product_limit_reached = False
     previous = _read_state(source)
     state: dict[str, Any] = {
         "source": source,
@@ -248,6 +266,16 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             raise
 
         async def send_page(products: list[dict[str, Any]]) -> None:
+            nonlocal products_selected, product_limit_reached
+            if max_products_per_run is not None:
+                products = _select_page_products(
+                    products, products_selected, max_products_per_run
+                )
+                if not products:
+                    product_limit_reached = True
+                    return
+                products_selected += len(products)
+                product_limit_reached = products_selected >= max_products_per_run
             observed_at = datetime.now(UTC)
             normalized = []
             for product in products:
@@ -296,9 +324,12 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 "page_synced",
                 source=source,
                 batch_id=payload["batch_id"],
-                products=len(products),
+                products=len(normalized),
                 status=response.get("status"),
             )
+
+        def stop_source_collection() -> bool:
+            return product_limit_reached or _stop_requested()
 
         try:
             if source == "araujo":
@@ -313,13 +344,17 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                         .casefold()
                         in {"1", "true", "yes", "on"}
                     ),
-                    stop_requested_callback=_stop_requested,
+                    stop_requested_callback=stop_source_collection,
                 )
                 scraper.products_callback = send_page
                 with scraper._run_lock():
                     await scraper._extract_direct_catalog()
                 state["source_products"] = scraper.products_queued
-                if _stop_requested():
+                if product_limit_reached:
+                    state["source_products"] = products_selected
+                    state["status"] = "PARTIAL"
+                    state["stop_reason"] = "configured_product_limit"
+                elif _stop_requested():
                     state["status"] = "STOPPED"
                     state["stop_reason"] = "safe_stop_requested_after_synced_page"
                 if (
@@ -337,14 +372,16 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                         os.getenv("PACHECO_REQUEST_DELAY_SECONDS", "1")
                     ),
                     max_items=(
-                        int(os.environ["PACHECO_COLLECTOR_MAX_ITEMS"])
+                        max_products_per_run
+                        if max_products_per_run is not None
+                        else int(os.environ["PACHECO_COLLECTOR_MAX_ITEMS"])
                         if os.getenv("PACHECO_COLLECTOR_MAX_ITEMS", "").strip()
                         else None
                     ),
                     source_mode=SourceMode.DIRECT,
                 )
                 scraper.products_callback = send_page
-                scraper.stop_requested_callback = _stop_requested
+                scraper.stop_requested_callback = stop_source_collection
                 with scraper._run_lock():
                     scraper._start_run()
                     try:
@@ -379,6 +416,10 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 elif scraper.collector_delivery_failed:
                     state["status"] = state.get("status", "SYNC_FAILED")
                     state["stop_reason"] = state.get("stop_reason", "sync_failed")
+                elif product_limit_reached:
+                    state["status"] = "PARTIAL"
+                    state["stop_reason"] = "configured_product_limit"
+                    state["source_products"] = products_selected
                 elif scraper.stats.get("stop_reason") == "safe_stop_requested":
                     state["status"] = "STOPPED"
                     state["stop_reason"] = "safe_stop_requested_after_synced_page"

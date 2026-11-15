@@ -11,6 +11,21 @@ from app.scrapers import scraper_batch_client as sync_client
 from app.scrapers import scraper_collector, scraper_collector_scheduler
 
 
+def test_pilot_item_cap_limits_batches_across_source_pages():
+    page_one = [{"sku": f"ARJ{i}"} for i in range(8)]
+    page_two = [{"sku": f"ARJ{i}"} for i in range(8, 16)]
+
+    first_selection = scraper_collector._select_page_products(page_one, 0, 10)
+    second_selection = scraper_collector._select_page_products(
+        page_two, len(first_selection), 10
+    )
+
+    assert len(first_selection) == 8
+    assert [item["sku"] for item in second_selection] == ["ARJ8", "ARJ9"]
+    assert scraper_collector._select_page_products(page_two, 10, 10) == []
+    assert scraper_collector._select_page_products(page_two, 0, None) == page_two
+
+
 @pytest.mark.asyncio
 async def test_batch_client_uses_https_and_signed_body(monkeypatch):
     monkeypatch.setenv(
@@ -212,9 +227,7 @@ async def test_collector_replays_pending_outbox_before_source_collection(
             source_calls.append("called")
 
     monkeypatch.setattr(scraper_collector, "post_batch", fake_post)
-    monkeypatch.setattr(
-        "app.scrapers.araujo.AraujoScraper", FakeAraujoScraper
-    )
+    monkeypatch.setattr("app.scrapers.araujo.AraujoScraper", FakeAraujoScraper)
 
     result = await scraper_collector.collect_source("araujo")
 

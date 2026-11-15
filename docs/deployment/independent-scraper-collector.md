@@ -35,6 +35,8 @@ SCRAPER_COLLECTOR_STATE_DIR=/var/lib/preco-bao-collector
 SCRAPER_COLLECTOR_SCHEDULE_TIMES=08:00,20:00
 SCRAPER_COLLECTOR_TIMEZONE=America/Sao_Paulo
 SCRAPER_COLLECTOR_SOURCES=araujo,pacheco
+# Use 10 for each source during the approved initial pilot; unset for normal runs.
+SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN=10
 ARAUJO_STATE_DIR=/var/lib/preco-bao-collector/araujo
 PACHECO_STATE_DIR=/var/lib/preco-bao-collector/pacheco
 SCRAPER_INGEST_URL=https://STAGING_HOST/backend/api/v1/internal/scraper-batches
