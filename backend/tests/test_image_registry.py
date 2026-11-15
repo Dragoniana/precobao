@@ -101,6 +101,36 @@ def test_catalog_images_follow_the_filtered_pharmacy(monkeypatch, tmp_path):
     assert resolve_catalog_images(15, [pacheco]) == ["https://cdn.example/pacheco.jpg"]
 
 
+def test_exact_catalog_identity_can_deliver_allowed_generic_image(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_REFERENCE_STORE_PATH", str(tmp_path / "refs.json"))
+    upsert_image_reference(
+        image_url=(
+            "https://i3-imagens-prd.araujo.com.br/webp/"
+            "MEDICAMENTOS-CAIXA-AZUL---OTC.jpg"
+        ),
+        pharmacy_id=2,
+        pharmacy="Araujo",
+        sku="ARJ-1",
+        ean="7896026307925",
+        product_id="ARJ-1",
+        product_url=None,
+        catalog_id=22,
+        offer_id=None,
+        identity_confirmed=True,
+        allow_generic=True,
+    )
+
+    pacheco_offer = SimpleNamespace(id=20, farmacia_id=3, sku_interno="PCH-1")
+    assert resolve_catalog_images(
+        22,
+        [pacheco_offer],
+        catalog_ean="7896026307925",
+        require_offer_match=True,
+    ) == ["https://i3-imagens-prd.araujo.com.br/webp/MEDICAMENTOS-CAIXA-AZUL---OTC.jpg"]
+
+
 def test_registry_resolver_rejects_generic_art_and_ean_mismatch(monkeypatch, tmp_path):
     monkeypatch.setenv("IMAGE_REFERENCE_STORE_PATH", str(tmp_path / "refs.json"))
     common = dict(
@@ -131,8 +161,20 @@ def test_registry_resolver_rejects_generic_art_and_ean_mismatch(monkeypatch, tmp
         offer_id=103,
         **common,
     )
+    upsert_image_reference(
+        image_url="https://farmaciaindiana.vteximg.com.br/arquivos/7896000000000.jpg",
+        sku="IND-4",
+        ean="7896026307925",
+        offer_id=104,
+        **common,
+    )
 
-    offers = [SimpleNamespace(id=101), SimpleNamespace(id=102), SimpleNamespace(id=103)]
+    offers = [
+        SimpleNamespace(id=101),
+        SimpleNamespace(id=102),
+        SimpleNamespace(id=103),
+        SimpleNamespace(id=104),
+    ]
     assert resolve_catalog_images(22, offers, catalog_ean="7896026307925") == [
         "https://farmaciaindiana.vteximg.com.br/arquivos/7896026307925.jpg"
     ]

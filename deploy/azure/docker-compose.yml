@@ -49,6 +49,10 @@ services:
       IMAGE_REFERENCE_STORE_PATH: /app/data/image_references/references.json
       OFFER_REFRESH_STATE_DIR: /app/data/offer_refresh
       OFFER_REFRESH_ENABLED: ${OFFER_REFRESH_ENABLED:-true}
+      OFFER_REFRESH_SOURCES: ${OFFER_REFRESH_SOURCES:-indiana}
+      OFFER_IMAGE_REFRESH_SOURCES: ${OFFER_IMAGE_REFRESH_SOURCES:-indiana}
+      OFFER_REFRESH_DAILY_SOURCES: ${OFFER_REFRESH_DAILY_SOURCES:-araujo,pacheco}
+      OFFER_REFRESH_SCHEDULE_TIMES: ${OFFER_REFRESH_SCHEDULE_TIMES:-08:00,20:00}
       OFFER_REFRESH_INTERVAL_MINUTES: ${OFFER_REFRESH_INTERVAL_MINUTES:-30}
       OFFER_REFRESH_INDIANA_BATCH: ${OFFER_REFRESH_INDIANA_BATCH:-200}
       OFFER_REFRESH_ARAUJO_BATCH: ${OFFER_REFRESH_ARAUJO_BATCH:-20}
@@ -58,9 +62,11 @@ services:
       OFFER_IMAGE_REFRESH_PACHECO_BATCH: ${OFFER_IMAGE_REFRESH_PACHECO_BATCH:-100}
       ARAUJO_PUBLIC_CATALOG_AUTHORIZED: ${ARAUJO_PUBLIC_CATALOG_AUTHORIZED:-false}
       PACHECO_PUBLIC_API_AUTHORIZED: ${PACHECO_PUBLIC_API_AUTHORIZED:-false}
+      ARAUJO_ACCESS_CONFIRMED: ${ARAUJO_ACCESS_CONFIRMED:-false}
+      PACHECO_ACCESS_CONFIRMED: ${PACHECO_ACCESS_CONFIRMED:-false}
     volumes:
       - image_references:/app/data/image_references
-      - offer_refresh_state:/app/data/offer_refresh
+      - /var/lib/preco-bao/scraper-state:/app/data/offer_refresh
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
     depends_on:
       api:

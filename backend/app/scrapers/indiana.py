@@ -12,7 +12,11 @@ preço e imagens) e despachando os dados limpos para a camada de persistência
 """
 
 import asyncio
+import logging
+import os
+import random
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List
 
 import httpx
@@ -30,8 +34,27 @@ from app.services.image_registry import upsert_image_reference
 from app.services.imagens import select_vtex_item_image
 from app.services.preco_observacoes import registrar_observacao_preco
 
+logger = logging.getLogger(__name__)
 
-async def extrair_todos_produtos() -> None:
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(1.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(1.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+async def extrair_todos_produtos(
+    *, max_pages: int | None = None, request_delay: float | None = None
+) -> dict[str, int | str]:
     """
     Extrai todos os medicamentos iterando sobre a paginação da API REST.
 
@@ -55,21 +78,36 @@ async def extrair_todos_produtos() -> None:
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "PrecoBao/1.0 (+https://precobao.app)",
     }
 
     itens_por_pagina = 49
+    max_pages = max_pages or int(os.getenv("INDIANA_MAX_PAGES", "0")) or None
+    request_delay = (
+        float(os.getenv("INDIANA_REQUEST_DELAY_SECONDS", "2"))
+        if request_delay is None
+        else request_delay
+    )
+    if request_delay < 1:
+        raise ValueError("INDIANA_REQUEST_DELAY_SECONDS must be at least 1")
     offset = 0
     pagina = 1
-    processando = True
+    stats: dict[str, int | str] = {
+        "pages": 0,
+        "products": 0,
+        "errors": 0,
+        "retries": 0,
+    }
+    consecutive_errors = 0
 
-    async with httpx.AsyncClient(headers=headers, timeout=30.0, verify=False) as client:
-        while processando:
-            print(
-                f"Buscando Página {pagina} (Itens {offset} a "
-                f"{offset + itens_por_pagina})..."
-            )
-
+    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+        while max_pages is None or pagina <= max_pages:
+            # Offset 2500 was the last accepted public page. Stop locally
+            # before sending the next request at 2550; never probe past it.
+            if offset > 2500:
+                stats["stop_reason"] = "public_endpoint_offset_limit_2500"
+                logger.info("Indiana public endpoint offset limit reached")
+                break
             try:
                 url_paginada = (
                     f"{url_base_api}?_from={offset}&_to={offset + itens_por_pagina}"
@@ -78,7 +116,7 @@ async def extrair_todos_produtos() -> None:
 
                 # Tratamento de fim de catálogo explícito
                 if resp.status_code == 404:
-                    print("Fim do catálogo (404).")
+                    logger.info("Indiana catalog ended (404)")
                     break
 
                 # Levanta erro apenas para 4xx e 5xx (200 e 206 passam direto)
@@ -87,46 +125,81 @@ async def extrair_todos_produtos() -> None:
                 produtos_brutos = resp.json()
 
                 if not produtos_brutos:
-                    print("Lista vazia. Varredura finalizada.")
+                    logger.info("Indiana catalog returned an empty page")
                     break
 
                 produtos_limpos = adaptar_parser_rest(produtos_brutos)
 
                 # Despacha para thread de I/O
-                await asyncio.to_thread(salvar_no_banco, produtos_limpos)
+                persisted = await asyncio.to_thread(salvar_no_banco, produtos_limpos)
+                if not persisted:
+                    stats["errors"] += 1
+                    logger.error("Indiana persistence failed page=%s", pagina)
+                    break
 
-                print(f"✓ {len(produtos_limpos)} medicamentos processados.")
+                stats["pages"] += 1
+                stats["products"] += len(produtos_limpos)
+                consecutive_errors = 0
+                logger.info("Indiana page=%s products=%s", pagina, len(produtos_limpos))
 
                 pagina += 1
                 offset += itens_por_pagina + 1
-                await asyncio.sleep(2.0)
+                if max_pages is None or pagina <= max_pages:
+                    await asyncio.sleep(request_delay + random.uniform(0, 0.5))
 
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
 
-                # Retoma a página após 1 minuto (HTTP 429).
-                if status == 429:
-                    print(
-                        f"Rate limit (429) na página {pagina}. "
-                        "Pausando por 60 segundos..."
-                    )
-                    await asyncio.sleep(60.0)
-                    continue
-
-                # Retoma a extração da mesma página após 10 segundos (http 500)
-                elif status >= 500:
-                    print(f"Erro {status} na página {pagina}. Aguardando 10s...")
-                    await asyncio.sleep(10.0)
-                    continue
-
-                else:
-                    print(f"Erro HTTP bloqueante na página {pagina}: {status}")
-                    # Outros erros HTTP encerram a varredura.
+                # VTEX caps public catalog pagination at offset 2500. Treat
+                # this explicit endpoint limit as a partial discovery boundary;
+                # do not probe alternate paths or work around it. Existing
+                # known offers are refreshed individually by the worker.
+                if status == 400 and offset >= 2500:
+                    stats["stop_reason"] = "public_endpoint_offset_limit_2500"
+                    logger.info("Indiana public endpoint offset limit reached")
                     break
 
-            except Exception as e:
-                print(f"Falha inesperada: {e}")
+                if status == 429 or status >= 500:
+                    # Respect Retry-After, otherwise use capped backoff; never
+                    # retry indefinitely or evade a technical block.
+                    retry_after = resp.headers.get("Retry-After", "")
+                    delay = _retry_after_seconds(retry_after)
+                    if delay is None:
+                        delay = min(300.0, 2.0 ** min(consecutive_errors + 1, 8))
+                    consecutive_errors += 1
+                    stats["retries"] += 1
+                    if consecutive_errors >= 3 or delay > 3600:
+                        stats["errors"] += 1
+                        logger.error(
+                            "Indiana stopping after HTTP %s page=%s", status, pagina
+                        )
+                        break
+                    logger.warning(
+                        "Indiana HTTP %s page=%s; retry in %.1fs", status, pagina, delay
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                stats["errors"] += 1
+                logger.error(
+                    "Indiana blocked or failed HTTP page=%s status=%s", pagina, status
+                )
                 break
+
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                consecutive_errors += 1
+                stats["retries"] += 1
+                logger.warning(
+                    "Indiana request error page=%s type=%s", pagina, type(e).__name__
+                )
+                if consecutive_errors >= 3:
+                    stats["errors"] += 1
+                    break
+                await asyncio.sleep(min(60.0, 2.0**consecutive_errors))
+            except Exception:
+                stats["errors"] += 1
+                logger.exception("Indiana scrape failed page=%s", pagina)
+                break
+    return stats
 
 
 def adaptar_parser_rest(produtos_brutos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -188,7 +261,7 @@ def adaptar_parser_rest(produtos_brutos: List[Dict[str, Any]]) -> List[Dict[str,
     return catalogo_limpo
 
 
-def salvar_no_banco(produtos: List[Dict[str, Any]]) -> None:
+def salvar_no_banco(produtos: List[Dict[str, Any]]) -> bool:
     """
     Persiste uma lista de produtos no banco de dados utilizando a nova estrutura.
     Atualiza o preço da oferta caso o medicamento já exista no catálogo.
@@ -252,8 +325,30 @@ def salvar_no_banco(produtos: List[Dict[str, Any]]) -> None:
                 )
                 if len(sku_matches) == 1:
                     oferta_existente = sku_matches[0]
-            if not catalogo_item and not ean_validado and oferta_existente:
-                catalogo_item = db.get(CatalogoBase, oferta_existente.catalogo_id)
+            if oferta_existente:
+                produto_associado = db.get(CatalogoBase, oferta_existente.catalogo_id)
+                if produto_associado:
+                    if catalogo_item and catalogo_item.id != produto_associado.id:
+                        logger.warning(
+                            "Skipping Indiana SKU with conflicting EAN "
+                            "association sku=%s",
+                            sku_interno,
+                        )
+                        continue
+                    if (
+                        ean_validado
+                        and produto_associado.codigo_barras
+                        and produto_associado.codigo_barras != ean_validado
+                    ):
+                        logger.warning(
+                            "Skipping Indiana offer whose existing catalog EAN "
+                            "differs sku=%s",
+                            sku_interno,
+                        )
+                        continue
+                    if ean_validado and not produto_associado.codigo_barras:
+                        produto_associado.codigo_barras = ean_validado
+                    catalogo_item = produto_associado
 
             # Se não existir no catálogo, cria um novo registo
             # Se não existir no catálogo, cria um novo registo enriquecido
@@ -352,16 +447,19 @@ def salvar_no_banco(produtos: List[Dict[str, Any]]) -> None:
                 )
             except Exception as image_error:
                 print(f"[IMAGE REGISTRY] Save failed: {product.link}: {image_error}")
+        return True
 
     except SQLAlchemyError as e:
         db.rollback()
-        print(f"[ERRO DB] Falha na persistência: {e}")
+        logger.exception("Indiana database persistence failed: %s", type(e).__name__)
+        return False
     finally:
         db.close()
 
 
 if __name__ == "__main__":
-    print("Iniciando varredura via API REST...")
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    logger.info("Starting Indiana catalog scan")
     try:
         asyncio.run(extrair_todos_produtos())
     except KeyboardInterrupt:

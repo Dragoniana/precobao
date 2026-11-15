@@ -533,6 +533,10 @@ def select_vtex_item_image(
         return None
     if not expected_ean and not expected_sku:
         return None
+    exact_item_identity = bool(expected_sku) and item_sku == expected_sku
+    if expected_ean:
+        exact_item_identity = exact_item_identity and item_ean == expected_ean
+    allow_generic = allow_generic or exact_item_identity
     images = item.get("images") or []
     candidates: list[tuple[int, str]] = []
     for image in images:

@@ -25,9 +25,9 @@ from urllib.parse import parse_qs, urlsplit
 
 config = json.load(sys.stdin)
 services = config.get("services", {})
-required_services = {"api", "caddy", "offer-refresh", "pacheco-scheduler"}
+required_services = {"api", "caddy", "offer-refresh", "araujo-scheduler", "pacheco-scheduler"}
 if set(services) != required_services:
-    raise SystemExit("Azure Compose must contain FastAPI, Caddy and both automatic catalog workers.")
+    raise SystemExit("Azure Compose services do not match the reviewed production set.")
 api, caddy = services["api"], services["caddy"]
 environment = api.get("environment", {})
 api_image_mount = next(
@@ -43,7 +43,7 @@ if published != {"80", "443"}:
     raise SystemExit("Only Caddy may publish TCP ports 80 and 443.")
 if "api_edge" not in api.get("networks", {}) or "api_edge" not in caddy.get("networks", {}):
     raise SystemExit("FastAPI and Caddy must share the isolated proxy network.")
-for worker_name in ("offer-refresh", "pacheco-scheduler"):
+for worker_name in ("offer-refresh", "araujo-scheduler", "pacheco-scheduler"):
     worker = services[worker_name]
     if worker.get("ports"):
         raise SystemExit(f"The {worker_name} worker must not publish host ports.")
@@ -63,16 +63,32 @@ for worker_name in ("offer-refresh", "pacheco-scheduler"):
         raise SystemExit(f"The {worker_name} worker must wait until FastAPI/database readiness.")
 for service_name, variable in (
     ("offer-refresh", "OFFER_REFRESH_ENABLED"),
+    ("araujo-scheduler", "ARAUJO_SCHEDULER_ENABLED"),
     ("pacheco-scheduler", "PACHECO_SCHEDULER_ENABLED"),
 ):
-    if services[service_name].get("environment", {}).get(variable, "").casefold() not in {"1", "true", "yes", "on"}:
-        raise SystemExit(f"{variable} must enable the Azure background worker.")
+    if variable not in services[service_name].get("environment", {}):
+        raise SystemExit(f"{variable} must be explicitly configured.")
+for service_name, variable in (
+    ("offer-refresh", "ARAUJO_PUBLIC_CATALOG_AUTHORIZED"),
+    ("pacheco-scheduler", "PACHECO_PUBLIC_API_AUTHORIZED"),
+    ("offer-refresh", "ARAUJO_ACCESS_CONFIRMED"),
+    ("offer-refresh", "PACHECO_ACCESS_CONFIRMED"),
+):
+    value = services[service_name].get("environment", {}).get(variable, "false")
+    if value.casefold() in {"1", "true", "yes", "on"}:
+        raise SystemExit(f"{variable} must remain false until source authorization is documented.")
 for service_name, state_path in (
     ("offer-refresh", "/app/data/offer_refresh"),
+    ("araujo-scheduler", "/app/data/araujo"),
     ("pacheco-scheduler", "/app/data/pacheco"),
 ):
-    if not any(m.get("type") == "volume" and m.get("target") == state_path for m in services[service_name].get("volumes", [])):
-        raise SystemExit(f"The {service_name} checkpoint must use a persistent named volume.")
+    if not any(
+        m.get("target") == state_path
+        and m.get("type") in {"volume", "bind"}
+        and (m.get("type") == "volume" or Path(m.get("source", "")).is_dir())
+        for m in services[service_name].get("volumes", [])
+    ):
+        raise SystemExit(f"The {service_name} checkpoint must use persistent storage.")
 
 if environment.get("APP_ENV") != "production" or str(environment.get("DEBUG", "")).casefold() != "false":
     raise SystemExit("FastAPI must run with APP_ENV=production and DEBUG=false.")

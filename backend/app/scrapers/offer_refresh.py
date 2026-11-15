@@ -7,20 +7,20 @@ same SKU and, when available, the same catalog EAN before it can change data.
 from __future__ import annotations
 
 import argparse
-import email.utils
 import json
 import os
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import SessionLocal
@@ -39,41 +39,54 @@ from app.services.imagens import (
 )
 from app.services.preco_observacoes import registrar_observacao_preco
 
-SOURCE_CNPJ = {"indiana": "00000000000100", "araujo": "17256512000116"}
+SOURCE_CNPJ = {
+    "indiana": "00000000000100",
+    "araujo": "17256512000116",
+    "pacheco": "33438250000167",
+}
 IMAGE_SOURCE_CNPJ = {
     **SOURCE_CNPJ,
     "pacheco": "33438250000167",
 }
 STATE_DIR = Path(os.getenv("OFFER_REFRESH_STATE_DIR", "data/offer_refresh"))
-USER_AGENT = "Preco Bao catalog audit/1.0"
+USER_AGENT = "PrecoBao/1.0 (+https://precobao.app)"
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(1.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(1.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 class SourceUnavailable(Exception):
     """A source could not be checked; this is not evidence of a missing price."""
 
-    def __init__(self, reason: str, retry_after_seconds: int | None = None):
+    def __init__(
+        self,
+        reason: str,
+        retry_after_seconds: float | None = None,
+        retry_at: str | None = None,
+    ):
         super().__init__(reason)
         self.retry_after_seconds = retry_after_seconds
+        self.retry_at = retry_at
+
+
+class SourceAccessBlocked(SourceUnavailable):
+    """Explicit source refusal; callers must persist but not advance the cursor."""
 
 
 class IdentityMismatch(Exception):
     """The source response does not identify this exact offer."""
-
-
-def _retry_after_seconds(value: str | None) -> int | None:
-    if not value:
-        return None
-    try:
-        seconds = int(value)
-    except ValueError:
-        try:
-            retry_at = email.utils.parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=UTC)
-        seconds = int((retry_at - datetime.now(UTC)).total_seconds())
-    return max(0, seconds)
 
 
 def _price(value: object) -> Decimal:
@@ -215,6 +228,17 @@ def parse_araujo_image(offer: OfertaFarmacia, html: str) -> str | None:
 
 def parse_pacheco_image(offer: OfertaFarmacia, payload: object) -> str | None:
     """Extract an image from the public VTEX item for this exact Pacheco SKU."""
+    item = _pacheco_item(offer, payload)
+    for image in item.get("images") or []:
+        image_url = str(image.get("imageUrl") or "").strip()
+        if image_url.startswith("//"):
+            image_url = f"https:{image_url}"
+        if image_url and not image_delivery_rejection_reason(image_url):
+            return image_url
+    return None
+
+
+def _pacheco_item(offer: OfertaFarmacia, payload: object) -> dict:
     if not isinstance(payload, list):
         raise SourceUnavailable("malformed_catalog_response")
     expected_sku = offer.sku_interno.removeprefix("PCH")
@@ -237,13 +261,24 @@ def parse_pacheco_image(offer: OfertaFarmacia, payload: object) -> str | None:
     ]
     if len(items) != 1:
         raise IdentityMismatch("sku_missing_or_ambiguous")
-    for image in items[0].get("images") or []:
-        image_url = str(image.get("imageUrl") or "").strip()
-        if image_url.startswith("//"):
-            image_url = f"https:{image_url}"
-        if image_url and not image_delivery_rejection_reason(image_url):
-            return image_url
-    return None
+    source_ean = str(items[0].get("ean") or "").strip() or None
+    _identity(offer, str(items[0].get("itemId") or ""), source_ean)
+    return items[0]
+
+
+def parse_pacheco(offer: OfertaFarmacia, payload: object) -> tuple[Decimal, bool]:
+    item = _pacheco_item(offer, payload)
+    sellers = [
+        seller for seller in item.get("sellers", []) if seller.get("sellerDefault")
+    ]
+    if len(sellers) != 1:
+        raise SourceUnavailable("official_seller_missing_or_ambiguous")
+    commercial = sellers[0].get("commertialOffer") or {}
+    price = _price(commercial.get("Price"))
+    available = commercial.get("IsAvailable")
+    if not isinstance(available, bool):
+        raise SourceUnavailable("availability_unknown")
+    return price, available
 
 
 def _source_url(offer: OfertaFarmacia, source: str) -> str:
@@ -274,19 +309,72 @@ def _source_url(offer: OfertaFarmacia, source: str) -> str:
     return offer.url_origem
 
 
+def _get_with_recovery(client: httpx.Client, url: str) -> httpx.Response:
+    """Bounded retries for transient failures; a 403 is never retried."""
+    last_error: Exception | None = None
+    response: httpx.Response | None = None
+    for attempt in range(3):
+        delay = min(30, 2**attempt)
+        response = None
+        try:
+            response = client.get(url)
+        except httpx.TimeoutException as error:
+            last_error = error
+            status = "request_timeout"
+        except httpx.TransportError as error:
+            last_error = error
+            status = "request_transport_error"
+        else:
+            if response.status_code == 403:
+                raise SourceAccessBlocked("http_403")
+            if response.status_code == 200:
+                return response
+            if response.status_code != 429 and response.status_code not in {
+                500,
+                502,
+                503,
+                504,
+            }:
+                raise SourceUnavailable(f"http_{response.status_code}")
+            status = f"http_{response.status_code}"
+            retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+            if retry_after is not None and retry_after > 3600:
+                raise SourceUnavailable(
+                    status,
+                    retry_after_seconds=retry_after,
+                    retry_at=(
+                        datetime.now(UTC) + timedelta(seconds=retry_after)
+                    ).isoformat(),
+                )
+            delay = (
+                retry_after
+                if response.status_code == 429 and retry_after is not None
+                else min(30, 2**attempt)
+            )
+        if attempt == 2:
+            retry_at = None
+            retry_after_seconds = None
+            if status == "http_429" and response is not None:
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                if retry_after is not None:
+                    retry_after_seconds = retry_after
+                    retry_at = (
+                        datetime.now(UTC) + timedelta(seconds=retry_after)
+                    ).isoformat()
+            raise SourceUnavailable(
+                status,
+                retry_after_seconds=retry_after_seconds,
+                retry_at=retry_at,
+            ) from last_error
+        time.sleep(delay)
+    raise SourceUnavailable("request_unavailable")
+
+
 def fetch_image_candidate(
     client: httpx.Client, offer: OfertaFarmacia, source: str
 ) -> str | None:
     """Fetch an image only; this path never changes offers or price history."""
-    try:
-        response = client.get(_source_url(offer, source))
-    except httpx.HTTPError as error:
-        raise SourceUnavailable(type(error).__name__) from error
-    if response.status_code != 200:
-        raise SourceUnavailable(
-            f"http_{response.status_code}",
-            _retry_after_seconds(response.headers.get("Retry-After")),
-        )
+    response = _get_with_recovery(client, _source_url(offer, source))
     if source == "araujo":
         return parse_araujo_image(offer, response.text)
     try:
@@ -302,20 +390,19 @@ def fetch_observation(
     client: httpx.Client, offer: OfertaFarmacia, source: str
 ) -> tuple[Decimal, bool, str | None]:
     url = _source_url(offer, source)
-    try:
-        response = client.get(url)
-    except httpx.HTTPError as error:
-        raise SourceUnavailable(type(error).__name__) from error
-    if response.status_code != 200:
-        raise SourceUnavailable(
-            f"http_{response.status_code}",
-            _retry_after_seconds(response.headers.get("Retry-After")),
-        )
+    response = _get_with_recovery(client, url)
     if source == "indiana":
         try:
             payload = response.json()
             price, available = parse_indiana(offer, payload)
             return price, available, parse_indiana_image(offer, payload)
+        except (ValueError, KeyError, TypeError) as error:
+            raise SourceUnavailable("malformed_catalog_response") from error
+    if source == "pacheco":
+        try:
+            payload = response.json()
+            price, available = parse_pacheco(offer, payload)
+            return price, available, parse_pacheco_image(offer, payload)
         except (ValueError, KeyError, TypeError) as error:
             raise SourceUnavailable("malformed_catalog_response") from error
     price, available = parse_araujo(offer, response.text)
@@ -386,6 +473,17 @@ def _source_authorized(source: str) -> bool:
     return os.getenv(variable, "false").casefold() in {"1", "true", "yes", "on"}
 
 
+def _source_access_confirmed(source: str) -> bool:
+    if source == "indiana":
+        return True
+    return os.getenv(f"{source.upper()}_ACCESS_CONFIRMED", "false").casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _read_cursor(source: str) -> int:
     try:
         return int(
@@ -432,6 +530,14 @@ def _write_image_state(source: str, state: dict) -> None:
             os.unlink(temporary)
 
 
+def _source_access_stop_reason(source: str) -> str | None:
+    if not _source_authorized(source):
+        return "source_authorization_required"
+    if not _source_access_confirmed(source):
+        return "source_access_confirmation_required"
+    return None
+
+
 @contextmanager
 def _run_lock():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -475,8 +581,9 @@ def refresh(source: str, limit: int, delay: float = 1.0) -> dict:
         "cursor": 0,
         "errors": [],
     }
-    if not _source_authorized(source):
-        stats["stop_reason"] = "source_authorization_required"
+    stop_reason = _source_access_stop_reason(source)
+    if stop_reason:
+        stats["stop_reason"] = stop_reason
         return stats
     with (
         _run_lock(),
@@ -507,6 +614,15 @@ def refresh(source: str, limit: int, delay: float = 1.0) -> dict:
             .limit(limit)
         ).all()
         if not offers:
+            _write_state(
+                source,
+                {
+                    "source": source,
+                    "status": "COMPLETE",
+                    "cursor": 0,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
             cursor = 0
             offers = db.scalars(
                 select(OfertaFarmacia)
@@ -536,22 +652,65 @@ def refresh(source: str, limit: int, delay: float = 1.0) -> dict:
                 db.rollback()
                 stats["mismatch"] += 1
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
+            except SourceAccessBlocked as error:
+                db.rollback()
+                stats["unavailable"] += 1
+                stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
+                stats.update(
+                    status="ACCESS_BLOCKED", stop_reason="http_403", cursor=cursor
+                )
+                _write_state(
+                    source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
+                )
+                break
             except SourceUnavailable as error:
                 db.rollback()
                 stats["unavailable"] += 1
                 stats["retry_after_seconds"] = error.retry_after_seconds
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
-                if str(error) in {"http_403", "http_429"}:
-                    stats["stop_reason"] = str(error)
+                if (
+                    str(error) == "http_429"
+                    or str(error).startswith("http_5")
+                    or str(error).startswith("request_")
+                ):
+                    state_status = (
+                        "RATE_LIMITED" if str(error) == "http_429" else "ERROR"
+                    )
+                    stats.update(
+                        status=state_status,
+                        stop_reason=str(error),
+                        cursor=cursor,
+                        retry_at=error.retry_at,
+                    )
                     _write_state(
                         source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
                     )
                     break
             stats["checked"] += 1
             stats["cursor"] = offer.id
-            _write_state(source, {**stats, "updated_at": datetime.now(UTC).isoformat()})
+            _write_state(
+                source,
+                {
+                    **stats,
+                    "status": "RUNNING",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
             if delay:
                 time.sleep(delay)
+        stats["pending"] = (
+            db.scalar(
+                select(func.count())
+                .select_from(OfertaFarmacia)
+                .where(
+                    OfertaFarmacia.farmacia_id == pharmacy_id,
+                    OfertaFarmacia.id > stats["cursor"],
+                )
+            )
+            or 0
+        )
+        stats.setdefault("status", "WAITING" if stats["pending"] else "COMPLETE")
+        _write_state(source, {**stats, "updated_at": datetime.now(UTC).isoformat()})
     return stats
 
 
@@ -563,15 +722,18 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
         "source": source,
         "checked": 0,
         "skipped_existing": 0,
+        "images_found": 0,
         "images_registered": 0,
+        "images_rejected": 0,
         "without_image": 0,
         "unavailable": 0,
         "mismatch": 0,
         "errors": [],
         "cursor": 0,
     }
-    if not _source_authorized(source):
-        stats["stop_reason"] = "source_authorization_required"
+    stop_reason = _source_access_stop_reason(source)
+    if stop_reason:
+        stats["stop_reason"] = stop_reason
         return stats
     with (
         _run_lock(),
@@ -599,6 +761,15 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
             .limit(limit)
         ).all()
         if not offers:
+            _write_image_state(
+                source,
+                {
+                    "source": source,
+                    "status": "COMPLETE",
+                    "cursor": 0,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
             cursor = 0
             offers = db.scalars(
                 select(OfertaFarmacia)
@@ -617,20 +788,42 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
                     stats["skipped_existing"] += 1
                 else:
                     image_url = fetch_image_candidate(client, offer, source)
-                    if image_url and record_image_reference(offer, source, image_url):
-                        stats["images_registered"] += 1
+                    if image_url:
+                        stats["images_found"] += 1
+                        if record_image_reference(offer, source, image_url):
+                            stats["images_registered"] += 1
+                        else:
+                            stats["images_rejected"] += 1
                     else:
                         stats["without_image"] += 1
             except IdentityMismatch as error:
                 stats["mismatch"] += 1
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
+            except SourceAccessBlocked as error:
+                stats["unavailable"] += 1
+                stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
+                stats.update(
+                    status="ACCESS_BLOCKED", stop_reason="http_403", cursor=cursor
+                )
+                _write_image_state(
+                    source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
+                )
+                break
             except SourceUnavailable as error:
                 stats["unavailable"] += 1
                 stats["retry_after_seconds"] = error.retry_after_seconds
                 stats["errors"].append({"offer_id": offer.id, "reason": str(error)})
-                if str(error) in {"http_403", "http_429"}:
-                    stats["stop_reason"] = str(error)
-                    stats["cursor"] = offer.id
+                if (
+                    str(error) == "http_429"
+                    or str(error).startswith("http_5")
+                    or str(error).startswith("request_")
+                ):
+                    stats.update(
+                        status="RATE_LIMITED" if str(error) == "http_429" else "ERROR",
+                        stop_reason=str(error),
+                        cursor=cursor,
+                        retry_at=error.retry_at,
+                    )
                     _write_image_state(
                         source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
                     )
@@ -639,13 +832,40 @@ def refresh_images(source: str, limit: int, delay: float = 1.0) -> dict:
                 stats["errors"].append(
                     {"offer_id": offer.id, "reason": f"{type(error).__name__}"}
                 )
+                stats.update(
+                    status="ERROR", stop_reason=type(error).__name__, cursor=cursor
+                )
+                _write_image_state(
+                    source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
+                )
+                break
             stats["checked"] += 1
             stats["cursor"] = offer.id
             _write_image_state(
-                source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
+                source,
+                {
+                    **stats,
+                    "status": "RUNNING",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
             )
             if delay:
                 time.sleep(delay)
+        stats["pending"] = (
+            db.scalar(
+                select(func.count())
+                .select_from(OfertaFarmacia)
+                .where(
+                    OfertaFarmacia.farmacia_id == pharmacy_id,
+                    OfertaFarmacia.id > stats["cursor"],
+                )
+            )
+            or 0
+        )
+        stats.setdefault("status", "WAITING" if stats["pending"] else "COMPLETE")
+        _write_image_state(
+            source, {**stats, "updated_at": datetime.now(UTC).isoformat()}
+        )
     return stats
 
 
