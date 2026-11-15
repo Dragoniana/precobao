@@ -185,8 +185,9 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
     }
     _write_state(source, state)
     timeout = float(os.getenv("SCRAPER_INGEST_TIMEOUT_SECONDS", "30"))
+    ca_bundle = os.getenv("SCRAPER_INGEST_CA_BUNDLE", "").strip()
     async with httpx.AsyncClient(
-        verify=True,
+        verify=ca_bundle or True,
         follow_redirects=False,
         timeout=timeout,
         trust_env=False,
@@ -263,11 +264,24 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 scraper = AraujoScraper(
                     request_delay=float(os.getenv("ARAUJO_REQUEST_DELAY_SECONDS", "1")),
                     max_pages=int(os.getenv("ARAUJO_MAX_PAGES", "200")),
+                    allow_page_limit=(
+                        os.getenv("ARAUJO_COLLECTOR_ALLOW_PAGE_LIMIT", "false")
+                        .strip()
+                        .casefold()
+                        in {"1", "true", "yes", "on"}
+                    ),
                 )
                 scraper.products_callback = send_page
                 with scraper._run_lock():
                     await scraper._extract_direct_catalog()
                 state["source_products"] = scraper.products_queued
+                if (
+                    scraper.allow_page_limit
+                    and scraper.products_queued
+                    and int(os.getenv("ARAUJO_MAX_PAGES", "200")) == 1
+                ):
+                    state["status"] = "PARTIAL"
+                    state["stop_reason"] = "configured_page_limit"
             else:
                 from app.scrapers.pacheco import PachecoScraper
 
@@ -275,7 +289,11 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                     request_delay=float(
                         os.getenv("PACHECO_REQUEST_DELAY_SECONDS", "1")
                     ),
-                    max_items=None,
+                    max_items=(
+                        int(os.environ["PACHECO_COLLECTOR_MAX_ITEMS"])
+                        if os.getenv("PACHECO_COLLECTOR_MAX_ITEMS", "").strip()
+                        else None
+                    ),
                     source_mode=SourceMode.DIRECT,
                 )
                 scraper.products_callback = send_page
