@@ -20,7 +20,7 @@ py -3.12 -m pip install --upgrade poetry
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar Poetry.' }
 Push-Location $Backend
 try {
-    poetry install --only main --no-interaction
+    py -3.12 -m poetry install --only main --no-interaction
     if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar dependências do coletor.' }
 } finally { Pop-Location }
 
