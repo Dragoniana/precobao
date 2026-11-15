@@ -11,6 +11,12 @@ from pathlib import Path
 
 from app.scrapers.araujo import AraujoScraper
 from app.scrapers.partner_feed import PartnerFeedForbidden, PartnerFeedRateLimited
+from app.scrapers.source_modes import (
+    SourceHTTPError,
+    SourceMode,
+    direct_access_ready,
+    source_mode,
+)
 
 
 def _state_dir() -> Path:
@@ -102,14 +108,27 @@ async def serve() -> None:
         raise ValueError("Araújo scheduler intervals must be positive")
 
     while True:
-        if not _feed_configured():
+        mode = source_mode("araujo")
+        if mode is SourceMode.DISABLED:
+            _log("paused", reason="source_disabled", source_mode=mode.value)
+            await asyncio.sleep(3600)
+            continue
+        if mode is SourceMode.FEED and not _feed_configured():
             _log("paused", reason="authorized_feed_not_configured")
+            await asyncio.sleep(3600)
+            continue
+        if mode is SourceMode.DIRECT and not direct_access_ready("araujo"):
+            _log("paused", reason="direct_access_not_confirmed")
             await asyncio.sleep(3600)
             continue
 
         state = _checkpoint()
         if state.get("stop_reason") == "http_403":
-            _log("paused", reason="partner_feed_http_403")
+            _log(
+                "paused",
+                reason="source_http_403_requires_manual_access_review",
+                source_mode=mode.value,
+            )
             await asyncio.sleep(3600)
             continue
         now = datetime.now(UTC)
@@ -123,7 +142,7 @@ async def serve() -> None:
         state = {**state, "status": "running", "started_at": started.isoformat()}
         _write_checkpoint(state)
         _log("run_started", started_at=started.isoformat())
-        scraper = AraujoScraper()
+        scraper = AraujoScraper(source_mode=mode)
         try:
             await scraper.run()
             persistence = scraper.persistence_stats.copy()
@@ -142,6 +161,11 @@ async def serve() -> None:
         except Exception as error:
             blocked = isinstance(error, PartnerFeedForbidden)
             rate_limited = isinstance(error, PartnerFeedRateLimited)
+            status_code = (
+                error.status_code if isinstance(error, SourceHTTPError) else None
+            )
+            blocked = blocked or status_code == 403
+            rate_limited = rate_limited or status_code == 429
             state = {
                 **state,
                 "status": (
@@ -166,7 +190,7 @@ async def serve() -> None:
             _log(
                 "run_failed",
                 error_type=type(error).__name__,
-                error=str(error),
+                reason=str(error),
             )
         state["finished_at"] = datetime.now(UTC).isoformat()
         _write_checkpoint(state)

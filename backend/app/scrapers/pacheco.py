@@ -23,6 +23,13 @@ from app.scrapers.partner_feed import (
     PartnerFeedRateLimited,
     load_authorized_partner_feed,
 )
+from app.scrapers.source_modes import (
+    SourceMode,
+    direct_access_ready,
+)
+from app.scrapers.source_modes import (
+    source_mode as configured_source_mode,
+)
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -66,6 +73,7 @@ class PachecoScraper(BasePharmacyScraper):
         batch_size: int = 50,
         max_items: int | None = None,
         request_delay: float | None = None,
+        source_mode: SourceMode | str | None = None,
     ):
         if max_items is not None and max_items < 1:
             raise ValueError("max_items deve ser maior que zero.")
@@ -84,6 +92,11 @@ class PachecoScraper(BasePharmacyScraper):
         )
         self.max_items = max_items
         self.request_delay = request_delay
+        self.source_mode = (
+            SourceMode(source_mode.upper())
+            if isinstance(source_mode, str)
+            else source_mode or configured_source_mode("pacheco")
+        )
         self.state_dir = Path(os.getenv("PACHECO_STATE_DIR", str(self.STATE_DIR)))
         self.checkpoint_path = self.state_dir / "checkpoint.json"
         self.stats: dict[str, Any] = self._new_stats({})
@@ -236,24 +249,32 @@ class PachecoScraper(BasePharmacyScraper):
 
     async def extrair_catalogo(self) -> None:
         """Scan the broad category, then its official brand partitions."""
-        try:
-            feed_products = await load_authorized_partner_feed(
-                prefix="PACHECO_PARTNER_FEED", sku_prefix="PCH"
-            )
-        except PartnerFeedForbidden as error:
-            self.stats["last_http_status"] = 403
-            self.stats["retryable"] = False
-            self.stats["stop_reason"] = "http_403"
-            self.stats["errors"].append(str(error))
+        if self.source_mode is SourceMode.DISABLED:
+            self.stats["status"] = "disabled"
+            self.stats["stop_reason"] = "source_disabled"
+            self._write_checkpoint()
             return
-        except PartnerFeedRateLimited as error:
-            self.stats["last_http_status"] = 429
-            self.stats["retry_after_seconds"] = error.retry_after_seconds
-            self.stats["retryable"] = False
-            self.stats["stop_reason"] = "http_429"
-            self.stats["errors"].append(str(error))
-            return
-        if feed_products is not None:
+        if self.source_mode is SourceMode.FEED:
+            try:
+                feed_products = await load_authorized_partner_feed(
+                    prefix="PACHECO_PARTNER_FEED", sku_prefix="PCH"
+                )
+            except PartnerFeedForbidden as error:
+                self.stats["last_http_status"] = 403
+                self.stats["retryable"] = False
+                self.stats["stop_reason"] = "http_403"
+                self.stats["errors"].append(str(error))
+                return
+            except PartnerFeedRateLimited as error:
+                self.stats["last_http_status"] = 429
+                self.stats["retry_after_seconds"] = error.retry_after_seconds
+                self.stats["retryable"] = False
+                self.stats["stop_reason"] = "http_429"
+                self.stats["errors"].append(str(error))
+                return
+            if feed_products is None:
+                self._page_failed("PACHECO_PARTNER_FEED_NOT_CONFIGURED")
+                return
             for product in feed_products:
                 await self.fila.put(product)
             self.stats["products_seen"] = len(feed_products)
@@ -266,14 +287,9 @@ class PachecoScraper(BasePharmacyScraper):
             print(f"Pacheco authorized feed validated: {len(feed_products)} products.")
             return
 
-        if os.getenv("PACHECO_PUBLIC_API_AUTHORIZED", "false").casefold() not in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
+        if not direct_access_ready("pacheco"):
             self._page_failed(
-                "source_authorization_required: configure an authorized partner feed",
+                "PACHECO_DIRECT_ACCESS_NOT_CONFIRMED",
                 retryable=False,
             )
             return

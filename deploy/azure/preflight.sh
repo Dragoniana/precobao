@@ -25,10 +25,13 @@ from urllib.parse import parse_qs, urlsplit
 
 config = json.load(sys.stdin)
 services = config.get("services", {})
-required_services = {"api", "caddy", "offer-refresh", "araujo-scheduler", "pacheco-scheduler"}
+required_services = {
+    "api", "web", "caddy", "scraper-indiana", "offer-refresh",
+    "araujo-scheduler", "pacheco-scheduler",
+}
 if set(services) != required_services:
     raise SystemExit("Azure Compose services do not match the reviewed production set.")
-api, caddy = services["api"], services["caddy"]
+api, web, caddy = services["api"], services["web"], services["caddy"]
 environment = api.get("environment", {})
 api_image_mount = next(
     (m for m in api.get("volumes", []) if m.get("target") == "/app/data/image_references"),
@@ -41,9 +44,29 @@ if api.get("ports"):
 published = {str(item.get("published")) for item in caddy.get("ports", [])}
 if published != {"80", "443"}:
     raise SystemExit("Only Caddy may publish TCP ports 80 and 443.")
+if web.get("ports") or web.get("restart") != "unless-stopped":
+    raise SystemExit("The web service must have no host ports and restart automatically.")
+if not web.get("healthcheck"):
+    raise SystemExit("Caddy must wait on a frontend health check.")
+public_api_url = urlsplit(web.get("build", {}).get("args", {}).get("EXPO_PUBLIC_API_URL", ""))
+api_domain = caddy.get("environment", {}).get("API_DOMAIN", "")
+if (
+    public_api_url.scheme != "https"
+    or public_api_url.hostname != api_domain
+    or public_api_url.path.rstrip("/") != "/backend"
+    or public_api_url.username
+    or public_api_url.password
+    or public_api_url.query
+    or public_api_url.fragment
+):
+    raise SystemExit("The web build must use the public HTTPS /backend URL for API_DOMAIN.")
 if "api_edge" not in api.get("networks", {}) or "api_edge" not in caddy.get("networks", {}):
     raise SystemExit("FastAPI and Caddy must share the isolated proxy network.")
-for worker_name in ("offer-refresh", "araujo-scheduler", "pacheco-scheduler"):
+if "api_edge" not in web.get("networks", {}):
+    raise SystemExit("The frontend must share the private Caddy network.")
+for worker_name in (
+    "scraper-indiana", "offer-refresh", "araujo-scheduler", "pacheco-scheduler"
+):
     worker = services[worker_name]
     if worker.get("ports"):
         raise SystemExit(f"The {worker_name} worker must not publish host ports.")
@@ -62,22 +85,33 @@ for worker_name in ("offer-refresh", "araujo-scheduler", "pacheco-scheduler"):
     if worker.get("depends_on", {}).get("api", {}).get("condition") != "service_healthy":
         raise SystemExit(f"The {worker_name} worker must wait until FastAPI/database readiness.")
 for service_name, variable in (
+    ("scraper-indiana", "INDIANA_SCRAPER_ENABLED"),
     ("offer-refresh", "OFFER_REFRESH_ENABLED"),
     ("araujo-scheduler", "ARAUJO_SCHEDULER_ENABLED"),
     ("pacheco-scheduler", "PACHECO_SCHEDULER_ENABLED"),
 ):
     if variable not in services[service_name].get("environment", {}):
         raise SystemExit(f"{variable} must be explicitly configured.")
-for service_name, variable in (
-    ("offer-refresh", "ARAUJO_PUBLIC_CATALOG_AUTHORIZED"),
-    ("pacheco-scheduler", "PACHECO_PUBLIC_API_AUTHORIZED"),
-    ("offer-refresh", "ARAUJO_ACCESS_CONFIRMED"),
-    ("offer-refresh", "PACHECO_ACCESS_CONFIRMED"),
-):
-    value = services[service_name].get("environment", {}).get(variable, "false")
-    if value.casefold() in {"1", "true", "yes", "on"}:
-        raise SystemExit(f"{variable} must remain false until source authorization is documented.")
+for pharmacy in ("ARAUJO", "PACHECO"):
+    service_name = f"{pharmacy.lower()}-scheduler"
+    settings = services[service_name].get("environment", {})
+    mode = str(settings.get(f"{pharmacy}_SOURCE_MODE", "DISABLED")).upper()
+    if mode not in {"DIRECT", "FEED", "DISABLED"}:
+        raise SystemExit(f"{pharmacy}_SOURCE_MODE must be DIRECT, FEED or DISABLED.")
+    if mode == "DIRECT":
+        for variable in (
+            f"{pharmacy}_PUBLIC_CATALOG_AUTHORIZED"
+            if pharmacy == "ARAUJO"
+            else f"{pharmacy}_PUBLIC_API_AUTHORIZED",
+            f"{pharmacy}_ACCESS_CONFIRMED",
+        ):
+            value = str(settings.get(variable, "false")).casefold()
+            if value not in {"1", "true", "yes", "on"}:
+                raise SystemExit(
+                    f"{variable} must be true before enabling {pharmacy} DIRECT mode."
+                )
 for service_name, state_path in (
+    ("scraper-indiana", "/app/data/scraper_state"),
     ("offer-refresh", "/app/data/offer_refresh"),
     ("araujo-scheduler", "/app/data/araujo"),
     ("pacheco-scheduler", "/app/data/pacheco"),
@@ -121,7 +155,6 @@ if not origins or any(
     for origin in origins
 ):
     raise SystemExit("BACKEND_CORS_ORIGINS must contain exact HTTPS origins only.")
-api_domain = caddy.get("environment", {}).get("API_DOMAIN", "")
 api_url = urlsplit(f"https://{api_domain}")
 if (
     not api_domain
@@ -139,8 +172,18 @@ except ValueError:
     pass
 else:
     raise SystemExit("API_DOMAIN must be a DNS hostname, not an IP address.")
-if not any(urlsplit(origin).hostname != api_domain for origin in origins):
-    raise SystemExit("CORS must contain the distinct Azure Static Web Apps origin.")
+if api_domain not in {urlsplit(origin).hostname for origin in origins}:
+    raise SystemExit("CORS must allow the exact HTTPS origin hosting the web app.")
+
+caddyfile = (Path(__file__).with_name("Caddyfile")).read_text(encoding="utf-8")
+for required_route in (
+    "handle_path /backend/*",
+    "reverse_proxy api:8000",
+    "reverse_proxy web:80",
+    "redir https://precobao.app{uri} permanent",
+):
+    if required_route not in caddyfile:
+        raise SystemExit(f"Caddyfile is missing the reviewed route: {required_route}")
 
 cert_mounts = [m for m in api.get("volumes", []) if m.get("target") == "/run/secrets/azure-postgres-root-ca.pem"]
 if len(cert_mounts) != 1 or cert_mounts[0].get("type") != "bind" or not Path(cert_mounts[0].get("source", "")).is_file():

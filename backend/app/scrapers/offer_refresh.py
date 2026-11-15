@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.database import SessionLocal
 from app.models.farmacia import Farmacia
 from app.models.oferta_farmacia import OfertaFarmacia
+from app.scrapers.source_modes import SourceMode, source_mode
 from app.services.image_registry import (
     has_offer_image_reference,
     upsert_image_reference,
@@ -531,6 +532,10 @@ def _write_image_state(source: str, state: dict) -> None:
 
 
 def _source_access_stop_reason(source: str) -> str | None:
+    if source in {"araujo", "pacheco"}:
+        mode = source_mode(source)
+        if mode is not SourceMode.DIRECT:
+            return f"source_mode_{mode.value.casefold()}"
     if not _source_authorized(source):
         return "source_authorization_required"
     if not _source_access_confirmed(source):

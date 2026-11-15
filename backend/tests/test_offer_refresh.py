@@ -30,6 +30,12 @@ from app.scrapers.offer_refresh import (
 )
 
 
+@pytest.fixture(autouse=True)
+def enable_direct_source_mode_for_tests(monkeypatch):
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("PACHECO_SOURCE_MODE", "DIRECT")
+
+
 def _offer(source="indiana"):
     sku = "IND132111" if source == "indiana" else "ARJ101392"
     url = (
@@ -66,6 +72,24 @@ def test_recurring_refresh_fails_closed_without_source_authorization(
     result = refresh_function(source, limit=1, delay=0)
 
     assert result["stop_reason"] == "source_authorization_required"
+    assert result["checked"] == 0
+
+
+def test_offer_refresh_does_not_use_direct_endpoint_in_feed_mode(monkeypatch):
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "FEED")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+
+    def unexpected_database_access():
+        raise AssertionError("Feed mode must not run the direct offer refresher")
+
+    monkeypatch.setattr(
+        "app.scrapers.offer_refresh.SessionLocal", unexpected_database_access
+    )
+
+    result = refresh("araujo", limit=1, delay=0)
+
+    assert result["stop_reason"] == "source_mode_feed"
     assert result["checked"] == 0
 
 

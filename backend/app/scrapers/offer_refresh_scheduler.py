@@ -14,6 +14,7 @@ from app.core.database import SessionLocal
 from app.models.farmacia import Farmacia
 from app.models.oferta_farmacia import OfertaFarmacia
 from app.scrapers.offer_refresh import STATE_DIR, refresh, refresh_images
+from app.scrapers.source_modes import SourceMode, source_mode
 
 SOURCE_CNPJ = {
     "indiana": "00000000000100",
@@ -161,6 +162,8 @@ def _run_monitored(key: str, source: str, interval: float, operation) -> None:
 
 def _source_authorized(source: str) -> bool:
     source = source.removeprefix("images-")
+    if source in {"araujo", "pacheco"} and source_mode(source) is not SourceMode.DIRECT:
+        return False
     variable = {
         "araujo": "ARAUJO_PUBLIC_CATALOG_AUTHORIZED",
         "pacheco": "PACHECO_PUBLIC_API_AUTHORIZED",

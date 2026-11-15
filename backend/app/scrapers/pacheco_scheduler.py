@@ -9,6 +9,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.scrapers.pacheco import PachecoScraper
+from app.scrapers.source_modes import (
+    SourceMode,
+    direct_access_ready,
+    source_mode,
+)
 
 
 def _log(event: str, **fields: object) -> None:
@@ -90,11 +95,32 @@ async def serve() -> None:
 
     while True:
         state = _checkpoint()
-        if state.get("stop_reason") in {
-            "http_403",
-            "source_authorization_required: configure an authorized partner feed",
-        }:
-            _log("paused", reason="authorized_source_access_required")
+        mode = source_mode("pacheco")
+        if mode is SourceMode.DISABLED:
+            _log("paused", reason="source_disabled", source_mode=mode.value)
+            await asyncio.sleep(3600)
+            continue
+        if state.get("stop_reason") == "http_403":
+            _log(
+                "paused",
+                reason="source_http_403_requires_manual_access_review",
+                source_mode=mode.value,
+            )
+            await asyncio.sleep(3600)
+            continue
+        if mode is SourceMode.FEED and not (
+            os.getenv("PACHECO_PARTNER_FEED_FILE", "").strip()
+            or os.getenv("PACHECO_PARTNER_FEED_URL", "").strip()
+        ):
+            _log("paused", reason="authorized_feed_not_configured")
+            await asyncio.sleep(3600)
+            continue
+        if mode is SourceMode.DIRECT and not direct_access_ready("pacheco"):
+            _log("paused", reason="direct_access_not_confirmed")
+            await asyncio.sleep(3600)
+            continue
+        if state.get("stop_reason") == "PACHECO_DIRECT_ACCESS_NOT_CONFIRMED":
+            _log("paused", reason="direct_access_not_confirmed")
             await asyncio.sleep(3600)
             continue
 

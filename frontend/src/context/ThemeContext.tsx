@@ -59,15 +59,12 @@ function initialWebPreference(): ThemePreference {
   }
 }
 
-function initialWebScheme(): ResolvedTheme {
-  if (Platform.OS !== 'web' || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'light';
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const nativeSystemScheme = useColorScheme();
-  const [webSystemScheme, setWebSystemScheme] = useState<ResolvedTheme>(initialWebScheme);
-  const [preference, setPreferenceState] = useState<ThemePreference>(initialWebPreference);
+  // Keep the server render and the browser's first render identical. Read the
+  // user's browser-only theme settings in effects after hydration.
+  const [webSystemScheme, setWebSystemScheme] = useState<ResolvedTheme>('light');
+  const [preference, setPreferenceState] = useState<ThemePreference>('system');
   const [isReady, setIsReady] = useState(Platform.OS === 'web');
 
   useEffect(() => {
@@ -93,6 +90,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       if (query.removeEventListener) query.removeEventListener('change', update);
       else query.removeListener(update);
     };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') setPreferenceState(initialWebPreference());
   }, []);
 
   const setPreference = useCallback((next: ThemePreference) => {

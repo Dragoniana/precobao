@@ -9,7 +9,9 @@ from app.scrapers.pacheco_scheduler import _next_run
 
 @pytest.fixture(autouse=True)
 def enable_mocked_pacheco_source(monkeypatch):
+    monkeypatch.setenv("PACHECO_SOURCE_MODE", "DIRECT")
     monkeypatch.setenv("PACHECO_PUBLIC_API_AUTHORIZED", "true")
+    monkeypatch.setenv("PACHECO_ACCESS_CONFIRMED", "true")
 
 
 def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
@@ -64,6 +66,13 @@ async def test_pacheco_paginates_past_pages_without_parseable_offers(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        pacheco_module,
+        "load_authorized_partner_feed",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("DIRECT mode must not load a feed")
+        ),
+    )
     page_rows = {
         0: [{"productId": f"first-{i}", "items": []} for i in range(50)],
         50: [{"productId": f"last-{i}", "items": []} for i in range(3)],
@@ -317,10 +326,26 @@ async def test_pacheco_requires_authorized_source_before_network_access(
 
     await scraper.run()
 
-    assert scraper.stats["stop_reason"] == (
-        "source_authorization_required: configure an authorized partner feed"
-    )
+    assert scraper.stats["stop_reason"] == "PACHECO_DIRECT_ACCESS_NOT_CONFIRMED"
     assert scraper.stats["products_enqueued"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pacheco_disabled_mode_never_contacts_public_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("PACHECO_SOURCE_MODE", "DISABLED")
+
+    def unexpected_network(**_kwargs):
+        raise AssertionError("DISABLED mode must not contact the source.")
+
+    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", unexpected_network)
+    scraper = PachecoScraper(request_delay=0)
+
+    await scraper.run()
+
+    assert scraper.stats["status"] == "disabled"
+    assert scraper.stats["stop_reason"] == "source_disabled"
+    assert scraper.stats["pages_requested"] == 0
 
 
 @pytest.mark.asyncio
