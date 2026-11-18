@@ -276,6 +276,9 @@ export default function LoginScreen() {
               <Pressable style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed, isSubmitting && styles.disabled]} onPress={handleSubmit(handleLogin)} disabled={isSubmitting} accessibilityRole="button">
                 <Text style={styles.primaryButtonText}>{isSubmitting ? 'Entrando...' : 'Entrar'}</Text>
               </Pressable>
+              <Pressable style={styles.guestButton} onPress={() => router.push('/forgot-password' as never)} accessibilityRole="button">
+                <Text style={styles.secondaryButtonText}>Esqueci minha senha?</Text>
+              </Pressable>
               <Pressable style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]} onPress={() => router.push('/signup' as never)} accessibilityRole="button">
                 <Text style={styles.secondaryButtonText}>Criar conta</Text>
               </Pressable>
