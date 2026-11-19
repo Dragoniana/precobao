@@ -1,0 +1,17 @@
+{
+  "repository_root": "C:\\PrecoBao",
+  "api_url": "https://precobao.app/backend/api/v1/internal/scraper-batches",
+  "api_ready": false,
+  "collector_enabled": false,
+  "collection_environment_authorized": true,
+  "state_dir": "C:\\Users\\<usuario>\\AppData\\Local\\PrecoBaoCollector\\state",
+  "stop_file": "C:\\Users\\<usuario>\\AppData\\Local\\PrecoBaoCollector\\stop.requested",
+  "log_file": "C:\\Users\\<usuario>\\AppData\\Local\\PrecoBaoCollector\\collector.log",
+  "timezone": "America/Sao_Paulo",
+  "schedule_times": ["08:00", "20:00"],
+  "missed_run_grace_minutes": 120,
+  "sources": {
+    "araujo": { "mode": "DISABLED", "access_confirmed": false },
+    "pacheco": { "mode": "DISABLED", "access_confirmed": false }
+  }
+}

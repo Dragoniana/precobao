@@ -13,13 +13,21 @@ for command_name in gpg pg_restore python3 sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "Required tool is missing: $command_name" >&2; exit 2; }
 done
 (cd "$(dirname "$base")" && sha256sum --check "$(basename "$base.sha256")")
-gpg --batch --decrypt "$base.dump.gpg" | pg_restore --list - >/dev/null
-gpg --batch --decrypt "$base.images.json.gpg" | python3 -c '
+umask 077
+check_dir="$(mktemp -d "${TMPDIR:-/tmp}/preco-bao-backup-check.XXXXXX")"
+trap 'rm -rf "$check_dir"' EXIT
+dump_check="$check_dir/database.dump"
+images_check="$check_dir/images.json"
+gpg --batch --decrypt --output "$dump_check" "$base.dump.gpg"
+pg_restore --list "$dump_check" >/dev/null
+gpg --batch --decrypt --output "$images_check" "$base.images.json.gpg"
+python3 - "$images_check" <<'PY'
 import json,sys
-data=json.load(sys.stdin)
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data=json.load(handle)
 assert data.get("schema")=="preco-bao.image-registry" and data.get("version")==1 and isinstance(data.get("records"),list)
 print("Image registry archive valid ({} records).".format(len(data["records"])))
-'
+PY
 python3 - "$base.manifest.json" <<'PY'
 import json, sys
 from pathlib import Path

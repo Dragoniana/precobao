@@ -37,6 +37,7 @@ def with_registry_images(medicine: CatalogoBase) -> CatalogoComOfertasOut:
             urls = [stored_url, *(url for url in urls if url != stored_url)]
     result = CatalogoComOfertasOut.model_validate(medicine)
     offers = [offer.model_copy(update={"imagem_url": None}) for offer in result.ofertas]
+    stored = next((link for link in medicine.image_links if link.is_primary), None)
     return result.model_copy(
         update={
             "imagem_urls": urls,
@@ -44,6 +45,8 @@ def with_registry_images(medicine: CatalogoBase) -> CatalogoComOfertasOut:
             "imagem_fonte": None,
             "imagem_status": None,
             "imagem_motivo_rejeicao": None,
+            "imagem_armazenada": stored is not None,
+            "imagem_hash": stored.blob.sha256 if stored is not None else None,
             "ofertas": offers,
         }
     )

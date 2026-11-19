@@ -13,7 +13,13 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.api.routes import catalogo, historico, usuarios
+from app.api.routes import (
+    catalogo,
+    historico,
+    medicine_image_ingest,
+    scraper_ingest,
+    usuarios,
+)
 from app.core.database import get_db
 from app.core.rate_limit import FixedWindowRateLimiter
 
@@ -21,6 +27,18 @@ logger = logging.getLogger("preco_bao.security")
 
 
 _RATE_LIMIT_POLICIES = {
+    ("POST", "/api/v1/internal/scraper-batches"): (
+        "scraper-ingest",
+        "SCRAPER_INGEST_RATE_LIMIT_PER_HOUR",
+        120,
+        3600,
+    ),
+    ("POST", "/api/v1/internal/medicine-images"): (
+        "scraper-image-ingest",
+        "SCRAPER_IMAGE_INGEST_RATE_LIMIT_PER_HOUR",
+        600,
+        3600,
+    ),
     ("POST", "/auth/jwt/login"): ("login", "RATE_LIMIT_LOGIN_PER_MINUTE", 10, 60),
     ("POST", "/auth/register"): (
         "register",
@@ -66,8 +84,7 @@ def _rate_limit_policy(method: str, path: str):
     if policy is not None:
         return policy
     if method == "GET" and (
-        path.startswith("/catalogo/")
-        or path.startswith("/api/v1/medicines/")
+        path.startswith("/catalogo/") or path.startswith("/api/v1/medicines/")
     ):
         return ("catalog", "RATE_LIMIT_CATALOG_PER_MINUTE", 120, 60)
     return None
@@ -189,9 +206,7 @@ def create_app() -> FastAPI:
         allow_origins=origins,
         # Expo may choose any free port when the usual Metro port is occupied.
         allow_origin_regex=(
-            None
-            if production
-            else r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+            None if production else r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
         ),
         allow_credentials=True,
         allow_methods=(
@@ -205,6 +220,8 @@ def create_app() -> FastAPI:
     application.include_router(catalogo.router)
     application.include_router(usuarios.router)
     application.include_router(historico.router, prefix="/api/v1")
+    application.include_router(scraper_ingest.router, prefix="/api/v1")
+    application.include_router(medicine_image_ingest.router, prefix="/api/v1")
 
     @application.get("/health/live", include_in_schema=False)
     def health_live() -> dict[str, str]:

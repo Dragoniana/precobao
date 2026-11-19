@@ -4,6 +4,7 @@ Módulo responsável pela definição do modelo central de Catálogo de Medicame
 
 import json
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, String, Text, TypeDecorator
 from sqlalchemy.dialects.postgresql import (
@@ -15,6 +16,9 @@ from sqlalchemy.sql import func
 from .base import Base
 from .historico import HistoricoPreco
 from .oferta_farmacia import OfertaFarmacia
+
+if TYPE_CHECKING:
+    from .medicine_image import MedicineImageLink
 
 
 class SQLiteArray(TypeDecorator):
@@ -95,6 +99,9 @@ class CatalogoBase(Base):
 
     ofertas: Mapped[list["OfertaFarmacia"]] = relationship(
         "OfertaFarmacia", back_populates="produto_catalogo"
+    )
+    image_links: Mapped[list["MedicineImageLink"]] = relationship(
+        "MedicineImageLink", back_populates="catalog", cascade="all, delete-orphan"
     )
     historico_precos: Mapped[list["HistoricoPreco"]] = relationship(
         "HistoricoPreco", backref="medicamento", cascade="all, delete-orphan"
