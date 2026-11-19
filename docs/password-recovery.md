@@ -1,34 +1,56 @@
-# Recuperação de senha sem email
+# Recuperação de senha por email
 
-## Para usuários
+O fluxo público usa `POST /auth/password-reset/request` e
+`POST /auth/password-reset/confirm`. O primeiro sempre retorna a mesma mensagem
+genérica para endereços cadastrados e não cadastrados. O segundo exige um token
+aleatório, de uso único, válido por 20 minutos, e senhas iguais.
 
-1. Enquanto ainda consegue entrar, abra **Perfil → Segurança → Código de recuperação**.
-2. Confirme a senha atual. O código é aleatório, válido por até um ano e mostrado uma única vez.
-3. Guarde-o em um gerenciador de senhas ou outro local privado. Ele não é enviado por email nem fica disponível para consulta posterior.
-4. Se gerar outro código, o anterior deixa de funcionar.
-5. Na tela de login, use **Esqueci minha senha?**, informe o email associado, avance e envie o código junto com a nova senha.
+O hash SHA-256 do token é armazenado na tabela preexistente
+`password_recovery_codes`; o token em texto claro só permanece na memória da
+requisição e é entregue ao SMTP em uma tarefa de fundo. Cada nova solicitação
+invalida tokens anteriores. A tabela e os registros antigos não são apagados.
+As rotas antigas de emissão e consumo de códigos manuais foram removidas e a
+tela antiga redireciona para `/forgot-password`.
 
-O email identifica a conta, mas não comprova sua titularidade. A troca só ocorre com o código válido, não expirado e ainda não usado. Após dez códigos incorretos para um código ativo, ele é invalidado. A API também limita tentativas por endereço de rede.
+## Configuração de produção
 
-## Usuários antigos sem código
+Configurar no arquivo de ambiente protegido do serviço `api`:
 
-Quem não gerou um código antes de perder acesso não pode se recuperar apenas informando o email. O endpoint de recuperação não cria nem envia códigos.
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_STARTTLS=true
+SMTP_USERNAME=precobao01@gmail.com
+SMTP_PASSWORD=<senha de aplicativo, inserida por mecanismo seguro>
+SMTP_FROM_EMAIL=precobao01@gmail.com
+SMTP_FROM_NAME="Preço Bão"
+SMTP_TIMEOUT_SECONDS=10
+PASSWORD_RESET_URL=https://precobao.app/reset-password
+RATE_LIMIT_PASSWORD_RESET_REQUESTS_PER_HOUR=3
+RATE_LIMIT_PASSWORD_RESET_CONFIRMS_PER_HOUR=5
+```
 
-Procedimento assistido:
+Não guardar a senha em código, arquivos versionados, linha de comando ou logs.
+O cliente SMTP valida certificados TLS usando o trust store do sistema e exige
+STARTTLS. Falhas de envio são registradas somente por tipo de erro, sem email,
+token, conteúdo da mensagem ou resposta SMTP. A tela `/reset-password` é servida
+com `Cache-Control: no-store` e `Referrer-Policy: no-referrer`; após ler o token,
+o frontend remove a query da barra de endereço e não usa analytics.
 
-1. O suporte registra uma solicitação sem pedir senha ou código existente.
-2. Um operador verifica a identidade usando evidência independente do email da conta, estabelecida antes da solicitação. O email sozinho, dados públicos e conhecimento de dados cadastrais não bastam.
-3. Um segundo operador aprova a recuperação. Registre no chamado quem aprovou e o resultado, sem registrar senha, código ou documento de identidade completo.
-4. Um superusuário autorizado define uma senha temporária pela operação administrativa existente `PATCH /users/{id}`. O acesso superusuário deve ser protegido e a operação deve ser auditada. A senha temporária é entregue somente pelo canal independente usado para verificar a identidade.
-5. O usuário entra, troca a senha e gera seu próprio código em **Perfil → Segurança**.
+O email é multipart (texto simples e HTML) e informa a validade de 20 minutos.
+O envio ocorre depois da resposta HTTP em tarefa de fundo síncrona executada no
+thread pool do Starlette, com timeout configurável.
 
-Se não houver evidência independente ou canal seguro para entregar a senha temporária, não altere a conta. Encaminhe o caso para validação humana adicional. Nunca use o email como única prova de identidade.
+## Sessões existentes
 
-## Operação técnica
+A senha é atualizada pelo hash seguro do `UserManager`. Os JWT já emitidos não
+possuem revogação individual no sistema atual e podem permanecer válidos até sua
+expiração normal (no máximo uma hora). Um novo login utiliza apenas a senha nova.
 
-- `POST /auth/password-recovery/codes` exige sessão válida e confirmação da senha atual. Retorna o código uma vez com `Cache-Control: no-store`.
-- `POST /auth/password-recovery/reset` compara somente o hash SHA-256 do código; códigos inválidos, expirados, inexistentes e emails não cadastrados recebem a mesma resposta pública.
-- Códigos são de uso único. Nova emissão revoga códigos anteriores. O hash da senha continua sob o PasswordHelper do FastAPI Users.
-- Auditoria registra apenas a ação e o resultado; não registra email, identificador de usuário, senha, código nem corpo da requisição.
-- Limites padrão: cinco tentativas de recuperação por hora e três emissões por hora por cliente. O limitador atual é em memória e pressupõe uma única instância da API. Antes de escalar horizontalmente, substitua-o por armazenamento compartilhado ou limite na borda.
-- A migration `d30c5f9b24a1` é aditiva; downgrade remove somente a tabela de códigos e deve ser usado apenas se a migration ainda não tiver sido usada para recuperar contas.
+## Validação e implantação
+
+Testes usam SMTP falso local; não enviam mensagens externas. Antes do deploy,
+configurar `SMTP_PASSWORD` diretamente no mecanismo seguro da VM, confirmar a
+conectividade SMTP com TLS e enviar uma única mensagem para uma conta de teste
+controlada. Não aplicar migration: o esquema atual já armazena o hash e a
+expiração dos tokens de recuperação.

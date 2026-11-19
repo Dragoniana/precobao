@@ -142,17 +142,6 @@ export default function ProfileScreen() {
               </View>
 
               <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Segurança</Text>
-                <Pressable style={styles.linkRow} onPress={() => router.push('/recovery-code' as never)} accessibilityRole="button">
-                  <View style={styles.linkText}>
-                    <Text style={styles.linkTitle}>Código de recuperação</Text>
-                    <Text style={styles.linkSubtitle}>Gere um código para recuperar sua senha sem email</Text>
-                  </View>
-                  <Ionicons name="key-outline" size={18} color={palette.textSoft} />
-                </Pressable>
-              </View>
-
-              <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Conta</Text>
                 <Pressable style={styles.logoutRow} onPress={handleLogout} accessibilityRole="button"><Text style={styles.logoutText}>Sair da conta</Text><Ionicons name="log-out-outline" size={18} color={palette.danger} /></Pressable>
               </View>

@@ -2,10 +2,9 @@ import hashlib
 import hmac
 import logging
 import secrets
-import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from fastapi_users.exceptions import InvalidPasswordException
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -30,19 +29,17 @@ from app.models.usuario import (
 )
 from app.schemas.catalogo import CatalogoComOfertasOut
 from app.schemas.farmacia import FarmaciaOut
-from app.schemas.password_recovery import (
-    PasswordRecoveryCodeIssue,
-    PasswordRecoveryReset,
-)
+from app.schemas.password_recovery import PasswordResetConfirm, PasswordResetRequest
 from app.schemas.usuario import UsuarioCreate, UsuarioRead, UsuarioUpdate
 from app.services.catalog_response import with_registry_images
+from app.services.password_reset_email import deliver_password_reset_email
 
 router = APIRouter(tags=["Usuários e Autenticação"])
 logger = logging.getLogger("preco_bao.password_recovery")
-RECOVERY_CODE_LIFETIME = timedelta(days=365)
-MAX_CODE_ATTEMPTS = 10
-INVALID_RECOVERY_DETAIL = (
-    "Código inválido ou expirado. Confira os dados e tente novamente."
+PASSWORD_RESET_LIFETIME = timedelta(minutes=20)
+MAX_RESET_ATTEMPTS = 10
+INVALID_RESET_DETAIL = (
+    "O link é inválido ou expirou. Solicite um novo link e tente novamente."
 )
 
 router.include_router(fastapi_users.get_auth_router(auth_backend), prefix="/auth/jwt")
@@ -56,110 +53,107 @@ router.include_router(
 )
 
 
-@router.post("/auth/password-recovery/codes", status_code=status.HTTP_201_CREATED)
-async def issue_password_recovery_code(
-    payload: PasswordRecoveryCodeIssue,
+@router.post("/auth/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
+async def request_password_reset(
+    payload: PasswordResetRequest,
     response: Response,
-    user: Usuario = Depends(current_active_user),
-    manager: UserManager = Depends(get_user_manager),
-    db: Session = Depends(get_db),
-):
-    password = payload.current_password.get_secret_value()
-    verified, upgraded_hash = manager.password_helper.verify_and_update(
-        password, user.hashed_password
-    )
-    if not verified:
-        logger.info("password_recovery_code_issue outcome=rejected")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Não foi possível confirmar sua identidade.",
-        )
-
-    now = datetime.now(UTC)
-    db.execute(
-        update(PasswordRecoveryCode)
-        .where(
-            PasswordRecoveryCode.user_id == user.id,
-            PasswordRecoveryCode.used_at.is_(None),
-            PasswordRecoveryCode.revoked_at.is_(None),
-        )
-        .values(revoked_at=now)
-    )
-    if upgraded_hash:
-        user.hashed_password = upgraded_hash
-    recovery_code = secrets.token_urlsafe(32)
-    db.add(
-        PasswordRecoveryCode(
-            user_id=user.id,
-            code_hash=hashlib.sha256(recovery_code.encode("utf-8")).hexdigest(),
-            expires_at=now + RECOVERY_CODE_LIFETIME,
-        )
-    )
-    db.commit()
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    logger.info("password_recovery_code_issue outcome=issued")
-    return {
-        "recovery_code": recovery_code,
-        "expires_at": (now + RECOVERY_CODE_LIFETIME).isoformat(),
-        "message": "Guarde este código agora. Ele será exibido somente uma vez.",
-    }
-
-
-@router.post("/auth/password-recovery/reset")
-async def reset_password_with_recovery_code(
-    payload: PasswordRecoveryReset,
-    manager: UserManager = Depends(get_user_manager),
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     email = str(payload.email).strip().casefold()
+    now = datetime.now(UTC)
     user = db.execute(
-        select(Usuario).where(func.lower(Usuario.email) == email)
+        select(Usuario).where(func.lower(Usuario.email) == email).with_for_update()
     ).scalar_one_or_none()
 
-    # Always do the code lookup and constant-time digest comparison, including
-    # for unknown accounts, and return exactly the same public error.
-    lookup_user_id = user.id if user is not None else uuid.UUID(int=0)
+    if user is not None and user.is_active:
+        db.execute(
+            update(PasswordRecoveryCode)
+            .where(
+                PasswordRecoveryCode.user_id == user.id,
+                PasswordRecoveryCode.used_at.is_(None),
+                PasswordRecoveryCode.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        token = secrets.token_urlsafe(32)
+        expires_at = now + PASSWORD_RESET_LIFETIME
+        db.add(
+            PasswordRecoveryCode(
+                user_id=user.id,
+                code_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                expires_at=expires_at,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info("password_reset_request outcome=not_queued")
+        else:
+            background_tasks.add_task(deliver_password_reset_email, user.email, token)
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    logger.info("password_reset_request outcome=accepted")
+    return {"message": "Se o endereço estiver cadastrado, enviaremos um link."}
+
+
+@router.post("/auth/password-reset/confirm")
+async def confirm_password_reset(
+    payload: PasswordResetConfirm,
+    response: Response,
+    manager: UserManager = Depends(get_user_manager),
+    db: Session = Depends(get_db),
+):
+    candidate = hashlib.sha256(
+        payload.token.get_secret_value().strip().encode("utf-8")
+    ).hexdigest()
     stored_code = db.execute(
         select(PasswordRecoveryCode)
-        .where(
-            PasswordRecoveryCode.user_id == lookup_user_id,
-            PasswordRecoveryCode.used_at.is_(None),
-            PasswordRecoveryCode.revoked_at.is_(None),
-        )
-        .order_by(PasswordRecoveryCode.created_at.desc())
-        .limit(1)
+        .where(PasswordRecoveryCode.code_hash == candidate)
         .with_for_update()
     ).scalar_one_or_none()
-    candidate = hashlib.sha256(
-        payload.code.get_secret_value().strip().encode("utf-8")
-    ).hexdigest()
     stored_digest = stored_code.code_hash if stored_code else "0" * 64
     digest_matches = hmac.compare_digest(stored_digest, candidate)
     now = datetime.now(UTC)
+    user = db.get(Usuario, stored_code.user_id) if stored_code is not None else None
     expiry = stored_code.expires_at if stored_code else None
+    created_at = stored_code.created_at if stored_code else None
     if expiry is not None and expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=UTC)
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    lifetime_is_email_token = bool(
+        expiry is not None
+        and created_at is not None
+        # Allow small clock/precision differences between the app and DB while
+        # distinguishing these from the legacy one-year manual recovery codes.
+        and timedelta(0) < expiry - created_at <= timedelta(minutes=21)
+    )
 
     valid = bool(
         user is not None
         and user.is_active
         and stored_code is not None
         and digest_matches
+        and stored_code.used_at is None
+        and stored_code.revoked_at is None
         and expiry is not None
         and expiry > now
-        and stored_code.attempt_count < MAX_CODE_ATTEMPTS
+        and lifetime_is_email_token
+        and stored_code.attempt_count < MAX_RESET_ATTEMPTS
     )
     if not valid:
         if stored_code is not None:
             stored_code.attempt_count += 1
-            if stored_code.attempt_count >= MAX_CODE_ATTEMPTS:
+            if stored_code.attempt_count >= MAX_RESET_ATTEMPTS:
                 stored_code.revoked_at = now
         db.commit()
-        logger.info("password_recovery_reset outcome=rejected")
+        logger.info("password_reset_confirm outcome=rejected")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=INVALID_RECOVERY_DETAIL,
+            detail=INVALID_RESET_DETAIL,
         )
 
     assert user is not None and stored_code is not None
@@ -186,7 +180,9 @@ async def reset_password_with_recovery_code(
         .values(revoked_at=now)
     )
     db.commit()
-    logger.info("password_recovery_reset outcome=completed")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    logger.info("password_reset_confirm outcome=completed")
     return {"message": "Senha alterada. Entre com sua nova senha."}
 
 

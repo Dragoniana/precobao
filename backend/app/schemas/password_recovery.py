@@ -1,13 +1,12 @@
 from pydantic import BaseModel, EmailStr, Field, SecretStr, model_validator
 
 
-class PasswordRecoveryCodeIssue(BaseModel):
-    current_password: SecretStr = Field(min_length=1, max_length=256)
-
-
-class PasswordRecoveryReset(BaseModel):
+class PasswordResetRequest(BaseModel):
     email: EmailStr
-    code: SecretStr = Field(min_length=32, max_length=256)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: SecretStr = Field(min_length=32, max_length=256)
     new_password: SecretStr = Field(min_length=8, max_length=256)
     confirm_new_password: SecretStr = Field(min_length=8, max_length=256)
 

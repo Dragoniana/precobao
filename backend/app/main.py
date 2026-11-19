@@ -22,16 +22,16 @@ logger = logging.getLogger("preco_bao.security")
 
 _RATE_LIMIT_POLICIES = {
     ("POST", "/auth/jwt/login"): ("login", "RATE_LIMIT_LOGIN_PER_MINUTE", 10, 60),
-    ("POST", "/auth/password-recovery/reset"): (
-        "password_recovery",
-        "RATE_LIMIT_PASSWORD_RECOVERY_PER_HOUR",
-        5,
+    ("POST", "/auth/password-reset/request"): (
+        "password_reset_request",
+        "RATE_LIMIT_PASSWORD_RESET_REQUESTS_PER_HOUR",
+        3,
         3600,
     ),
-    ("POST", "/auth/password-recovery/codes"): (
-        "recovery_code_issue",
-        "RATE_LIMIT_RECOVERY_CODE_ISSUE_PER_HOUR",
-        3,
+    ("POST", "/auth/password-reset/confirm"): (
+        "password_reset_confirm",
+        "RATE_LIMIT_PASSWORD_RESET_CONFIRMS_PER_HOUR",
+        5,
         3600,
     ),
     ("POST", "/auth/register"): (
