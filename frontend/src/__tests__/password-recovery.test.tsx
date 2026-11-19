@@ -6,6 +6,7 @@ import ForgotPasswordScreen from '../app/forgot-password';
 import ResetPasswordScreen from '../app/reset-password';
 import { api } from '../services/api';
 import { darkPalette, lightPalette, spacing } from '../theme';
+import type { AppPalette } from '../theme';
 
 jest.mock('../components/Screen', () => ({ Screen: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 let mockResetToken: string | undefined = 'one-time-reset-token-for-this-test-123456';
@@ -20,7 +21,7 @@ jest.mock('../context/ThemeContext', () => {
   return {
     ...jest.requireActual('../context/ThemeContext'),
     useAppTheme: () => ({ palette: selectedPalette === 'dark' ? theme.darkPalette : theme.lightPalette }),
-    createThemedStyles: (factory: (palette: typeof theme.lightPalette) => object) => () =>
+    createThemedStyles: (factory: (palette: AppPalette) => any) => () =>
       NativeStyleSheet.create(factory(selectedPalette === 'dark' ? theme.darkPalette : theme.lightPalette)),
     setTestPalette: (value: string) => { selectedPalette = value; },
   };

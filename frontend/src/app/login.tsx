@@ -132,7 +132,7 @@ function getReadableMessage(value: unknown, fallback: string) {
 export default function LoginScreen() {
   const styles = useStyles();
   const { palette } = useAppTheme();
-  const { continueAsGuest, signIn, sessionRestoreError, retrySessionRestore, isLoading: isRestoringSession } = useSessionContext();
+  const { continueAsGuest, signIn, sessionRestoreError, retrySessionRestore, isAuthenticated, hasGuestSession, isLoading: isRestoringSession } = useSessionContext();
   const { width } = useWindowDimensions();
   const isWeb = Platform.OS === 'web';
   const isWide = isWeb && width >= 900;
@@ -162,6 +162,12 @@ export default function LoginScreen() {
     });
     return () => { show.remove(); hide.remove(); };
   }, []);
+
+  useEffect(() => {
+    if (!isRestoringSession && (isAuthenticated || hasGuestSession)) {
+      router.replace('/(app)/home' as never);
+    }
+  }, [hasGuestSession, isAuthenticated, isRestoringSession]);
 
   const keepInputVisible = (getInput: () => TextInput | null) => {
     if (Platform.OS === 'web') return;
@@ -197,10 +203,10 @@ export default function LoginScreen() {
     }
   };
 
-  const onGuestPress = () => {
+  const onGuestPress = async () => {
     const { email, password } = getValues();
     if (!email.trim() && !password.trim()) {
-      continueAsGuest();
+      await continueAsGuest();
       router.replace('/(app)/home' as never);
     } else {
       setFeedback({ type: 'error', text: 'Para entrar como convidado, deixe os campos vazios.' });

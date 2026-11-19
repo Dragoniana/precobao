@@ -6,4 +6,5 @@ jest.mock('../services/api', () => ({
   setActiveToken: jest.fn(),
   setUnauthorizedCallback: jest.fn(),
   tokenStorage: { get: jest.fn(), set: jest.fn(), delete: jest.fn() },
+  guestSessionStorage: { get: jest.fn(), set: jest.fn(), delete: jest.fn() },
 }));
