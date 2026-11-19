@@ -13,7 +13,17 @@ for command_name in gpg pg_restore python3 sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "Required tool is missing: $command_name" >&2; exit 2; }
 done
 (cd "$(dirname "$base")" && sha256sum --check "$(basename "$base.sha256")")
-gpg --batch --decrypt "$base.dump.gpg" | pg_restore --list - >/dev/null
+[[ -d /dev/shm && -w /dev/shm ]] || {
+  echo "A writable tmpfs at /dev/shm is required for safe archive verification." >&2
+  exit 2
+}
+verify_dir="$(mktemp -d /dev/shm/preco-bao-backup-verify.XXXXXX)"
+chmod 700 "$verify_dir"
+trap 'rm -rf -- "$verify_dir"' EXIT
+gpg --batch --decrypt "$base.dump.gpg" > "$verify_dir/database.dump"
+chmod 600 "$verify_dir/database.dump"
+pg_restore --list "$verify_dir/database.dump" >/dev/null
+echo "Database archive valid."
 gpg --batch --decrypt "$base.images.json.gpg" | python3 -c '
 import json,sys
 data=json.load(sys.stdin)
