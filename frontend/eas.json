@@ -4,6 +4,9 @@
   },
   "build": {
     "preview": {
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://precobao.app/backend"
+      },
       "android": {
         "buildType": "apk"
       },
