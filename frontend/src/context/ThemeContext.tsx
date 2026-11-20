@@ -62,10 +62,11 @@ function initialWebPreference(): ThemePreference {
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const nativeSystemScheme = useColorScheme();
   // Keep the server render and the browser's first render identical. Read the
-  // user's browser-only theme settings in effects after hydration.
+  // user's browser-only theme settings in effects after hydration. On web,
+  // don't show the app until those settings have been applied.
   const [webSystemScheme, setWebSystemScheme] = useState<ResolvedTheme>('light');
   const [preference, setPreferenceState] = useState<ThemePreference>('system');
-  const [isReady, setIsReady] = useState(Platform.OS === 'web');
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -78,22 +79,23 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const query = window.matchMedia('(prefers-color-scheme: dark)');
-    const update = (event?: MediaQueryListEvent) => {
-      setWebSystemScheme((event?.matches ?? query.matches) ? 'dark' : 'light');
-    };
-    update();
-    if (query.addEventListener) query.addEventListener('change', update);
-    else query.addListener(update);
-    return () => {
-      if (query.removeEventListener) query.removeEventListener('change', update);
-      else query.removeListener(update);
-    };
-  }, []);
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
 
-  useEffect(() => {
-    if (Platform.OS === 'web') setPreferenceState(initialWebPreference());
+    const nextPreference = initialWebPreference();
+    const query = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)')
+      : null;
+    const nextSystemScheme = query?.matches ? 'dark' : 'light';
+
+    setPreferenceState(nextPreference);
+    setWebSystemScheme(nextSystemScheme);
+    setIsReady(true);
+
+    const update = (event: MediaQueryListEvent) => {
+      setWebSystemScheme(event.matches ? 'dark' : 'light');
+    };
+    query?.addEventListener?.('change', update);
+    return () => query?.removeEventListener?.('change', update);
   }, []);
 
   const setPreference = useCallback((next: ThemePreference) => {
@@ -121,6 +123,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.style.colorScheme = resolvedTheme;
     document.documentElement.style.backgroundColor = palette.background;
     document.body.style.backgroundColor = palette.background;
+    document.documentElement.dataset.precoTheme = resolvedTheme;
+    document.documentElement.dataset.precoThemeReady = 'true';
   }, [palette.background, resolvedTheme]);
 
   const value = useMemo<ThemeContextValue>(() => ({

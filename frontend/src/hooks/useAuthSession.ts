@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { api, setActiveToken, setUnauthorizedCallback, tokenStorage } from '../services/api';
+import { api, guestSessionStorage, setActiveToken, setUnauthorizedCallback, tokenStorage } from '../services/api';
 
 export type User = {
   id: string;
@@ -30,6 +30,7 @@ export function useAuthSession() {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [sessionMode, setSessionMode] = useState<SessionMode>('guest');
+  const [hasGuestSession, setHasGuestSession] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
@@ -37,7 +38,7 @@ export function useAuthSession() {
   const epoch = useRef(0);
   const restoreRequestId = useRef(0);
 
-  const clearSession = useCallback(async () => {
+  const clearSession = useCallback(async (preserveGuestSession = false) => {
     epoch.current += 1;
     restoreRequestId.current += 1;
     setIsLoading(false);
@@ -47,11 +48,13 @@ export function useAuthSession() {
     setToken(null);
     setUser(null);
     setSessionMode('guest');
+    setHasGuestSession(preserveGuestSession);
     setCurrentUserName(null);
     setCurrentUserEmail(null);
     setSessionRestoreError(null);
     try {
       await tokenStorage.delete();
+      if (!preserveGuestSession) await guestSessionStorage.delete();
     } catch {
       // The in-memory session is already cleared; keep logout deterministic.
     }
@@ -71,7 +74,15 @@ export function useAuthSession() {
     setSessionRestoreError(null);
     try {
       storedToken = await tokenStorage.get();
-      if (!storedToken || restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
+      if (restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
+      if (!storedToken) {
+        if (await guestSessionStorage.get()) {
+          if (restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
+          setSessionMode('guest');
+          setHasGuestSession(true);
+        }
+        return false;
+      }
       setActiveToken(storedToken);
       const { data } = await api.get<User>('/users/me');
       if (restoreId !== restoreRequestId.current || requestEpoch !== epoch.current) return false;
@@ -81,6 +92,8 @@ export function useAuthSession() {
       setToken(storedToken);
       setIsAuthenticated(true);
       setSessionMode('authenticated');
+      setHasGuestSession(false);
+      void guestSessionStorage.delete().catch(() => undefined);
       setCurrentUserName(data.nome || data.name || data.email);
       setCurrentUserEmail(data.email);
       setSessionRestoreError(null);
@@ -112,7 +125,15 @@ export function useAuthSession() {
     return () => { restoreRequestId.current += 1; };
   }, [retrySessionRestore]);
 
-  const continueAsGuest = useCallback(() => { void clearSession(); }, [clearSession]);
+  const continueAsGuest = useCallback(async () => {
+    try {
+      await guestSessionStorage.set();
+      await clearSession(true);
+    } catch {
+      setHasGuestSession(true);
+      setSessionMode('guest');
+    }
+  }, [clearSession]);
 
   const signIn = useCallback(async (email: string, password: string): Promise<LoginResult> => {
     const startingEpoch = epoch.current;
@@ -138,6 +159,8 @@ export function useAuthSession() {
       setToken(accessToken);
       setIsAuthenticated(true);
       setSessionMode('authenticated');
+      setHasGuestSession(false);
+      void guestSessionStorage.delete().catch(() => undefined);
       setCurrentUserName(verifiedUser.nome || verifiedUser.name || verifiedUser.email);
       setCurrentUserEmail(verifiedUser.email);
       setSessionRestoreError(null);
@@ -201,7 +224,7 @@ export function useAuthSession() {
   }, [isAuthenticated]);
 
   return {
-    isLoading, isAuthenticated, token, user, sessionMode, sessionVersion, sessionRestoreError,
+    isLoading, isAuthenticated, token, user, sessionMode, hasGuestSession, sessionVersion, sessionRestoreError,
     currentUserName, currentUserEmail, clearSession, logout, continueAsGuest,
     retrySessionRestore, signIn, registerUser, updateProfile,
   };

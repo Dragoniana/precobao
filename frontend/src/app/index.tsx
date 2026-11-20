@@ -2,15 +2,18 @@ import { useRouter } from 'expo-router';
 import { useEffect } from 'react';
 import { ActivityIndicator, Text, View } from 'react-native';
 
+import { useSessionContext } from '../context/AppContext';
 import { useAppTheme } from '../context/ThemeContext';
 
 export default function Index() {
   const router = useRouter();
-  const { palette } = useAppTheme();
+  const { palette, isReady: isThemeReady } = useAppTheme();
+  const { hasGuestSession, isAuthenticated, isLoading: isRestoringSession } = useSessionContext();
 
   useEffect(() => {
-    router.replace('/login');
-  }, [router]);
+    if (!isThemeReady || isRestoringSession) return;
+    router.replace((isAuthenticated || hasGuestSession ? '/(app)/home' : '/login') as never);
+  }, [hasGuestSession, isAuthenticated, isRestoringSession, isThemeReady, router]);
 
   return (
     <View

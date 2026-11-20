@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { router } from 'expo-router';
+import { router, usePathname } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import {
@@ -132,7 +132,8 @@ function getReadableMessage(value: unknown, fallback: string) {
 export default function LoginScreen() {
   const styles = useStyles();
   const { palette } = useAppTheme();
-  const { continueAsGuest, signIn, sessionRestoreError, retrySessionRestore, isLoading: isRestoringSession } = useSessionContext();
+  const { continueAsGuest, signIn, sessionRestoreError, retrySessionRestore, isAuthenticated, hasGuestSession, isLoading: isRestoringSession } = useSessionContext();
+  const pathname = usePathname();
   const { width } = useWindowDimensions();
   const isWeb = Platform.OS === 'web';
   const isWide = isWeb && width >= 900;
@@ -162,6 +163,14 @@ export default function LoginScreen() {
     });
     return () => { show.remove(); hide.remove(); };
   }, []);
+
+  useEffect(() => {
+    // Keep the explicit login route available even when a guest session is
+    // persisted. The root route still restores returning guests to the app.
+    if (pathname !== '/login' && !isRestoringSession && (isAuthenticated || hasGuestSession)) {
+      router.replace('/(app)/home' as never);
+    }
+  }, [hasGuestSession, isAuthenticated, isRestoringSession, pathname]);
 
   const keepInputVisible = (getInput: () => TextInput | null) => {
     if (Platform.OS === 'web') return;
@@ -197,10 +206,10 @@ export default function LoginScreen() {
     }
   };
 
-  const onGuestPress = () => {
+  const onGuestPress = async () => {
     const { email, password } = getValues();
     if (!email.trim() && !password.trim()) {
-      continueAsGuest();
+      await continueAsGuest();
       router.replace('/(app)/home' as never);
     } else {
       setFeedback({ type: 'error', text: 'Para entrar como convidado, deixe os campos vazios.' });
@@ -275,6 +284,9 @@ export default function LoginScreen() {
             <View style={styles.actions}>
               <Pressable style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed, isSubmitting && styles.disabled]} onPress={handleSubmit(handleLogin)} disabled={isSubmitting} accessibilityRole="button">
                 <Text style={styles.primaryButtonText}>{isSubmitting ? 'Entrando...' : 'Entrar'}</Text>
+              </Pressable>
+              <Pressable style={styles.guestButton} onPress={() => router.push('/forgot-password' as never)} accessibilityRole="button">
+                <Text style={styles.secondaryButtonText}>Esqueci minha senha?</Text>
               </Pressable>
               <Pressable style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]} onPress={() => router.push('/signup' as never)} accessibilityRole="button">
                 <Text style={styles.secondaryButtonText}>Criar conta</Text>
