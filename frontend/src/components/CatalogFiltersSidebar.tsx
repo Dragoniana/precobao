@@ -14,7 +14,13 @@ import {
 import { FilterChip } from './FilterChip';
 import { FilterOption, useCatalogContext } from '../context/AppContext';
 import { api } from '../services/api';
-import { formatLaboratoryLabel, normalizeText } from '../services/catalog';
+import {
+  formatLaboratoryLabel,
+  isSaleTypeFilter,
+  normalizeText,
+  SALE_TYPE_HELP_TEXT,
+  toggleFilterSelection,
+} from '../services/catalog';
 import { radius, spacing } from '../theme';
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
@@ -69,7 +75,7 @@ export function CatalogFiltersSidebar() {
     const visible = filterOptions.filter((option) => !needle || normalizeText(option.label).includes(needle));
     return {
       categoria: visible.filter((option) => option.type === 'categoria' && ['similar', 'generico'].includes(normalizeText(option.value))),
-      tipo_venda: visible.filter((option) => option.type === 'receita' || option.type === 'controle_especial'),
+      tipo_venda: visible.filter(isSaleTypeFilter),
     } satisfies Record<Section, FilterOption[]>;
   }, [filterOptions, search]);
 
@@ -85,9 +91,7 @@ export function CatalogFiltersSidebar() {
   const hasChanges = appliedIds !== draftIds || selectedPharmacyId !== draftPharmacyId;
   const selectionCount = draftFilters.length + Number(draftPharmacyId !== null);
 
-  const toggleFilter = (option: FilterOption) => setDraftFilters((current) => current.some((item) => item.id === option.id)
-    ? current.filter((item) => item.id !== option.id)
-    : [...current, option]);
+  const toggleFilter = (option: FilterOption) => setDraftFilters((current) => toggleFilterSelection(current, option));
   const toggleSection = (section: Section) => setExpanded((current) => current.includes(section)
     ? current.filter((item) => item !== section)
     : [...current, section]);
@@ -147,7 +151,7 @@ export function CatalogFiltersSidebar() {
           const options = groupedOptions[section];
           if (!options.length) return null;
           const selected = section === 'tipo_venda'
-            ? draftFilters.filter((option) => option.type === 'receita' || option.type === 'controle_especial')
+            ? draftFilters.filter(isSaleTypeFilter)
             : draftFilters.filter((option) => option.type === 'categoria');
           const isExpanded = expanded.includes(section) || Boolean(search.trim());
           return (
@@ -159,6 +163,7 @@ export function CatalogFiltersSidebar() {
               </Pressable>
               {isExpanded && <View style={styles.options}>
                 {options.map((option) => <FilterChip key={option.id} label={option.label} active={draftFilters.some((item) => item.id === option.id)} compact onPress={() => toggleFilter(option)} />)}
+                {section === 'tipo_venda' && <Text style={styles.saleTypeNote}>{SALE_TYPE_HELP_TEXT}</Text>}
               </View>}
             </View>
           );
@@ -277,6 +282,7 @@ const useStyles = createThemedStyles((palette) => ({
   sectionTitle: { color: palette.text, fontSize: 13, fontWeight: '700' },
   sectionSummary: { marginTop: 2, color: palette.textSoft, fontSize: 11 },
   options: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, paddingBottom: spacing.xs },
+  saleTypeNote: { width: '100%', color: palette.textSoft, fontSize: 11, lineHeight: 15, paddingTop: spacing.xs },
   selectButton: { minHeight: 34, paddingHorizontal: spacing.sm, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, borderWidth: 1, borderColor: palette.border },
   selectText: { color: palette.primaryDark, fontSize: 11, fontWeight: '700' },
   pharmacyLoading: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },

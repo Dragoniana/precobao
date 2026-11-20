@@ -17,7 +17,13 @@ import { FilterChip } from '../../components/FilterChip';
 import { Screen } from '../../components/Screen';
 import { FilterOption, useCatalogContext } from '../../context/AppContext';
 import { api } from '../../services/api';
-import { formatLaboratoryLabel, normalizeText } from '../../services/catalog';
+import {
+  formatLaboratoryLabel,
+  isSaleTypeFilter,
+  normalizeText,
+  SALE_TYPE_HELP_TEXT,
+  toggleFilterSelection,
+} from '../../services/catalog';
 import { radius, spacing } from '../../theme';
 import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
@@ -86,7 +92,7 @@ export default function FiltersScreen() {
         if (['similar', 'generico'].includes(normalizeText(option.value))) groups.categoria.push(option);
         return;
       }
-      if (option.type === 'receita' || option.type === 'controle_especial') groups.tipo_venda.push(option);
+      if (isSaleTypeFilter(option)) groups.tipo_venda.push(option);
     });
     return groups;
   }, [filteredOptions]);
@@ -103,9 +109,7 @@ export default function FiltersScreen() {
   ));
 
   const isSelected = (option: FilterOption) => temporaryFilters.some((item) => item.id === option.id);
-  const toggleFilter = (option: FilterOption) => setTemporaryFilters((current) => current.some((item) => item.id === option.id)
-    ? current.filter((item) => item.id !== option.id)
-    : [...current, option]);
+  const toggleFilter = (option: FilterOption) => setTemporaryFilters((current) => toggleFilterSelection(current, option));
   const toggleSection = (section: SectionKind) => setExpanded((current) => current.includes(section)
     ? current.filter((item) => item !== section) : [...current, section]);
   const handleApply = () => {
@@ -177,7 +181,7 @@ export default function FiltersScreen() {
             const options = groupedOptions[section];
             if (!options.length) return null;
             const selected = section === 'tipo_venda'
-              ? temporaryFilters.filter((item) => item.type === 'receita' || item.type === 'controle_especial')
+              ? temporaryFilters.filter(isSaleTypeFilter)
               : temporaryFilters.filter((item) => item.type === section);
             const open = expanded.includes(section) || Boolean(search.trim());
             return (
@@ -193,6 +197,7 @@ export default function FiltersScreen() {
                 </Pressable>
                 {open && <View style={styles.options}>
                   {options.map((option) => <FilterChip key={option.id} label={option.label} active={isSelected(option)} onPress={() => toggleFilter(option)} compact />)}
+                  {section === 'tipo_venda' && <Text style={styles.saleTypeNote}>{SALE_TYPE_HELP_TEXT}</Text>}
                 </View>}
               </View>
             );
@@ -310,6 +315,7 @@ const useStyles = createThemedStyles((palette) => ({
   sectionSummary: { marginTop: 3, color: palette.textSoft, fontSize: 12, lineHeight: 17 },
   countBadge: { color: palette.primaryDark, backgroundColor: palette.surfaceBlue, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 4, fontSize: 11, fontWeight: '700', overflow: 'hidden' },
   options: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, paddingBottom: spacing.md, paddingLeft: 44 },
+  saleTypeNote: { width: '100%', color: palette.textSoft, fontSize: 11, lineHeight: 16, paddingTop: spacing.xs },
   selectButton: { minHeight: 40, justifyContent: 'center', paddingHorizontal: spacing.md, borderWidth: 1, borderColor: palette.primary, borderRadius: radius.sm, backgroundColor: palette.surface },
   selectButtonText: { color: palette.primaryDark, fontSize: 13, fontWeight: '700' },
   loadingPharmacies: { minHeight: 60, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },

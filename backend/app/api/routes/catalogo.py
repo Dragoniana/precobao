@@ -36,6 +36,40 @@ def _available_min_prices(farmacia_id: int | None = None):
     return query.group_by(OfertaFarmacia.catalogo_id).subquery("preco_por_medicamento")
 
 
+def _sale_type_condition(mode: str) -> ColumnElement[bool]:
+    """Return the shared SQL predicate for one Tipo de venda filter."""
+    if mode == "venda_livre":
+        # This label means only that the medicine is not specially controlled.
+        return CatalogoBase.controle_especial.is_(False)
+    if mode == "com_receita":
+        # Unknown special-control classification is included provisionally;
+        # the stored NULL remains unchanged and is not a confirmed prescription rule.
+        return or_(
+            CatalogoBase.exige_receita_confirmada.is_(True),
+            CatalogoBase.controle_especial.is_(None),
+        )
+    if mode == "controle_especial":
+        return CatalogoBase.controle_especial.is_(True)
+    raise ValueError(f"Tipo de venda inválido: {mode}")
+
+
+def _sale_type_mode(kind: str, value: str) -> str | None:
+    """Accept the current contract and legacy filter names during rollout."""
+    if kind == "tipo_venda" and value in {
+        "venda_livre",
+        "com_receita",
+        "controle_especial",
+    }:
+        return value
+    if kind == "receita" and value in {"com_receita", "exige_receita"}:
+        return "com_receita"
+    if kind == "receita" and value == "venda_livre":
+        return "venda_livre"
+    if kind == "controle_especial" and value in {"sim", "true"}:
+        return "controle_especial"
+    return None
+
+
 @router.get("/farmacias", response_model=list[FarmaciaOut])
 def listar_farmacias(db: Session = Depends(get_db)):
     return (
@@ -157,12 +191,17 @@ def listar_catalogo_completo(
         )
 
     option_conditions: dict[str, list[ColumnElement[bool]]] = {}
+    sale_type_modes: set[str] = set()
     for option in filtros:
         kind, separator, value = option.partition(":")
         if not separator or not value.strip():
             raise HTTPException(status_code=422, detail=f"Filtro inválido: {option}")
         normalized = value.strip().lower()
         condition = None
+        sale_type_mode = _sale_type_mode(kind, normalized)
+        if sale_type_mode is not None:
+            sale_type_modes.add(sale_type_mode)
+            continue
         if kind == "categoria":
             condition = func.lower(CatalogoBase.categoria_regulatoria) == normalized
         elif kind == "referencia" and normalized in {"sim", "true", "referencia"}:
@@ -171,12 +210,6 @@ def listar_catalogo_completo(
             condition = func.lower(CatalogoBase.laboratorio) == normalized
         elif kind == "principio_ativo":
             condition = func.lower(CatalogoBase.principio_ativo) == normalized
-        elif kind == "receita" and normalized in {"com_receita", "exige_receita"}:
-            condition = CatalogoBase.exige_receita_confirmada.is_(True)
-        elif kind == "receita" and normalized == "venda_livre":
-            condition = CatalogoBase.exige_receita_confirmada.is_(False)
-        elif kind == "controle_especial" and normalized in {"sim", "true"}:
-            condition = CatalogoBase.controle_especial.is_(True)
         elif kind == "classificacao" and normalized in {"desconhecida", "unknown"}:
             condition = CatalogoBase.categoria_regulatoria.is_(None)
         if condition is None:
@@ -184,6 +217,13 @@ def listar_catalogo_completo(
                 status_code=422, detail=f"Filtro desconhecido: {option}"
             )
         option_conditions.setdefault(kind, []).append(condition)
+    if len(sale_type_modes) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Selecione apenas um filtro de tipo de venda por vez.",
+        )
+    if sale_type_modes:
+        stmt = stmt.where(_sale_type_condition(next(iter(sale_type_modes))))
     if option_conditions:
         stmt = stmt.where(
             *(or_(*conditions) for conditions in option_conditions.values())
@@ -270,13 +310,13 @@ def obter_opcoes_filtros(db: Session = Depends(get_db)):
             .filter(CatalogoBase.referencia_anvisa.is_(True))
             .count(),
             "com_receita": db.query(CatalogoBase)
-            .filter(CatalogoBase.exige_receita_confirmada.is_(True))
+            .filter(_sale_type_condition("com_receita"))
             .count(),
             "venda_livre": db.query(CatalogoBase)
-            .filter(CatalogoBase.exige_receita_confirmada.is_(False))
+            .filter(_sale_type_condition("venda_livre"))
             .count(),
             "controle_especial": db.query(CatalogoBase)
-            .filter(CatalogoBase.controle_especial.is_(True))
+            .filter(_sale_type_condition("controle_especial"))
             .count(),
             "desconhecida": db.query(CatalogoBase)
             .filter(CatalogoBase.categoria_regulatoria.is_(None))

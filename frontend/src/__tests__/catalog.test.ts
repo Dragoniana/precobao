@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { api } from '../services/api';
-import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages } from '../services/catalog';
+import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
 
@@ -11,6 +11,18 @@ const item = {
 };
 
 beforeEach(() => jest.clearAllMocks());
+
+it('keeps sale type exclusive while allowing category and laboratory filters together', () => {
+  const saleFree: FilterOption = { id: 'tipo_venda:venda_livre', type: 'tipo_venda', label: 'Venda livre', value: 'venda_livre' };
+  const withPrescription: FilterOption = { id: 'tipo_venda:com_receita', type: 'tipo_venda', label: 'Com receita', value: 'com_receita' };
+  const specialControl: FilterOption = { id: 'tipo_venda:controle_especial', type: 'tipo_venda', label: 'Controle especial', value: 'controle_especial' };
+  const category: FilterOption = { id: 'categoria:similar', type: 'categoria', label: 'Similar', value: 'similar' };
+  const lab: FilterOption = { id: 'laboratorio:cimed', type: 'laboratorio', label: 'Cimed', value: 'Cimed' };
+  const selected = [saleFree, category, lab];
+
+  expect(toggleFilterSelection(selected, specialControl)).toEqual([category, lab, specialControl]);
+  expect(toggleFilterSelection([withPrescription, category], withPrescription)).toEqual([category]);
+});
 
 it('renders only API-resolved registry URLs without pharmacy-specific rules', () => {
   const medicine = {
@@ -69,8 +81,8 @@ it('requests only the selected server page and serializes combined filters and s
     filters: [
       { id: 'categoria:similar', label: 'Similar', value: 'similar', type: 'categoria' },
       { id: 'laboratorio:lab-a', label: 'Lab A', value: 'Lab A', type: 'laboratorio' },
-      { id: 'receita:com_receita', label: 'Com receita', value: 'com_receita', type: 'receita' },
-      { id: 'controle_especial:sim', label: 'Controle especial', value: 'sim', type: 'controle_especial' },
+      { id: 'tipo_venda:com_receita', label: 'Com receita', value: 'com_receita', type: 'tipo_venda' },
+      { id: 'tipo_venda:controle_especial', label: 'Controle especial', value: 'controle_especial', type: 'tipo_venda' },
       staleReference,
       staleClassification,
     ],
@@ -81,9 +93,9 @@ it('requests only the selected server page and serializes combined filters and s
   expect(requestedUrl).toContain('termo_busca=paracetamol');
   expect(requestedUrl).toContain('farmacia_id=3');
   expect(requestedUrl).toContain('ordenar=menor_preco');
-  expect(requestedUrl.match(/filtros=/g)).toHaveLength(4);
-  expect(requestedUrl).toContain('filtros=receita%3Acom_receita');
-  expect(requestedUrl).toContain('filtros=controle_especial%3Asim');
+  expect(requestedUrl.match(/filtros=/g)).toHaveLength(3);
+  expect(requestedUrl).not.toContain('filtros=tipo_venda%3Acom_receita');
+  expect(requestedUrl).toContain('filtros=tipo_venda%3Acontrole_especial');
   expect(requestedUrl).not.toContain('referencia%3A');
   expect(requestedUrl).not.toContain('classificacao%3A');
   expect(page.total).toBe(37);
@@ -110,7 +122,7 @@ it('does not expose or serialize legacy active-ingredient filters while preservi
   expect(page.items[0].principio_ativo).toBe('Paracetamol');
 });
 
-it('exposes only confirmed sale filters and omits unavailable or retired classifications', async () => {
+it('exposes all sale type filters even when counts are zero and omits retired classifications', async () => {
   (api.get as jest.Mock).mockResolvedValue({ data: {
     categorias: ['Similar', 'Genérico', 'Biológico'],
     laboratorios: [],
@@ -119,11 +131,12 @@ it('exposes only confirmed sale filters and omits unavailable or retired classif
 
   const options = await fetchFilterOptions();
 
-  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Com receita', 'Controle especial']));
+  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Venda livre', 'Com receita', 'Controle especial']));
   expect(options.map(({ label }) => label)).not.toEqual(expect.arrayContaining([
-    'Venda livre', 'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
+    'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
   ]));
-  expect(options.filter(({ type }) => type === 'receita' || type === 'controle_especial')).toHaveLength(2);
+  expect(options.filter(({ type }) => type === 'tipo_venda')).toHaveLength(3);
+  expect(options.find(({ value }) => value === 'venda_livre')?.count).toBe(0);
 });
 
 it('keeps a bounded item cache and requests detail by identifier on demand', async () => {
