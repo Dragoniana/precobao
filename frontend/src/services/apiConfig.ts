@@ -4,6 +4,10 @@ type PlatformName = Platform['OS'];
 
 const ANDROID_EMULATOR_HOST = '10.0.2.2';
 
+export function getConfiguredApiUrl(environmentUrl?: string, manifestUrl?: string) {
+  return environmentUrl?.trim() || manifestUrl?.trim() || undefined;
+}
+
 function isLoopback(hostname: string) {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   return host === 'localhost' || host === '::1' || host.startsWith('127.');

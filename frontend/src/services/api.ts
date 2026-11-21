@@ -3,10 +3,13 @@ import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-import { resolveApiUrl } from './apiConfig';
+import { getConfiguredApiUrl, resolveApiUrl } from './apiConfig';
 
 export const API_URL = resolveApiUrl(
-  process.env.EXPO_PUBLIC_API_URL,
+  getConfiguredApiUrl(
+    process.env.EXPO_PUBLIC_API_URL,
+    Constants.expoConfig?.extra?.apiUrl,
+  ),
   Platform.OS,
   __DEV__,
   Constants.expoConfig?.hostUri,
