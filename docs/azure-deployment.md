@@ -18,7 +18,7 @@ Azure PostgreSQL private network DNS and TLS requirements are described in Micro
 
 ## 2. Configure the VM
 
-Install Docker Engine with the Compose plugin, PostgreSQL client tools (`pg_dump`, `pg_restore`, `psql`), Python 3, GnuPG, and `sha256sum`. Provision DNS/networking first. Clone this repository on the VM and:
+Install Docker Engine with the Compose plugin, Python 3, GnuPG, and `sha256sum`. Backup/restore scripts run PostgreSQL client tools from the versioned Docker image configured by `POSTGRES_CLIENT_IMAGE` (default `postgres:15.19-alpine`), so `pg_dump`/`pg_restore` match the PostgreSQL 15 server without host-client drift. Provision DNS/networking first. Clone this repository on the VM and:
 
 ```sh
 cd deploy/azure
@@ -85,16 +85,16 @@ The GitHub Actions workflow `.github/workflows/azure-static-web-apps.yml` is `wo
 
 Azure Flexible Server provides managed automated backups and point-in-time restore into a new server; follow the [Azure backup and restore guidance](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore), choose retention appropriate to the service tier, and test recovery in a separate server. This is the first recovery layer.
 
-The optional VM-side archive scripts add an encrypted logical backup of PostgreSQL and the separate image-reference JSON volume. Keep a GPG public-key recipient on the VM and the decryption private key off the VM in a separately controlled location. Configure its full fingerprint and an off-VM backup destination in `.env.azure`; restrict the destination and retain an independent copy. Example:
+The optional VM-side archive scripts add an encrypted logical backup of PostgreSQL and the separate image-reference JSON volume. Keep a GPG public-key recipient on the VM and the decryption private key in a separately controlled location. Configure its full fingerprint and the backup destination in `.env.azure`; restrict the destination and retain an independent copy when available. Set `POSTGRES_CLIENT_IMAGE=postgres:15.19-alpine` for PostgreSQL 15. The scripts verify that the client and server major versions match; `pg_restore` 15 avoids PostgreSQL 17-only `SET transaction_timeout` output when restoring to PostgreSQL 15. Temporary libpq settings and the password file are root-only and removed at exit. Example:
 
 ```sh
 ./backup.sh
 ./verify-backup.sh /var/backups/preco-bao/preco-bao-YYYYMMDDTHHMMSSZ
 ```
 
-`backup.sh` uses TLS hostname verification, encrypts the database dump and image registry, writes checksums and a manifest, and does not export secrets to command arguments or logs. Install and test these tools and restore procedures before relying on them operationally.
+`backup.sh` uses TLS hostname verification, encrypts the database dump and image registry, writes checksums and a manifest, and runs the archive verifier before reporting success. It does not print credentials. `verify-backup.sh` checks the hashes, GPG decryption, PostgreSQL archive readability using the configured versioned client, image registry schema, and manifest names. A structural verification is not a substitute for a restore drill.
 
-Restore only into a newly created, empty, separate managed database, after reviewing the archive and verifying the backup. Set `RESTORE_DATABASE_URL` to that separate server/database and explicitly set `RESTORE_CONFIRMATION=RESTORE_TO_A_NEW_EMPTY_DATABASE` for `restore-to-new-database.sh`. The script rejects the application database as a target and checks that the target has no user tables before restoring. Restore the image registry separately while the API is stopped, with `CONFIRM_IMAGE_REGISTRY_RESTORE=REPLACE_IMAGE_REGISTRY_WHILE_API_STOPPED`. Never use these scripts against the primary database as a routine test. Follow restore with application-level verification before switching traffic.
+Restore only into a newly created, empty, separate managed database, after reviewing the archive and verifying the backup. Set `RESTORE_DATABASE_URL` to that separate server/database and explicitly set `RESTORE_CONFIRMATION=RESTORE_TO_A_NEW_EMPTY_DATABASE` for `restore-to-new-database.sh`. The script rejects the production database server as a target, checks for existing user relations and routines, verifies TLS hostname and CA, checks the client/server major versions, and restores in a single transaction. With PostgreSQL 15 tools, the restore does not issue the PostgreSQL 17-only `transaction_timeout` setting. Restore the image registry separately only while its API is stopped, with `CONFIRM_IMAGE_REGISTRY_RESTORE=REPLACE_IMAGE_REGISTRY_WHILE_API_STOPPED`. Never use these scripts against the primary database as a routine test. Follow restore with application-level verification before switching traffic.
 
 ## 6. Operational boundaries and pending work
 

@@ -70,3 +70,5 @@ jobs:
           persist-credentials: false
       - name: Validate Compose and complete preflight with non-production fixtures
         run: bash deploy/azure/test-preflight.sh
+      - name: Validate PostgreSQL backup client configuration
+        run: python deploy/azure/test_backup_tools.py
