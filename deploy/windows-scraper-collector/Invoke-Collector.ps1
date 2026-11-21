@@ -22,7 +22,12 @@ $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
 try { $env:SCRAPER_INGEST_HMAC_SECRET = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
 finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 
-$lockPath = Join-Path $StateRoot 'collector.running.lock'
+$stateDir = [IO.Path]::GetFullPath([string]$settings.state_dir)
+$lockDirectory = Join-Path $stateDir 'locks'
+New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stateDir 'sources\araujo') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stateDir 'sources\pacheco') | Out-Null
+$lockPath = Join-Path $lockDirectory 'collector.running.lock'
 try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
 catch {
     Add-Content $settings.log_file "$(Get-Date -Format o) SKIPPED already_running"
@@ -34,7 +39,7 @@ try {
     $env:SCRAPER_INGEST_URL = $settings.api_url
     $env:SCRAPER_COLLECTOR_ENABLED = 'true'
     $env:SCRAPER_COLLECTION_ENV_AUTHORIZED = [string]$settings.collection_environment_authorized
-    $env:SCRAPER_COLLECTOR_STATE_DIR = $settings.state_dir
+    $env:SCRAPER_COLLECTOR_STATE_DIR = $stateDir
     $env:SCRAPER_COLLECTOR_STOP_FILE = $settings.stop_file
     $env:SCRAPER_COLLECTOR_SCHEDULE_TIMES = ($settings.schedule_times -join ',')
     $env:SCRAPER_COLLECTOR_TIMEZONE = $settings.timezone
@@ -42,6 +47,11 @@ try {
         $entry = $settings.sources.$name
         $prefix = $name.ToUpperInvariant()
         [Environment]::SetEnvironmentVariable("${prefix}_SOURCE_MODE", $entry.mode, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            "${prefix}_STATE_DIR",
+            (Join-Path (Join-Path $stateDir 'sources') $name),
+            'Process'
+        )
         if ($name -eq 'araujo') {
             $env:ARAUJO_PUBLIC_CATALOG_AUTHORIZED = 'true'
             $env:ARAUJO_ACCESS_CONFIRMED = [string]$entry.access_confirmed
@@ -91,5 +101,8 @@ try {
     }
 } finally {
     $env:SCRAPER_INGEST_HMAC_SECRET = $null
+    $env:ARAUJO_STATE_DIR = $null
+    $env:PACHECO_STATE_DIR = $null
+    $env:SCRAPER_COLLECTOR_STATE_DIR = $null
     $lock.Dispose()
 }
