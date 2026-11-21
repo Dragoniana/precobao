@@ -67,6 +67,7 @@ def image_client(monkeypatch):
 
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", SECRET)
+    monkeypatch.delenv("SCRAPER_INGEST_HMAC_SECRET_FILE", raising=False)
     monkeypatch.setenv("SCRAPER_INGEST_ALLOWED_SOURCES", "araujo,pacheco")
     monkeypatch.setenv("SCRAPER_IMAGE_MAX_BYTES", str(512 * 1024))
     monkeypatch.setenv("SCRAPER_IMAGE_MAX_DIMENSION", "1200")
@@ -150,10 +151,12 @@ def _request_body(
     )
 
 
-def _headers(body: bytes, *, valid: bool = True) -> dict[str, str]:
+def _headers(
+    body: bytes, *, valid: bool = True, secret: str = SECRET
+) -> dict[str, str]:
     timestamp = str(int(time.time()))
     signature = hmac.new(
-        SECRET.encode(), timestamp.encode() + b"." + body, hashlib.sha256
+        secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256
     ).hexdigest()
     if not valid:
         signature = "0" * 64
@@ -304,6 +307,23 @@ def test_hmac_binary_upload_persists_bytea_deduplicates_and_serves_with_etag(
         restored_bytes = bytes.fromhex(restored.stdout.strip())
         assert restored_bytes == stored_content
         assert hashlib.sha256(restored_bytes).hexdigest() == stored_sha256
+
+
+def test_image_endpoint_uses_the_shared_secret_file(
+    image_client, monkeypatch, tmp_path
+):
+    client, _sessions, _catalog_id = image_client
+    file_secret = "image-route-file-secret-with-at-least-32-bytes"
+    secret_file = tmp_path / "scraper-hmac"
+    secret_file.write_text(file_secret, encoding="utf-8")
+    monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET_FILE", str(secret_file))
+    body = _request_body(_image_bytes())
+
+    response = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body, secret=file_secret)
+    )
+
+    assert response.status_code == 200
 
 
 def test_same_bytes_with_new_upload_id_reuse_one_blob(image_client):

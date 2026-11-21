@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 
 import pytest
@@ -49,6 +50,7 @@ def ingest_client(monkeypatch):
         ],
     )
     monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", SECRET)
+    monkeypatch.delenv("SCRAPER_INGEST_HMAC_SECRET_FILE", raising=False)
     monkeypatch.setenv("SCRAPER_INGEST_ALLOWED_SOURCES", "araujo,pacheco")
     monkeypatch.setenv("SCRAPER_INGEST_RATE_LIMIT_PER_HOUR", "100")
     ServicoEnriquecimentoFarmacologico._cache_ean.clear()
@@ -87,10 +89,15 @@ def _body(*, batch_id: str = "b2e4c2b2-23bd-4137-99d4-d0130a3a82b9", price=12.5)
     ).encode()
 
 
-def _headers(body: bytes, *, timestamp: int | None = None) -> dict[str, str]:
+def _headers(
+    body: bytes,
+    *,
+    timestamp: int | None = None,
+    secret: str = SECRET,
+) -> dict[str, str]:
     issued_at = str(int(time.time()) if timestamp is None else timestamp)
     digest = hmac.new(
-        SECRET.encode(), issued_at.encode() + b"." + body, hashlib.sha256
+        secret.encode(), issued_at.encode() + b"." + body, hashlib.sha256
     ).hexdigest()
     return {
         "Content-Type": "application/json",
@@ -169,6 +176,33 @@ def test_ingest_rejects_bad_signature_stale_timestamp_and_non_https(ingest_clien
         http_client.post(ENDPOINT, content=body, headers=_headers(body)).status_code
         == 400
     )
+
+
+def test_ingest_uses_secret_file_and_fails_closed_without_leaking(
+    ingest_client, monkeypatch, tmp_path, caplog
+):
+    client, sessions = ingest_client
+    file_secret = "file-secret-that-is-not-the-environment-value-32-bytes"
+    secret_file = tmp_path / "scraper-hmac"
+    secret_file.write_text(file_secret, encoding="utf-8")
+    monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET_FILE", str(secret_file))
+    body = _body()
+
+    accepted = client.post(
+        ENDPOINT, content=body, headers=_headers(body, secret=file_secret)
+    )
+    assert accepted.status_code == 200
+
+    secret_file.unlink()
+    secret_file.mkdir()
+    caplog.set_level(logging.DEBUG)
+    rejected = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert rejected.status_code == 503
+    assert rejected.json() == {"detail": "scraper_ingest_not_configured"}
+    assert file_secret not in caplog.text
+    with sessions() as db:
+        assert db.query(scraper_ingest.ScraperImportBatch).count() == 1
 
 
 @pytest.mark.parametrize(

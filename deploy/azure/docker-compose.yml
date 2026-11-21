@@ -22,6 +22,7 @@ services:
       RATE_LIMIT_REGISTER_PER_HOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-5}
       RATE_LIMIT_CATALOG_PER_MINUTE: ${RATE_LIMIT_CATALOG_PER_MINUTE:-120}
       SCRAPER_INGEST_HMAC_SECRET: ${SCRAPER_INGEST_HMAC_SECRET:-}
+      SCRAPER_INGEST_HMAC_SECRET_FILE: ${SCRAPER_INGEST_HMAC_SECRET_FILE:-}
       SCRAPER_INGEST_ALLOWED_SOURCES: ${SCRAPER_INGEST_ALLOWED_SOURCES:-}
       SCRAPER_INGEST_MAX_BODY_BYTES: ${SCRAPER_INGEST_MAX_BODY_BYTES:-1000000}
       SCRAPER_INGEST_RATE_LIMIT_PER_HOUR: ${SCRAPER_INGEST_RATE_LIMIT_PER_HOUR:-120}
@@ -32,6 +33,14 @@ services:
     volumes:
       - image_references:/app/data/image_references
       - ${AZURE_PG_ROOT_CERT_PATH:?Set AZURE_PG_ROOT_CERT_PATH to the VM CA bundle}:/run/secrets/azure-postgres-root-ca.pem:ro
+      - type: bind
+        source: ${SCRAPER_INGEST_HMAC_SECRET_HOST_FILE:-/dev/null}
+        target: /run/secrets/scraper_ingest_hmac
+        read_only: true
+        bind:
+          create_host_path: false
+    group_add:
+      - "20000"
     expose:
       - "8000"
     healthcheck:

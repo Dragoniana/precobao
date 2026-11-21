@@ -24,6 +24,10 @@ from app.core.utils import validar_ean13
 from app.models.scraper_import_batch import ScraperImportBatch
 from app.schemas.oferta import ProdutoExtraidoSchema
 from app.services.imagens import offer_image_delivery_rejection_reason
+from app.services.scraper_hmac import (
+    HMACSecretConfigurationError,
+    get_scraper_hmac_secret,
+)
 
 router = APIRouter(prefix="/internal", tags=["internal-scraper-ingest"])
 _SIGNATURE_RE = re.compile(r"^sha256=([0-9a-f]{64})$")
@@ -97,8 +101,9 @@ def _authenticate_request(request: Request, body: bytes) -> None:
     if request.url.scheme != "https":
         raise HTTPException(status_code=400, detail="https_required")
 
-    secret = os.getenv("SCRAPER_INGEST_HMAC_SECRET", "")
-    if len(secret.encode("utf-8")) < 32:
+    try:
+        secret = get_scraper_hmac_secret()
+    except HMACSecretConfigurationError:
         raise HTTPException(status_code=503, detail="scraper_ingest_not_configured")
 
     timestamp = request.headers.get("X-Scraper-Timestamp", "")
@@ -112,7 +117,7 @@ def _authenticate_request(request: Request, body: bytes) -> None:
         raise HTTPException(status_code=401, detail="invalid_scraper_signature")
 
     signed = timestamp.encode("ascii") + b"." + body
-    expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    expected = hmac.new(secret, signed, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(match.group(1), expected):
         raise HTTPException(status_code=401, detail="invalid_scraper_signature")
 

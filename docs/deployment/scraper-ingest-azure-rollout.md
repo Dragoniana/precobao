@@ -49,7 +49,7 @@ Após deploy e homologação aprovados, configurar URL HTTPS e fonte em `DIRECT`
 1. Confirmar janela, operador, acesso de emergência e configuração real do proxy/DNS. Não copiar `.env.azure` para artefato nem mostrar segredos nos logs.
 2. Atualizar o checkout da VM para este commit/branch após aprovação e executar o preflight de `deploy/azure/preflight.sh`.
 3. Criar backup consistente local com `deploy/azure/backup.sh`; executar `verify-backup.sh` para checar hashes, GPG, manifest e legibilidade do dump e do registro de imagens. A cópia fora da VM não é requisito para este rollout. Manter os arquivos locais criptografados e com acesso restrito durante a janela aprovada.
-4. Confirmar no `.env.azure` a URL/TLS atuais do PostgreSQL e configurar um HMAC exclusivo para o coletor, com allowlist limitada a `araujo,pacheco`. Não mostrar nem copiar valores secretos para artefatos ou logs.
+4. Confirmar no `.env.azure` a URL/TLS atuais do PostgreSQL e configurar a allowlist `araujo,pacheco`. Gere o HMAC diretamente na VM, fora do repositório, com pelo menos 256 bits aleatórios. Armazene em `/opt/preco-bao/secrets/scraper_ingest_hmac`, proprietário root, grupo numérico 20000, modo `0440`; o diretório deve ser root-only (`0700`). Configure somente os caminhos do host e do container no `.env.azure`. O Compose monta o arquivo read-only e adiciona o grupo 20000 somente à API. Nunca imprima o conteúdo, coloque-o no ambiente do shell ou nos logs.
 5. Construir e registrar a imagem candidata da API; preparar também a imagem do `web` com a URL pública atual da API. Preservar a imagem/digest anterior de ambos para rollback. Não alterar Caddy nem abrir portas novas.
 6. Aplicar, com confirmação literal e backup verificado, as migrations `f81c3a2d9b10` e `9a6d2f81c4b7` via `deploy/azure/migrate.sh`. Verificar `alembic current`, `alembic check`, tabelas, índices e espaço livre antes de prosseguir.
 7. Atualizar somente `api` e `web`, usando o projeto e env file existentes e sem `--remove-orphans`. Revisar a configuração resolvida para confirmar que PostgreSQL, Caddy, volumes, Indiana, `offer-refresh` e schedulers Araújo/Pacheco não serão recriados ou reiniciados. A migration roda isoladamente antes da troca da API.
@@ -82,3 +82,18 @@ Na VM, a Web está na imagem identificada pela release `e6c42a4`, descendente da
 O PR #5 continua rascunho e não foi integrado. Ele mostra 94 arquivos contra `main` porque a branch de `main` está atrás de funcionalidades que já constam da release implantada; a comparação do deploy precisa usar o digest real da VM. Atualizar a API candidata exige a cadeia `f81c3a2d9b10`, `9a6d2f81c4b7` e `b7e1c4a9d602`. Os schedulers Araújo/Pacheco permanecem desativados. Os ciclos de 403 são somente simulados até a condição de acesso às origens ser esclarecida.
 
 Nenhum container, configuração ou dado de produção foi modificado durante esta homologação. O dump cifrado atual foi verificado e restaurado no ambiente isolado; cópias de backup anteriores foram preservadas.
+
+### HMAC por arquivo
+
+A API aceita `SCRAPER_INGEST_HMAC_SECRET_FILE`; quando configurado, o arquivo é a única fonte e erros de leitura falham fechados, sem fallback para `SCRAPER_INGEST_HMAC_SECRET`. A variável antiga continua compatível quando nenhum arquivo estiver configurado. O helper é compartilhado pelo endpoint de lotes e pelo endpoint de imagens. No Compose de produção, o arquivo vem de bind mount somente leitura em `/run/secrets/scraper_ingest_hmac`; o processo `apiuser` recebe apenas o grupo adicional 20000 para ler o arquivo `root:20000`, modo `0440`. Preflight valida proprietário, grupo, permissões, montagem, leitura e tamanho mínimo sem exibir o valor.
+
+Provisionamento direto na VM (o conteúdo nunca é exibido nem transferido):
+
+```bash
+sudo install -d -o root -g root -m 0700 /opt/preco-bao/secrets
+sudo sh -c 'umask 077; openssl rand -hex 32 > /opt/preco-bao/secrets/scraper_ingest_hmac'
+sudo chown root:20000 /opt/preco-bao/secrets/scraper_ingest_hmac
+sudo chmod 0440 /opt/preco-bao/secrets/scraper_ingest_hmac
+```
+
+No `.env.azure`, defina apenas `SCRAPER_INGEST_HMAC_SECRET_FILE=/run/secrets/scraper_ingest_hmac`, `SCRAPER_INGEST_HMAC_SECRET_HOST_FILE=/opt/preco-bao/secrets/scraper_ingest_hmac`, mantenha `SCRAPER_INGEST_HMAC_SECRET` vazio e configure `SCRAPER_INGEST_ALLOWED_SOURCES=araujo,pacheco`. Não use `docker compose config` para imprimir saída não filtrada quando variáveis secretas estiverem configuradas.

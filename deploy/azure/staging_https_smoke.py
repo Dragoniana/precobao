@@ -24,6 +24,10 @@ from app.core.database import engine
 from app.scrapers import scraper_batch_client
 from app.scrapers.scraper_batch_client import post_batch, post_image_upload
 from app.services.medicine_images import normalize_medicine_image
+from app.services.scraper_hmac import (
+    HMACSecretConfigurationError,
+    get_scraper_hmac_secret,
+)
 
 
 HOST = "staging.precobao.test"
@@ -54,10 +58,10 @@ def _guard() -> None:
         raise SystemExit("Refusing writes: DATABASE_URL is not the isolated restore database.")
     if os.getenv("SCRAPER_INGEST_URL") != BATCH_URL:
         raise SystemExit("Refusing requests: endpoint must be the private HTTPS staging hostname.")
-    if not os.getenv("SCRAPER_INGEST_HMAC_SECRET") or len(
-        os.getenv("SCRAPER_INGEST_HMAC_SECRET", "").encode()
-    ) < 32:
-        raise SystemExit("Staging HMAC secret is missing or too short.")
+    try:
+        os.environ["SCRAPER_INGEST_HMAC_SECRET"] = get_scraper_hmac_secret().decode("utf-8")
+    except (HMACSecretConfigurationError, UnicodeDecodeError) as error:
+        raise SystemExit("Staging HMAC secret is missing or unusable.") from error
 
 
 def _batch(source: str) -> dict[str, object]:
