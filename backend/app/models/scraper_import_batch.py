@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import JSON, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -25,6 +25,9 @@ class ScraperImportBatch(Base):
     price_changes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     images_registered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     images_missing: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rejected_items: Mapped[list[dict] | None] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

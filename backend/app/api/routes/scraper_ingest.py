@@ -98,6 +98,9 @@ class ScraperBatchResult(BaseModel):
     status: str
     duplicate: bool = False
     product_count: int
+    accepted_count: int = 0
+    rejected_count: int = 0
+    rejected_items: list[dict[str, str | None]] = Field(default_factory=list)
     catalog_created: int = 0
     offers_created: int = 0
     offers_updated: int = 0
@@ -150,11 +153,15 @@ async def _persist_batch(batch: ScraperBatchIn) -> dict[str, int]:
 
 
 def _result(record: ScraperImportBatch, *, duplicate: bool = False):
+    rejected_items = record.rejected_items or []
     return ScraperBatchResult(
         batch_id=UUID(record.batch_id),
         status=record.status,
         duplicate=duplicate,
         product_count=record.product_count,
+        accepted_count=max(0, record.product_count - len(rejected_items)),
+        rejected_count=len(rejected_items),
+        rejected_items=rejected_items,
         catalog_created=record.catalog_created,
         offers_created=record.offers_created,
         offers_updated=record.offers_updated,
@@ -175,10 +182,10 @@ def _source_name_matches(name: str, source: str) -> bool:
     return source in normalized
 
 
-def _find_product_identity_conflict(
+def _find_product_identity_conflicts(
     db: Session, batch: ScraperBatchIn
-) -> tuple[str, str] | None:
-    """Reject ambiguous source identities before any catalog, offer or history write.
+) -> dict[int, str]:
+    """Return item-indexed identity conflicts without rejecting valid siblings.
 
     Exact source URL and pharmacy SKU must continue to point at the same offer.
     When that offer already has a different (or unknown) catalog EAN, a new EAN
@@ -211,22 +218,40 @@ def _find_product_identity_conflict(
         by_url.setdefault(offer.url_origem, []).append((offer, catalog))
         by_sku.setdefault(offer.sku_interno, []).append((offer, catalog))
 
-    for product in batch.products:
+    conflicts: dict[int, str] = {}
+    for index, product in enumerate(batch.products):
         url_matches = by_url.get(product.link, [])
         sku_matches = by_sku.get(product.sku_interno, [])
         if url_matches:
             if any(
-                offer.sku_interno != product.sku_interno
-                for offer, _ in url_matches
+                offer.sku_interno != product.sku_interno for offer, _ in url_matches
             ):
-                return product.sku_interno, "sku_url_mismatch"
-            if product.ean and any(
+                conflicts[index] = "sku_url_mismatch"
+            elif product.ean and any(
                 catalog.codigo_barras != product.ean for _, catalog in url_matches
             ):
-                return product.sku_interno, "ean_catalog_mismatch"
+                conflicts[index] = "ean_catalog_mismatch"
         elif sku_matches:
-            return product.sku_interno, "sku_url_mismatch"
-    return None
+            conflicts[index] = "sku_url_mismatch"
+
+    by_batch_url: dict[str, list[int]] = {}
+    by_batch_sku: dict[str, list[int]] = {}
+    for index, product in enumerate(batch.products):
+        by_batch_url.setdefault(product.link, []).append(index)
+        by_batch_sku.setdefault(product.sku_interno, []).append(index)
+    for indices in (*by_batch_url.values(), *by_batch_sku.values()):
+        if len(indices) < 2:
+            continue
+        values = [batch.products[index] for index in indices]
+        if len({(item.sku_interno, item.link) for item in values}) > 1:
+            reason = "sku_url_mismatch"
+        elif len({item.ean for item in values}) > 1:
+            reason = "ean_catalog_mismatch"
+        else:
+            continue
+        for index in indices:
+            conflicts[index] = reason
+    return conflicts
 
 
 @router.post(
@@ -286,7 +311,7 @@ async def ingest_scraper_batch(
     if record is not None:
         if record.payload_sha256 != digest or record.source != batch.source:
             raise HTTPException(status_code=409, detail="batch_id_payload_conflict")
-        if record.status == "COMPLETE":
+        if record.status in {"COMPLETE", "PARTIAL"}:
             return _result(record, duplicate=True)
         if (
             record.status == "PROCESSING"
@@ -296,16 +321,31 @@ async def ingest_scraper_batch(
         ):
             raise HTTPException(status_code=409, detail="batch_is_processing")
 
-    conflict = _find_product_identity_conflict(db, batch)
-    if conflict is not None:
-        sku, reason = conflict
+    conflict_indexes = _find_product_identity_conflicts(db, batch)
+    rejected_items = [
+        {
+            "product_id": str(batch.products[index].id),
+            "sku_interno": batch.products[index].sku_interno,
+            "ean": batch.products[index].ean,
+            "link": batch.products[index].link,
+            "reason": reason,
+        }
+        for index, reason in sorted(conflict_indexes.items())
+    ]
+    for item in rejected_items:
         logger.warning(
             "scraper_product_identity_conflict",
-            extra={"source": batch.source, "sku": sku, "reason": reason},
+            extra={
+                "source": batch.source,
+                "sku": item["sku_interno"],
+                "reason": item["reason"],
+            },
         )
-        raise HTTPException(
-            status_code=409, detail="scraper_product_identity_conflict"
-        )
+    accepted_products = [
+        product
+        for index, product in enumerate(batch.products)
+        if index not in conflict_indexes
+    ]
 
     if record is not None:
         record.status = "PROCESSING"
@@ -313,6 +353,7 @@ async def ingest_scraper_batch(
         record.started_at = now
         record.finished_at = None
         record.error_type = None
+        record.rejected_items = rejected_items
     else:
         record = ScraperImportBatch(
             batch_id=batch_id,
@@ -321,6 +362,7 @@ async def ingest_scraper_batch(
             status="PROCESSING",
             attempt_count=1,
             product_count=len(batch.products),
+            rejected_items=rejected_items,
             started_at=now,
         )
         db.add(record)
@@ -337,14 +379,20 @@ async def ingest_scraper_batch(
         ) from error
 
     try:
-        metrics = await _persist_batch(batch)
+        metrics = (
+            await _persist_batch(
+                batch.model_copy(update={"products": accepted_products})
+            )
+            if accepted_products
+            else {}
+        )
         if (
             metrics.get("persistence_errors")
             or metrics.get("image_errors")
             or metrics.get("unassociated_products")
         ):
             raise RuntimeError("batch_persistence_incomplete")
-        record.status = "COMPLETE"
+        record.status = "PARTIAL" if rejected_items else "COMPLETE"
         record.catalog_created = metrics.get("catalog_items_created", 0)
         record.offers_created = metrics.get("offers_created", 0)
         record.offers_updated = metrics.get("offers_updated", 0)
@@ -354,6 +402,7 @@ async def ingest_scraper_batch(
         record.price_changes = metrics.get("price_changes", 0)
         record.images_registered = metrics.get("images_registered", 0)
         record.images_missing = metrics.get("products_without_image", 0)
+        record.rejected_items = rejected_items
         record.finished_at = datetime.now(UTC)
         db.commit()
     except Exception as error:

@@ -336,7 +336,7 @@ def test_ingest_does_not_register_generic_pacheco_image(ingest_client):
             "PCH155349",
             "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
             "7891721027468",
-            409,
+            200,
         ),
         (
             "PCH155349",
@@ -345,7 +345,7 @@ def test_ingest_does_not_register_generic_pacheco_image(ingest_client):
             "PCH155349",
             "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos-alternativo/p",
             "7891721201806",
-            409,
+            200,
         ),
         (
             "PCH155349",
@@ -424,16 +424,237 @@ def test_ingest_checks_existing_pacheco_offer_identity_before_writes(
     response = client.post(ENDPOINT, content=body, headers=_headers(body))
 
     assert response.status_code == expected_status
-    if expected_status == 409:
-        assert response.status_code == 409
-        assert response.json()["detail"] == "scraper_product_identity_conflict"
+    if incoming_ean != existing_ean or incoming_url != existing_url:
+        assert response.json()["status"] == "PARTIAL"
+        assert response.json()["accepted_count"] == 0
+        assert response.json()["rejected_count"] == 1
     with sessions() as db:
         assert db.query(CatalogoBase).count() == 1
         assert db.query(OfertaFarmacia).count() == 1
-        assert db.query(HistoricoPreco).count() == (1 if expected_status == 200 else 0)
-        assert db.query(scraper_ingest.ScraperImportBatch).count() == (
-            1 if expected_status == 200 else 0
+        assert db.query(HistoricoPreco).count() == (
+            0 if incoming_ean != existing_ean or incoming_url != existing_url else 1
         )
+        assert db.query(scraper_ingest.ScraperImportBatch).count() == (1)
+
+
+def test_partial_batch_accepts_valid_siblings_and_is_idempotent(ingest_client):
+    client, sessions = ingest_client
+    with sessions() as db:
+        pharmacy = Farmacia(
+            cnpj="33438250000167",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Pacheco",
+            endereco_completo="Loja online",
+        )
+        catalog = CatalogoBase(
+            codigo_barras="7891721201806",
+            name_search="Glifage XR 500mg 30 comprimidos",
+            principio_ativo="metformina",
+            laboratorio="Merck",
+            categorias=[],
+        )
+        db.add_all([pharmacy, catalog])
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno="PCH155349",
+                preco=10.37,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem="https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+                contexto_chave="global",
+                farmacia_id=pharmacy.id,
+                catalogo_id=catalog.id,
+            )
+        )
+        db.commit()
+
+    products = []
+    for index in range(50):
+        product_id = 155349 if index == 0 else 800000 + index
+        products.append(
+            {
+                "id": str(product_id),
+                "sku_interno": f"PCH{product_id}",
+                "ean": "7891721027468" if index == 0 else None,
+                "name_search": f"Produto teste Pacheco {product_id}",
+                "preco": 10.0 + index,
+                "disponivel": True,
+                "quantidade_estoque": 1,
+                "link": (
+                    "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p"
+                    if index == 0
+                    else f"https://www.drogariaspacheco.com.br/produto/{product_id}/p"
+                ),
+                "imagem_url": None,
+                "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+            }
+        )
+    payload = {
+        "batch_id": "d7791c70-28cc-49bd-9a65-152e1adfc350",
+        "source": "pacheco",
+        "observed_at": "2026-11-15T10:00:00-03:00",
+        "products": products,
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    first = client.post(ENDPOINT, content=body, headers=_headers(body)).json()
+    repeated = client.post(ENDPOINT, content=body, headers=_headers(body)).json()
+
+    assert first["status"] == "PARTIAL"
+    assert first["product_count"] == 50
+    assert first["accepted_count"] == 49
+    assert first["rejected_count"] == 1
+    assert first["rejected_items"][0]["sku_interno"] == "PCH155349"
+    assert first["rejected_items"][0]["reason"] == "ean_catalog_mismatch"
+    assert repeated["duplicate"] is True
+    assert repeated["rejected_items"] == first["rejected_items"]
+    with sessions() as db:
+        assert db.query(OfertaFarmacia).count() == 50
+        assert db.query(HistoricoPreco).count() == 49
+        audit = db.query(scraper_ingest.ScraperImportBatch).one()
+        assert audit.status == "PARTIAL"
+        assert len(audit.rejected_items) == 1
+
+
+def test_partial_batch_reports_multiple_conflicts(ingest_client):
+    client, sessions = ingest_client
+    with sessions() as db:
+        pharmacy = Farmacia(
+            cnpj="33438250000167",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Pacheco",
+            endereco_completo="Loja online",
+        )
+        catalog = CatalogoBase(
+            codigo_barras="7891721201806",
+            name_search="Glifage XR 500mg",
+            principio_ativo="metformina",
+            laboratorio="Merck",
+            categorias=[],
+        )
+        db.add_all([pharmacy, catalog])
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno="PCH155349",
+                preco=10.37,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem="https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+                contexto_chave="global",
+                farmacia_id=pharmacy.id,
+                catalogo_id=catalog.id,
+            )
+        )
+        second_catalog = CatalogoBase(
+            codigo_barras=None,
+            name_search="Produto Pacheco 155352",
+            principio_ativo="não informado",
+            laboratorio="não informado",
+            categorias=[],
+        )
+        db.add(second_catalog)
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno="PCH155352",
+                preco=8.0,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem="https://www.drogariaspacheco.com.br/produto/155352/p",
+                contexto_chave="global",
+                farmacia_id=pharmacy.id,
+                catalogo_id=second_catalog.id,
+            )
+        )
+        db.commit()
+    products = [
+        {
+            "id": str(product_id),
+            "sku_interno": f"PCH{product_id}",
+            "ean": ean,
+            "name_search": f"Produto {product_id}",
+            "preco": 11.0,
+            "disponivel": True,
+            "quantidade_estoque": 1,
+            "link": url,
+            "imagem_url": None,
+            "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+        }
+        for product_id, ean, url in [
+            (
+                155349,
+                "7891721027468",
+                "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            ),
+            (
+                155352,
+                None,
+                "https://www.drogariaspacheco.com.br/produto/155352-alternativo/p",
+            ),
+            (
+                155351,
+                None,
+                "https://www.drogariaspacheco.com.br/produto/155351/p",
+            ),
+        ]
+    ]
+    payload = {
+        "batch_id": "e7791c70-28cc-49bd-9a65-152e1adfc350",
+        "source": "pacheco",
+        "observed_at": "2026-11-15T10:00:00-03:00",
+        "products": products,
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    result = client.post(ENDPOINT, content=body, headers=_headers(body)).json()
+
+    assert result["status"] == "PARTIAL"
+    assert result["accepted_count"] == 1
+    assert result["rejected_count"] == 2
+    assert {item["reason"] for item in result["rejected_items"]} == {
+        "ean_catalog_mismatch",
+        "sku_url_mismatch",
+    }
+
+
+def test_ingest_accepts_fifty_valid_products(ingest_client):
+    client, sessions = ingest_client
+    payload = {
+        "batch_id": "f7791c70-28cc-49bd-9a65-152e1adfc350",
+        "source": "pacheco",
+        "observed_at": "2026-11-15T10:00:00-03:00",
+        "products": [
+            {
+                "id": str(900000 + index),
+                "sku_interno": f"PCH{900000 + index}",
+                "ean": None,
+                "name_search": f"Produto válido {index}",
+                "preco": 12.0 + index,
+                "disponivel": True,
+                "quantidade_estoque": 1,
+                "link": (
+                    "https://www.drogariaspacheco.com.br/produto/"
+                    f"{900000 + index}/p"
+                ),
+                "imagem_url": None,
+                "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+            }
+            for index in range(50)
+        ],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "COMPLETE"
+    assert response.json()["product_count"] == 50
+    assert response.json()["accepted_count"] == 50
+    assert response.json()["rejected_count"] == 0
+    with sessions() as db:
+        assert db.query(OfertaFarmacia).count() == 50
 
 
 def test_failed_batch_retries_with_same_id_after_recovery(ingest_client, monkeypatch):
