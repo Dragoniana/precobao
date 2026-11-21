@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,12 @@ def _generic_image_cache_key(metadata: dict[str, Any]) -> str:
         for field in ("source", "sku", "product_url", "source_image_url")
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _failure_reason(value: str, fallback: str) -> str:
+    """Keep diagnostics useful without recording a URL or response body."""
+    normalized = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", value).strip("_")[:120]
+    return normalized or fallback
 
 
 def _generic_image_is_cached(metadata: dict[str, Any]) -> bool:
@@ -156,14 +163,21 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
 
 async def download_and_upload_product_image(
     client: httpx.AsyncClient, source: str, product: dict[str, Any]
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     image_url = str(product.get("imagem_url") or "").strip()
     if not image_url:
-        return None
+        return {"image_failure_reason": "source_image_url_missing"}
     product_url = str(product.get("link") or "").strip()
     pharmacy_name = "Araujo" if source == "araujo" else "Pacheco"
-    if offer_image_delivery_rejection_reason(image_url, product_url, pharmacy_name):
-        return None
+    rejection = offer_image_delivery_rejection_reason(
+        image_url, product_url, pharmacy_name
+    )
+    if rejection:
+        return {
+            "image_failure_reason": _failure_reason(
+                rejection, "image_source_rejected"
+            )
+        }
     generic = is_generic_image_url(image_url)
     if generic and _generic_image_is_cached(
         {
@@ -186,8 +200,20 @@ async def download_and_upload_product_image(
             max_bytes=int(os.getenv("SCRAPER_IMAGE_MAX_BYTES", str(512 * 1024))),
             max_dimension=int(os.getenv("SCRAPER_IMAGE_MAX_DIMENSION", "1200")),
         )
-    except (httpx.HTTPError, InvalidMedicineImage, OSError, ValueError):
-        return None
+    except httpx.TimeoutException:
+        return {"image_failure_reason": "image_download_timeout"}
+    except httpx.HTTPError:
+        return {"image_failure_reason": "image_download_transport_error"}
+    except InvalidMedicineImage as error:
+        return {
+            "image_failure_reason": _failure_reason(
+                str(error), "invalid_source_image"
+            )
+        }
+    except OSError:
+        return {"image_failure_reason": "image_local_io_error"}
+    except ValueError:
+        return {"image_failure_reason": "invalid_source_image_content"}
 
     metadata = {
         "upload_id": str(uuid4()),

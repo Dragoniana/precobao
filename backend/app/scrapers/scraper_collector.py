@@ -145,6 +145,63 @@ def _log(event: str, **fields: object) -> None:
     )
 
 
+def _first_pending_image_sku(source: str) -> str | None:
+    directory = _state_dir() / "outbox" / "images" / source
+    for manifest in sorted(directory.glob("*.json")):
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        sku = str(value.get("sku") or "").strip()
+        if sku:
+            return sku[:80]
+    return None
+
+
+def _record_image_failure(
+    state: dict[str, Any],
+    source: str,
+    *,
+    sku: str | None,
+    category: str,
+    reason: str,
+) -> None:
+    # Reasons come from controlled error labels; discard anything that could
+    # contain a URL, response body, or credential before persisting/logging.
+    safe_reason = "".join(
+        character
+        for character in str(reason)
+        if character.isalnum() or character in "_.:-"
+    )[:120] or "image_failure"
+    state["image_sync_status"] = "PARTIAL"
+    if category == "download":
+        state["image_download_failures"] += 1
+    elif category == "upload":
+        state["image_upload_failures"] += 1
+    else:
+        state["pending_image_replay_failures"] += 1
+    failures = state.setdefault("image_failures", [])
+    failures.append(
+        {
+            "sku": str(sku or "")[:80] or None,
+            "category": category,
+            "reason": safe_reason,
+            "at": datetime.now(UTC).isoformat(),
+        }
+    )
+    del failures[:-50]
+    _write_state(source, state)
+    _log(
+        "image_failure_nonfatal",
+        source=source,
+        sku=str(sku or "")[:80] or None,
+        category=category,
+        reason=safe_reason,
+    )
+
+
 def _require_direct_collection(source: str) -> None:
     if os.getenv("SCRAPER_COLLECTOR_ENABLED", "false").casefold() not in {
         "1",
@@ -211,6 +268,10 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "images_missing": 0,
         "image_blobs_uploaded": 0,
         "image_download_failures": 0,
+        "image_upload_failures": 0,
+        "pending_image_replay_failures": 0,
+        "image_failures": [],
+        "image_sync_status": "OK",
         "images_skipped_generic": 0,
         "generic_fallback_images_uploaded": 0,
     }
@@ -261,11 +322,18 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             if replayed_images:
                 _write_state(source, state)
                 _log("pending_images_replayed", source=source, images=replayed_images)
-        except BatchSyncError as error:
-            state["status"] = "SYNC_FAILED"
-            state["stop_reason"] = str(error)
-            _write_state(source, state)
-            raise
+        except (BatchSyncError, OSError) as error:
+            _record_image_failure(
+                state,
+                source,
+                sku=_first_pending_image_sku(source),
+                category="pending_replay",
+                reason=(
+                    str(error)
+                    if isinstance(error, BatchSyncError)
+                    else "image_outbox_local_io_error"
+                ),
+            )
 
         async def send_page(products: list[dict[str, Any]]) -> None:
             nonlocal products_selected, product_limit_reached
@@ -302,35 +370,65 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 state["stop_reason"] = str(error)
                 _write_state(source, state)
                 raise
-            try:
-                for product in normalized:
-                    if not product.get("imagem_url"):
-                        continue
+            for product in normalized:
+                if not product.get("imagem_url"):
+                    _record_image_failure(
+                        state,
+                        source,
+                        sku=str(product.get("sku_interno") or ""),
+                        category="download",
+                        reason="source_image_url_missing",
+                    )
+                    continue
+                try:
                     image_result = await download_and_upload_product_image(
                         client, source, product
                     )
-                    if image_result is None:
-                        state["image_download_failures"] += 1
-                        continue
-                    if image_result.get("skipped") in {
-                        "generic_asset",
-                        "generic_already_stored",
-                    }:
-                        state["images_skipped_generic"] += 1
-                        _write_state(source, state)
-                        continue
-                    if image_result.get("is_generic_fallback"):
-                        state["generic_fallback_images_uploaded"] += 1
-                    state["image_blobs_uploaded"] += 1
-                    state["image_bytes_uploaded"] = int(
-                        state.get("image_bytes_uploaded", 0)
-                    ) + int(image_result["normalized_size_bytes"])
+                except (BatchSyncError, OSError) as error:
+                    _record_image_failure(
+                        state,
+                        source,
+                        sku=str(product.get("sku_interno") or ""),
+                        category="upload",
+                        reason=(
+                            str(error)
+                            if isinstance(error, BatchSyncError)
+                            else "image_outbox_local_io_error"
+                        ),
+                    )
+                    continue
+                if image_result and image_result.get("image_failure_reason"):
+                    _record_image_failure(
+                        state,
+                        source,
+                        sku=str(product.get("sku_interno") or ""),
+                        category="download",
+                        reason=str(image_result["image_failure_reason"]),
+                    )
+                    continue
+                if image_result is None:
+                    _record_image_failure(
+                        state,
+                        source,
+                        sku=str(product.get("sku_interno") or ""),
+                        category="download",
+                        reason="image_result_missing",
+                    )
+                    continue
+                if image_result.get("skipped") in {
+                    "generic_asset",
+                    "generic_already_stored",
+                }:
+                    state["images_skipped_generic"] += 1
                     _write_state(source, state)
-            except BatchSyncError as error:
-                state["status"] = "SYNC_FAILED"
-                state["stop_reason"] = str(error)
+                    continue
+                if image_result.get("is_generic_fallback"):
+                    state["generic_fallback_images_uploaded"] += 1
+                state["image_blobs_uploaded"] += 1
+                state["image_bytes_uploaded"] = int(
+                    state.get("image_bytes_uploaded", 0)
+                ) + int(image_result["normalized_size_bytes"])
                 _write_state(source, state)
-                raise
             _log(
                 "page_synced",
                 source=source,
