@@ -50,7 +50,10 @@ export function resolveMedicineImages(medicine: Medicamento): string[] {
   const urls = Array.isArray(medicine.imagem_urls) ? medicine.imagem_urls : [];
   const legacyRef = medicine.imagem_ref?.startsWith('/catalogo/medicamentos/')
     ? `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}` : undefined;
-  return [...new Set([...urls, medicine.imagem_url, legacyRef]
+  const ordered = medicine.imagem_armazenada && legacyRef
+    ? [legacyRef, ...urls, medicine.imagem_url]
+    : [...urls, medicine.imagem_url, legacyRef];
+  return [...new Set(ordered
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
 }
@@ -80,6 +83,7 @@ export function normalizeMedicine(raw: Partial<Medicamento> & { name_search?: st
     imagem_fonte: raw.imagem_fonte || null,
     imagem_status: raw.imagem_status || null,
     imagem_motivo_rejeicao: raw.imagem_motivo_rejeicao || null,
+    imagem_armazenada: Boolean(raw.imagem_armazenada),
     ofertas: Array.isArray(raw.ofertas) ? raw.ofertas : [],
   };
   normalizedFields.set(medicine, new Set(Object.keys(raw)));
@@ -106,7 +110,7 @@ export function mergeCatalogMedicine(existing: Medicamento | undefined, incoming
   if (!incoming.nome.trim() && existing.nome.trim()) merged.nome = existing.nome;
   if (!incoming.name_search?.trim() && existing.name_search?.trim()) merged.name_search = existing.name_search;
 
-  const imageFields = ['imagem_url', 'imagem_urls', 'imagem_ref', 'imagem_fonte', 'imagem_status', 'imagem_motivo_rejeicao'];
+  const imageFields = ['imagem_url', 'imagem_urls', 'imagem_ref', 'imagem_fonte', 'imagem_status', 'imagem_motivo_rejeicao', 'imagem_armazenada'];
   if (!imageFields.some((field) => incomingFields.has(field))) {
     for (const field of imageFields as (keyof Medicamento)[]) {
       if (field in existing) (merged as unknown as Record<string, unknown>)[field] = existing[field];

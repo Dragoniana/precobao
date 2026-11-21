@@ -12,10 +12,8 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
-
-import httpx
 
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import (
@@ -23,6 +21,7 @@ from app.scrapers.partner_feed import (
     PartnerFeedRateLimited,
     load_authorized_partner_feed,
 )
+from app.scrapers.source_http_client import open_source_http_client, source_http_config
 from app.scrapers.source_modes import (
     SourceMode,
     direct_access_ready,
@@ -92,6 +91,7 @@ class PachecoScraper(BasePharmacyScraper):
         )
         self.max_items = max_items
         self.request_delay = request_delay
+        self.http_timeout = source_http_config("pacheco").timeout
         self.source_mode = (
             SourceMode(source_mode.upper())
             if isinstance(source_mode, str)
@@ -102,6 +102,11 @@ class PachecoScraper(BasePharmacyScraper):
         self.stats: dict[str, Any] = self._new_stats({})
         self.items_enqueued = 0
         self._seen_source_ids: set[str] = set()
+        self.products_callback: (
+            Callable[[list[dict[str, Any]]], Awaitable[None]] | None
+        ) = None
+        self.stop_requested_callback: Callable[[], bool] | None = None
+        self.collector_delivery_failed = False
 
     @staticmethod
     def _new_stats(previous: dict[str, Any]) -> dict[str, Any]:
@@ -299,29 +304,29 @@ class PachecoScraper(BasePharmacyScraper):
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
 
-        async with httpx.AsyncClient(
-            headers=headers,
-            verify=True,
-            follow_redirects=False,
-            timeout=30.0,
-        ) as session:
+        async with open_source_http_client("pacheco", headers=headers) as session:
             root_complete = await self._scan_partition(
                 session,
                 self.API_BASE,
                 partition="medicamentos",
                 max_offset=self.MAX_BROAD_SEARCH_OFFSET,
             )
+            if self.stats.get("stop_reason") == "safe_stop_requested":
+                return
             if self._limit_reached():
                 return
             if not root_complete:
                 self.stats["partition_errors"].append("medicamentos")
-                if self.stats.get("last_http_status") in {403, 429}:
+                if (
+                    self.stats.get("last_http_status") in {403, 429}
+                    or self.collector_delivery_failed
+                ):
                     return
 
             self.stats["facet_requests"] = self.stats.get("facet_requests", 0) + 1
             try:
                 facets_response = await self.executar_com_backoff(
-                    session.get, self.FACETS_API, timeout=30.0
+                    session.get, self.FACETS_API, timeout=self.http_timeout
                 )
                 if facets_response.status_code not in (200, 206):
                     self._record_http_failure(
@@ -378,11 +383,16 @@ class PachecoScraper(BasePharmacyScraper):
                     max_offset=self.MAX_BROAD_SEARCH_OFFSET,
                     query_map="c,b",
                 )
+                if self.stats.get("stop_reason") == "safe_stop_requested":
+                    break
                 if succeeded:
                     self.stats["brands_processed"] += 1
                 else:
                     self.stats["partition_errors"].append(str(brand.get("Name")))
-                    if self.stats.get("last_http_status") in {403, 429}:
+                    if (
+                        self.stats.get("last_http_status") in {403, 429}
+                        or self.collector_delivery_failed
+                    ):
                         break
                 self._write_checkpoint()
 
@@ -441,7 +451,7 @@ class PachecoScraper(BasePharmacyScraper):
             print(f"Pacheco {partition}: items {offset}-{end}")
             try:
                 response = await self.executar_com_backoff(
-                    session.get, url, timeout=30.0
+                    session.get, url, timeout=self.http_timeout
                 )
                 if response.status_code not in (200, 206):
                     self._record_http_failure(
@@ -480,10 +490,20 @@ class PachecoScraper(BasePharmacyScraper):
                     return False
                 previous.append(signature)
 
+                self.stats["products_seen"] += len(raw_products)
+                page_products = self._queue_source_products(raw_products)
+                if self.products_callback is not None and page_products:
+                    try:
+                        await self.products_callback(page_products)
+                    except Exception:
+                        self.collector_delivery_failed = True
+                        raise
+                if self.stop_requested_callback and self.stop_requested_callback():
+                    self.stats["stop_reason"] = "safe_stop_requested"
+                    self._write_checkpoint()
+                    return True
                 self.stats["pages_succeeded"] += 1
                 self.stats["last_completed_offset"] = offset
-                self.stats["products_seen"] += len(raw_products)
-                self._queue_source_products(raw_products)
                 self._write_checkpoint()
                 print(
                     f"Pacheco {partition}: {len(raw_products)} source rows; "
@@ -523,7 +543,10 @@ class PachecoScraper(BasePharmacyScraper):
                 return False
         return True
 
-    def _queue_source_products(self, raw_products: list[dict[str, Any]]) -> None:
+    def _queue_source_products(
+        self, raw_products: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        parsed_products: list[dict[str, Any]] = []
         for item in raw_products:
             source_id = str(item.get("productId") or "")
             items = item.get("items") or []
@@ -544,8 +567,10 @@ class PachecoScraper(BasePharmacyScraper):
                 if self.max_items is not None and (
                     self.stats["products_enqueued"] >= self.max_items
                 ):
-                    return
-                self.fila.put_nowait(product)
+                    break
+                if self.products_callback is None:
+                    self.fila.put_nowait(product)
+                parsed_products.append(product)
                 self.stats["products_enqueued"] += 1
                 self.items_enqueued += 1
                 if product.get("imagem_url"):
@@ -564,6 +589,7 @@ class PachecoScraper(BasePharmacyScraper):
                 )
         self.stats["valid_eans"] = sorted(set(self.stats["valid_eans"]))
         self.stats["unique_skus"] = sorted(set(self.stats["unique_skus"]))
+        return parsed_products
 
     def _limit_reached(self) -> bool:
         if self.max_items is None or self.stats["products_enqueued"] < self.max_items:
@@ -683,6 +709,7 @@ class PachecoScraper(BasePharmacyScraper):
             "quantidade_estoque": quantity,
             "link": product_url,
             "imagem_url": self._extrair_imagem(sku_data),
+            "fonte_observado_em": datetime.now(UTC),
         }
 
     @staticmethod

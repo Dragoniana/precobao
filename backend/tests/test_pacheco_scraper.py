@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from app.scrapers import pacheco as pacheco_module
+from app.scrapers import source_http_client
 from app.scrapers.pacheco import PachecoScraper
 from app.scrapers.pacheco_scheduler import _next_run
 
@@ -117,7 +118,7 @@ async def test_pacheco_paginates_past_pages_without_parseable_offers(
             return Response(page_rows[offset])
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -128,6 +129,12 @@ async def test_pacheco_paginates_past_pages_without_parseable_offers(
         if "/EMS?" not in url and "/facets/" not in url
     ]
     assert root_offsets == [0, 50]
+    root_urls = [
+        url
+        for url in session.requested_urls
+        if "/EMS?" not in url and "/facets/" not in url
+    ]
+    assert parse_qs(urlsplit(root_urls[0]).query)["map"] == ["c"]
     assert scraper.stats["pages_succeeded"] == 3
     assert scraper.stats["products_seen"] == 54
     assert scraper.stats["unique_source_products"] == 53
@@ -176,7 +183,7 @@ async def test_pacheco_stops_on_a_repeated_page_instead_of_looping(
             return Response()
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -207,7 +214,7 @@ async def test_pacheco_marks_http_400_as_incomplete(tmp_path, monkeypatch):
         async def get(self, *_args, **_kwargs):
             return Response()
 
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: Session())
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", lambda **_: Session())
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -267,7 +274,7 @@ async def test_pacheco_stops_after_403_without_requesting_facets(tmp_path, monke
             return Response()
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -300,7 +307,7 @@ async def test_pacheco_stops_after_429_and_records_retry_after(tmp_path, monkeyp
             return Response()
 
     session = Session()
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", lambda **_: session)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", lambda **_: session)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -321,7 +328,7 @@ async def test_pacheco_requires_authorized_source_before_network_access(
     def unexpected_network(**_kwargs):
         raise AssertionError("The source must not be contacted without authorization.")
 
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", unexpected_network)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", unexpected_network)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()
@@ -338,7 +345,7 @@ async def test_pacheco_disabled_mode_never_contacts_public_api(tmp_path, monkeyp
     def unexpected_network(**_kwargs):
         raise AssertionError("DISABLED mode must not contact the source.")
 
-    monkeypatch.setattr(pacheco_module.httpx, "AsyncClient", unexpected_network)
+    monkeypatch.setattr(source_http_client.httpx, "AsyncClient", unexpected_network)
     scraper = PachecoScraper(request_delay=0)
 
     await scraper.run()

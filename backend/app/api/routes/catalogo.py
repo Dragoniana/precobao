@@ -1,15 +1,16 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, selectinload, undefer
 from sqlalchemy.sql.elements import ColumnElement
 
 from app import schemas
 from app.core.database import get_db
 from app.models import CatalogoBase, HistoricoPreco, OfertaFarmacia
 from app.models.farmacia import Farmacia
+from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.schemas import CatalogoFiltrosOut, CatalogoPageOut
 from app.schemas.farmacia import FarmaciaOut
 from app.services.catalog_response import with_registry_images
@@ -89,7 +90,10 @@ def listar_mais_baratos(
         db.execute(
             select(CatalogoBase)
             .join(precos, precos.c.catalogo_id == CatalogoBase.id)
-            .options(_available_offer_options())
+            .options(
+                _available_offer_options(),
+                selectinload(CatalogoBase.image_links),
+            )
             .order_by(precos.c.menor_preco.asc(), CatalogoBase.id.asc())
             .limit(limit)
         )
@@ -106,7 +110,10 @@ def obter_medicamento(medicamento_id: int, db: Session = Depends(get_db)):
     medicamento = db.execute(
         select(CatalogoBase)
         .where(CatalogoBase.id == medicamento_id)
-        .options(_available_offer_options())
+        .options(
+            _available_offer_options(),
+            selectinload(CatalogoBase.image_links),
+        )
     ).scalar_one_or_none()
     if medicamento is None:
         raise HTTPException(status_code=404, detail="Medicamento não encontrado.")
@@ -114,7 +121,18 @@ def obter_medicamento(medicamento_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/medicamentos/{medicamento_id}/imagem", include_in_schema=False)
-def redirecionar_imagem_catalogo(medicamento_id: int, db: Session = Depends(get_db)):
+def servir_imagem_catalogo(
+    medicamento_id: int, request: Request, db: Session = Depends(get_db)
+):
+    return _servir_imagem_catalogo(medicamento_id, db, request)
+
+
+def redirecionar_imagem_catalogo(medicamento_id: int, db: Session):
+    """Compatibility entry point for direct callers and legacy tests."""
+    return _servir_imagem_catalogo(medicamento_id, db, None)
+
+
+def _servir_imagem_catalogo(medicamento_id: int, db: Session, request: Request | None):
     medicamento = db.execute(
         select(CatalogoBase)
         .where(CatalogoBase.id == medicamento_id)
@@ -124,6 +142,37 @@ def redirecionar_imagem_catalogo(medicamento_id: int, db: Session = Depends(get_
     ).scalar_one_or_none()
     if medicamento is None:
         raise HTTPException(status_code=404, detail="Imagem nao encontrada.")
+
+    stored = db.execute(
+        select(MedicineImageBlob)
+        .join(MedicineImageLink, MedicineImageLink.blob_id == MedicineImageBlob.id)
+        .where(
+            MedicineImageLink.catalog_id == medicamento_id,
+            MedicineImageLink.is_primary.is_(True),
+        )
+        .order_by(MedicineImageLink.updated_at.desc(), MedicineImageLink.id.desc())
+        .options(undefer(MedicineImageBlob.image_data))
+        .limit(1)
+    ).scalar_one_or_none()
+    if stored is not None:
+        etag = f'"{stored.sha256}"'
+        cache_headers = {
+            "ETag": etag,
+            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if_none_match = request.headers.get("if-none-match", "") if request else ""
+        if any(
+            candidate.strip() == "*" or candidate.strip().removeprefix("W/") == etag
+            for candidate in if_none_match.split(",")
+        ):
+            return Response(status_code=304, headers=cache_headers)
+        return Response(
+            content=stored.image_data,
+            media_type=stored.content_type,
+            headers=cache_headers,
+        )
+
     image_url = with_registry_images(medicamento).imagem_url
     if not image_url:
         raise HTTPException(status_code=404, detail="Imagem nao encontrada.")
@@ -248,7 +297,10 @@ def listar_catalogo_completo(
 
     # Adiciona paginação e Eager Loading das ofertas
     stmt = (
-        stmt.options(_available_offer_options(farmacia_id))
+        stmt.options(
+            _available_offer_options(farmacia_id),
+            selectinload(CatalogoBase.image_links),
+        )
         .order_by(*order_by)
         .limit(limit)
         .offset(offset)
