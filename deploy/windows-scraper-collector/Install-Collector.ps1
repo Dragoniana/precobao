@@ -8,6 +8,17 @@ $Backend = Join-Path $RepositoryRoot 'backend'
 $StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
 $StateDir = Join-Path $StateRoot 'state'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+$settingsPath = Join-Path $StateRoot 'settings.json'
+if (Test-Path -LiteralPath $settingsPath) {
+    $existingSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    if ($existingSettings.repository_root) {
+        $existingRoot = [IO.Path]::GetFullPath([string]$existingSettings.repository_root).TrimEnd('\', '/')
+        $requestedRoot = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
+        if (-not $existingRoot.Equals($requestedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Outra cópia do coletor já usa o estado deste usuário Windows. Use uma conta Windows separada para manter instalações isoladas.'
+        }
+    }
+}
 
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
     throw 'Python Launcher não encontrado. Instale Python 3.12 e execute novamente.'
@@ -27,7 +38,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar dependências do coletor.' }
 } finally { Pop-Location }
 
-$settingsPath = Join-Path $StateRoot 'settings.json'
 if (-not (Test-Path $settingsPath)) {
     $settings = [ordered]@{
         repository_root = $RepositoryRoot

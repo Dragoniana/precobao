@@ -108,6 +108,13 @@ $legacyFiles = [System.Collections.Generic.List[object]]::new()
 
 if (Test-Path -LiteralPath $SettingsPath) {
     $settings = Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
+    if ($settings.repository_root) {
+        $configuredRepository = [IO.Path]::GetFullPath([string]$settings.repository_root).TrimEnd('\', '/')
+        $requestedRepository = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
+        if (-not $configuredRepository.Equals($requestedRepository, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'State belongs to another collector installation; migration stopped before moving files.'
+        }
+    }
     if ($settings.state_dir) {
         $candidateState = [IO.Path]::GetFullPath([string]$settings.state_dir)
         if (-not $candidateState.Equals($TargetState, [StringComparison]::OrdinalIgnoreCase)) {
