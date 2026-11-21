@@ -34,6 +34,28 @@ if set(services) != required_services:
     raise SystemExit("Azure Compose services do not match the reviewed production set.")
 api, web, caddy = services["api"], services["web"], services["caddy"]
 environment = api.get("environment", {})
+smtp_starttls = str(environment.get("SMTP_STARTTLS", "")).casefold()
+try:
+    smtp_port = int(environment.get("SMTP_PORT", ""))
+except (TypeError, ValueError):
+    raise SystemExit("SMTP_PORT must be a valid port number.")
+reset_url = urlsplit(str(environment.get("PASSWORD_RESET_URL", "")))
+if (
+    not environment.get("SMTP_HOST")
+    or not environment.get("SMTP_USERNAME")
+    or not environment.get("SMTP_PASSWORD")
+    or not environment.get("SMTP_FROM_EMAIL")
+    or smtp_port != 587
+    or smtp_starttls not in {"1", "true", "yes", "on"}
+    or reset_url.scheme != "https"
+    or reset_url.hostname != "precobao.app"
+    or reset_url.path != "/reset-password"
+    or reset_url.username
+    or reset_url.password
+    or reset_url.query
+    or reset_url.fragment
+):
+    raise SystemExit("SMTP password recovery settings must remain configured with HTTPS STARTTLS.")
 api_image_mount = next(
     (m for m in api.get("volumes", []) if m.get("target") == "/app/data/image_references"),
     None,
