@@ -69,7 +69,7 @@ async def test_image_outbox_retries_same_binary_and_upload_id(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_image_outbox_removes_orphaned_binary(monkeypatch, tmp_path):
+async def test_image_outbox_quarantines_orphaned_binary(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
     outbox = tmp_path / "outbox" / "images" / "pacheco"
     outbox.mkdir(parents=True)
@@ -80,7 +80,43 @@ async def test_image_outbox_removes_orphaned_binary(monkeypatch, tmp_path):
         assert (
             await scraper_image_client.sync_pending_image_outbox(client, "pacheco") == 0
         )
+    quarantined = list((outbox / "quarantine" / "orphaned").glob("*.bin"))
     assert not orphan.exists()
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"partial pre-manifest data"
+
+
+@pytest.mark.asyncio
+async def test_http_409_keeps_pending_image_for_manual_review(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "pacheco"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "pending.json"
+    content = outbox / "pending.bin"
+    metadata = {
+        "upload_id": "5ea270b4-3985-432d-a5a5-ada953993ca2",
+        "source": "pacheco",
+        "sku": "PCH155349",
+        "ean": "7891721027468",
+        "product_url": "https://www.drogariaspacheco.com.br/produto/155349/p",
+        "source_image_url": "https://images.example.test/pacheco-155349.jpg",
+    }
+    manifest.write_text(json.dumps(metadata), encoding="utf-8")
+    content.write_bytes(b"pending image bytes")
+    attempts = []
+
+    async def conflict(_client, sent_metadata, sent_content):
+        attempts.append((sent_metadata, sent_content))
+        raise BatchSyncError("scraper_image_upload_rejected:409")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", conflict)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(BatchSyncError, match="rejected:409"):
+            await scraper_image_client.sync_pending_image_outbox(client, "pacheco")
+
+    assert attempts == [(metadata, b"pending image bytes")]
+    assert json.loads(manifest.read_text(encoding="utf-8")) == metadata
+    assert content.read_bytes() == b"pending image bytes"
 
 
 @pytest.mark.asyncio
@@ -117,6 +153,36 @@ async def test_generic_source_image_is_skipped_without_download_or_upload(
 
     assert result == {"skipped": "generic_asset"}
     assert requests == []
+    assert not (tmp_path / "outbox" / "images" / "araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_source_image_does_not_create_outbox(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+
+    async def missing_image(_request):
+        return httpx.Response(404)
+
+    async def upload(*_args, **_kwargs):
+        raise AssertionError("unavailable images must not be uploaded")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
+    product = {
+        "sku_interno": "ARJ101392",
+        "ean": "7897705203095",
+        "link": "https://www.araujo.com.br/produto/101392.html",
+        "imagem_url": "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(missing_image)
+    ) as client:
+        result = await scraper_image_client.download_and_upload_product_image(
+            client, "araujo", product
+        )
+
+    assert result is None
     assert not (tmp_path / "outbox" / "images" / "araujo").exists()
 
 

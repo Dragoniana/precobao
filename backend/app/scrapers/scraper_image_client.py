@@ -94,9 +94,12 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
     if not directory.exists():
         return 0
     manifests = {path.stem for path in directory.glob("*.json")}
+    orphan_directory = directory / "quarantine" / "orphaned"
     for content_path in directory.glob("*.bin"):
         if content_path.stem not in manifests:
-            content_path.unlink(missing_ok=True)
+            orphan_directory.mkdir(parents=True, exist_ok=True)
+            destination = orphan_directory / f"{content_path.stem}-{uuid4().hex}.bin"
+            content_path.replace(destination)
     uploaded = 0
     quarantine = directory / "quarantine"
     for metadata_path in sorted(directory.glob("*.json")):
