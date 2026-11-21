@@ -21,6 +21,7 @@ import httpx
 from app.scrapers.scraper_batch_client import BatchSyncError, post_batch
 from app.scrapers.scraper_image_client import (
     download_and_upload_product_image,
+    pending_image_outbox_status,
     sync_pending_image_outbox,
 )
 from app.scrapers.source_modes import (
@@ -45,9 +46,35 @@ def _outbox_path(source: str) -> Path:
     return _state_dir() / "outbox" / f"{source}.pending.json"
 
 
+def _rejected_products_path(source: str) -> Path:
+    return _state_dir() / "rejected" / f"{source}.json"
+
+
 def _stop_requested() -> bool:
     marker = os.getenv("SCRAPER_COLLECTOR_STOP_FILE", "").strip()
     return bool(marker and Path(marker).exists())
+
+
+def _sync_failure_state(error: BatchSyncError) -> tuple[str, str]:
+    if error.status_code == 403:
+        return "SYNC_BLOCKED", "access_denied"
+    if error.status_code == 401:
+        return "SYNC_AUTH_FAILED", "hmac_invalid"
+    if error.status_code == 409:
+        return "SYNC_CONFLICT", "batch_conflict"
+    if error.status_code == 429:
+        return "RATE_LIMITED", "rate_limited"
+    if error.status_code in {400, 422}:
+        return "SYNC_INVALID", "validation_error"
+    if error.status_code in {500, 502, 503, 504}:
+        return "SYNC_UNAVAILABLE", "server_error"
+    if error.status_code is None:
+        reason = str(error)
+        if "timeout" in reason:
+            return "SYNC_FAILED", "timeout"
+        if "transport" in reason:
+            return "SYNC_FAILED", "connection_error"
+    return "SYNC_FAILED", "http_rejected"
 
 
 def _select_page_products(
@@ -56,6 +83,27 @@ def _select_page_products(
     if limit is None:
         return products
     return products[: max(0, limit - selected)]
+
+
+def _configured_product_limit() -> int | None:
+    raw_limit = os.getenv("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", "").strip()
+    scheduled = os.getenv("SCRAPER_COLLECTOR_SCHEDULED", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not raw_limit:
+        if scheduled:
+            raise RuntimeError("SCHEDULED_PRODUCT_LIMIT_REQUIRED")
+        return None
+    try:
+        limit = int(raw_limit)
+    except ValueError as error:
+        raise RuntimeError("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN_INVALID") from error
+    if limit < 1 or (scheduled and limit > 50):
+        raise RuntimeError("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN_INVALID")
+    return limit
 
 
 def _read_state(source: str) -> dict[str, Any]:
@@ -92,6 +140,58 @@ def _write_outbox(source: str, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _persist_rejected_products(
+    source: str, batch: dict[str, Any], rejected: list[dict[str, Any]]
+) -> None:
+    if not rejected:
+        return
+    path = _rejected_products_path(source)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("SCRAPER_REJECTED_QUEUE_INVALID") from error
+    indexed = {
+        (item.get("batch_id"), item.get("sku_interno"), item.get("reason")): item
+        for item in existing
+        if isinstance(item, dict)
+    }
+    products = {
+        (str(product.get("sku_interno")), str(product.get("link"))): product
+        for product in batch.get("products", [])
+    }
+    for item in rejected:
+        sku = str(item.get("sku_interno") or "")
+        link = str(item.get("link") or "")
+        product = products.get((sku, link))
+        key = (batch.get("batch_id"), sku, item.get("reason"))
+        if key in indexed:
+            continue
+        indexed[key] = {
+            "batch_id": batch.get("batch_id"),
+            "source": source,
+            "rejected_at": datetime.now(UTC).isoformat(),
+            "reason": item.get("reason"),
+            "product_id": item.get("product_id"),
+            "sku_interno": sku,
+            "ean": item.get("ean"),
+            "link": link,
+            "product": product,
+        }
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{source}-rejected-", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(list(indexed.values()), stream, ensure_ascii=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -170,11 +270,14 @@ def _record_image_failure(
 ) -> None:
     # Reasons come from controlled error labels; discard anything that could
     # contain a URL, response body, or credential before persisting/logging.
-    safe_reason = "".join(
-        character
-        for character in str(reason)
-        if character.isalnum() or character in "_.:-"
-    )[:120] or "image_failure"
+    safe_reason = (
+        "".join(
+            character
+            for character in str(reason)
+            if character.isalnum() or character in "_.:-"
+        )[:120]
+        or "image_failure"
+    )
     state["image_sync_status"] = "PARTIAL"
     if category == "download":
         state["image_download_failures"] += 1
@@ -220,7 +323,13 @@ def _require_direct_collection(source: str) -> None:
     if source_mode(source) is not SourceMode.DIRECT or not direct_access_ready(source):
         raise RuntimeError(f"{source.upper()}_DIRECT_ACCESS_NOT_CONFIRMED")
     previous = _read_state(source)
-    if previous.get("status") in {"ACCESS_BLOCKED", "SYNC_BLOCKED"}:
+    if previous.get("status") in {
+        "ACCESS_BLOCKED",
+        "SYNC_BLOCKED",
+        "SYNC_AUTH_FAILED",
+        "SYNC_CONFLICT",
+        "SYNC_INVALID",
+    }:
         raise RuntimeError(
             f"{source.upper()}_{previous['status']}_MANUAL_RESET_REQUIRED"
         )
@@ -242,14 +351,7 @@ def _require_direct_collection(source: str) -> None:
 
 async def _collect_and_sync(source: str) -> dict[str, Any]:
     _require_direct_collection(source)
-    configured_product_limit = os.getenv(
-        "SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", ""
-    ).strip()
-    max_products_per_run = (
-        int(configured_product_limit) if configured_product_limit else None
-    )
-    if max_products_per_run is not None and max_products_per_run < 1:
-        raise RuntimeError("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN_MUST_BE_POSITIVE")
+    max_products_per_run = _configured_product_limit()
     products_selected = 0
     product_limit_reached = False
     previous = _read_state(source)
@@ -260,6 +362,8 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "attempt": int(previous.get("attempt", 0)) + 1,
         "batches_sent": 0,
         "products_sent": 0,
+        "products_rejected": 0,
+        "rejected_items": [],
         "catalog_created": 0,
         "offers_created": 0,
         "offers_updated": 0,
@@ -288,10 +392,20 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         async def sync_payload(payload: dict[str, Any]) -> dict[str, Any]:
             _write_outbox(source, payload)
             response = await post_batch(client, payload)
+            rejected_items = response.get("rejected_items") or []
+            _persist_rejected_products(source, payload, rejected_items)
             _outbox_path(source).unlink(missing_ok=True)
-            product_count = len(payload["products"])
+            accepted_count = int(
+                response.get(
+                    "accepted_count",
+                    response.get("product_count", len(payload["products"])),
+                )
+            )
+            rejected_count = int(response.get("rejected_count", len(rejected_items)))
             state["batches_sent"] += 1
-            state["products_sent"] += product_count
+            state["products_sent"] += accepted_count
+            state["products_rejected"] += rejected_count
+            state["rejected_items"].extend(rejected_items)
             state["catalog_created"] += int(response.get("catalog_created", 0))
             state["offers_created"] += int(response.get("offers_created", 0))
             state["offers_updated"] += int(response.get("offers_updated", 0))
@@ -299,6 +413,9 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             state["images_registered"] += int(response.get("images_registered", 0))
             state["images_missing"] += int(response.get("images_missing", 0))
             state["last_batch_id"] = payload["batch_id"]
+            if rejected_count:
+                state["status"] = "PARTIAL"
+                state["stop_reason"] = "identity_conflicts_quarantined"
             _write_state(source, state)
             return response
 
@@ -308,10 +425,10 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             try:
                 await sync_payload(pending)
             except BatchSyncError as error:
-                state["status"] = (
-                    "SYNC_BLOCKED" if error.status_code == 403 else "SYNC_FAILED"
-                )
+                state["status"], state["failure_category"] = _sync_failure_state(error)
                 state["stop_reason"] = str(error)
+                if error.retry_after_seconds is not None:
+                    state["retry_after_seconds"] = error.retry_after_seconds
                 _write_state(source, state)
                 raise
             _log("pending_batch_replayed", source=source, batch_id=pending["batch_id"])
@@ -319,6 +436,10 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         try:
             replayed_images = await sync_pending_image_outbox(client, source)
             state["image_blobs_uploaded"] += replayed_images
+            image_outbox_status = pending_image_outbox_status(source)
+            state["image_outbox_pending"] = image_outbox_status["pending"]
+            state["image_outbox_dead_letter"] = image_outbox_status["dead_letter"]
+            state["image_outbox_backoff"] = image_outbox_status["backoff"]
             if replayed_images:
                 _write_state(source, state)
                 _log("pending_images_replayed", source=source, images=replayed_images)
@@ -364,13 +485,19 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             try:
                 response = await sync_payload(payload)
             except BatchSyncError as error:
-                state["status"] = (
-                    "SYNC_BLOCKED" if error.status_code == 403 else "SYNC_FAILED"
-                )
+                state["status"], state["failure_category"] = _sync_failure_state(error)
                 state["stop_reason"] = str(error)
+                if error.retry_after_seconds is not None:
+                    state["retry_after_seconds"] = error.retry_after_seconds
                 _write_state(source, state)
                 raise
+            rejected_skus = {
+                str(item.get("sku_interno") or "")
+                for item in response.get("rejected_items", [])
+            }
             for product in normalized:
+                if str(product.get("sku_interno") or "") in rejected_skus:
+                    continue
                 if not product.get("imagem_url"):
                     _record_image_failure(
                         state,
@@ -433,7 +560,8 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 "page_synced",
                 source=source,
                 batch_id=payload["batch_id"],
-                products=len(normalized),
+                products=int(response.get("accepted_count", len(normalized))),
+                rejected=int(response.get("rejected_count", 0)),
                 status=response.get("status"),
             )
 
@@ -545,6 +673,12 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
 
             if state["status"] == "RUNNING":
                 state["status"] = "COMPLETE"
+            if state.get("products_rejected", 0) and state["status"] in {
+                "RUNNING",
+                "COMPLETE",
+            }:
+                state["status"] = "PARTIAL"
+                state["stop_reason"] = "identity_conflicts_quarantined"
             if state["status"] == "ACCESS_BLOCKED":
                 state["stop_reason"] = "http_403"
             state["finished_at"] = datetime.now(UTC).isoformat()
@@ -577,7 +711,14 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             )
             return state
         except Exception as error:
-            if state.get("status") not in {"SYNC_BLOCKED", "SYNC_FAILED"}:
+            if state.get("status") not in {
+                "SYNC_BLOCKED",
+                "SYNC_AUTH_FAILED",
+                "SYNC_CONFLICT",
+                "SYNC_INVALID",
+                "SYNC_UNAVAILABLE",
+                "SYNC_FAILED",
+            }:
                 state["status"] = "FAILED"
                 state["stop_reason"] = type(error).__name__
             state["finished_at"] = datetime.now(UTC).isoformat()

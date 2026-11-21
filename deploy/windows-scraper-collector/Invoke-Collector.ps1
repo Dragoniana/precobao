@@ -1,7 +1,9 @@
 param(
     [ValidateSet('araujo', 'pacheco', 'both')]
     [string]$Source = 'both',
-    [string]$ScheduledSlot = ''
+    [string]$ScheduledSlot = '',
+    [ValidateRange(0, 50)]
+    [int]$MaxProductsPerRun = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +13,22 @@ if (-not (Test-Path $settingsPath)) { throw 'Execute Install-Collector.ps1 prime
 $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json
 if (-not $settings.api_ready -or -not $settings.collector_enabled) {
     throw 'API/coletor não habilitados na configuração local.'
+}
+if ($ScheduledSlot -and $MaxProductsPerRun -lt 1) {
+    throw 'Agendamento exige limite explícito de 1 a 50 produtos por execução.'
+}
+if ($ScheduledSlot -and $Source -eq 'both') {
+    throw 'Uma tarefa agendada deve executar uma única farmácia.'
+}
+if ($MaxProductsPerRun -gt 0) {
+    $env:SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN = [string]$MaxProductsPerRun
+} else {
+    Remove-Item Env:SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN -ErrorAction SilentlyContinue
+}
+if ($ScheduledSlot) {
+    $env:SCRAPER_COLLECTOR_SCHEDULED = 'true'
+} else {
+    Remove-Item Env:SCRAPER_COLLECTOR_SCHEDULED -ErrorAction SilentlyContinue
 }
 if ([TimeZoneInfo]::Local.Id -notin @('E. South America Standard Time', 'SA Eastern Standard Time')) {
     throw 'Configure o fuso do Windows para America/Sao_Paulo (UTC-03:00) antes de executar.'

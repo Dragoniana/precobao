@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,6 +22,11 @@ from app.services.imagens import (
 )
 from app.services.medicine_images import InvalidMedicineImage, normalize_medicine_image
 
+logger = logging.getLogger(__name__)
+_MAX_IMAGE_UPLOAD_ATTEMPTS = 8
+_IMAGE_RETRY_BASE_SECONDS = 60
+_IMAGE_RETRY_MAX_SECONDS = 12 * 60 * 60
+
 
 def _image_outbox_dir(source: str) -> Path:
     state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
@@ -29,6 +36,42 @@ def _image_outbox_dir(source: str) -> Path:
 def _generic_image_cache_path() -> Path:
     state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
     return state_dir.resolve() / "generic-image-cache.json"
+
+
+def _blocked_source_images_path() -> Path:
+    state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
+    return state_dir.resolve() / "blocked-source-images.json"
+
+
+def _source_image_key(source: str, image_url: str) -> str:
+    return hashlib.sha256(f"{source}\n{image_url}".encode("utf-8")).hexdigest()
+
+
+def _source_image_is_blocked(source: str, image_url: str) -> bool:
+    try:
+        entries = json.loads(_blocked_source_images_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return False
+    return _source_image_key(source, image_url) in entries
+
+
+def _remember_blocked_source_image(
+    source: str, image_url: str, sku: str, reason: str
+) -> None:
+    path = _blocked_source_images_path()
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(entries, dict):
+            entries = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        entries = {}
+    entries[_source_image_key(source, image_url)] = {
+        "source": source,
+        "sku": sku,
+        "reason": reason,
+        "blocked_at": datetime.now(UTC).isoformat(),
+    }
+    _atomic_write(path, json.dumps(entries, ensure_ascii=False).encode("utf-8"))
 
 
 def _generic_image_cache_key(metadata: dict[str, Any]) -> str:
@@ -126,10 +169,87 @@ async def _submit_pending_image(
     client: httpx.AsyncClient, metadata_path: Path
 ) -> dict[str, Any]:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("status") == "DEAD_LETTER":
+        raise BatchSyncError("scraper_image_upload_dead_letter")
+    next_retry_at = metadata.get("next_retry_at")
+    if next_retry_at:
+        try:
+            retry_at = datetime.fromisoformat(next_retry_at)
+        except (TypeError, ValueError) as error:
+            raise BatchSyncError("scraper_image_outbox_invalid_retry_time") from error
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) < retry_at.astimezone(UTC):
+            raise BatchSyncError("scraper_image_upload_backoff_active")
     content_path = metadata_path.with_suffix(".bin")
     if not content_path.is_file():
         raise BatchSyncError("scraper_image_outbox_content_missing")
-    result = await post_image_upload(client, metadata, content_path.read_bytes())
+    attempt_count = int(metadata.get("attempt_count", 0)) + 1
+    metadata.update(
+        {
+            "attempt_count": attempt_count,
+            "last_attempt_at": datetime.now(UTC).isoformat(),
+            "status": "UPLOADING",
+            "next_retry_at": None,
+        }
+    )
+    _atomic_write(
+        metadata_path,
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+    try:
+        internal_fields = {
+            "attempt_count",
+            "last_attempt_at",
+            "status",
+            "next_retry_at",
+            "last_error",
+        }
+        upload_metadata = {
+            key: value for key, value in metadata.items() if key not in internal_fields
+        }
+        result = await post_image_upload(
+            client, upload_metadata, content_path.read_bytes()
+        )
+    except BatchSyncError as error:
+        permanent = (
+            error.status_code is not None
+            and 400 <= error.status_code < 500
+            and error.status_code != 429
+        )
+        exhausted = attempt_count >= _MAX_IMAGE_UPLOAD_ATTEMPTS
+        if permanent or exhausted:
+            metadata["status"] = "DEAD_LETTER"
+            metadata["next_retry_at"] = None
+        else:
+            delay = min(
+                _IMAGE_RETRY_BASE_SECONDS * (2 ** min(attempt_count - 1, 12)),
+                _IMAGE_RETRY_MAX_SECONDS,
+            )
+            if error.retry_after_seconds is not None:
+                delay = max(delay, error.retry_after_seconds)
+            metadata["status"] = "PENDING"
+            metadata["next_retry_at"] = (
+                datetime.now(UTC) + timedelta(seconds=delay)
+            ).isoformat()
+        metadata["last_error"] = error.error_code or str(error)[:120]
+        _atomic_write(
+            metadata_path,
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+        )
+        logger.warning(
+            "scraper_image_upload_failed",
+            extra={
+                "source": metadata.get("source"),
+                "sku": metadata.get("sku"),
+                "attempt": attempt_count,
+                "status": metadata["status"],
+                "reason": metadata["last_error"],
+            },
+        )
+        raise
     _remember_generic_image(metadata)
     # The manifest is the outbox commit marker. Remove it first so an
     # interruption can leave only a harmless orphaned binary, never a broken
@@ -153,12 +273,58 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
     uploaded = 0
     for metadata_path in sorted(directory.glob("*.json")):
         try:
+            current = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if current.get("status") == "DEAD_LETTER":
+                continue
+            next_retry_at = current.get("next_retry_at")
+            if next_retry_at:
+                retry_at = datetime.fromisoformat(next_retry_at)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                if datetime.now(UTC) < retry_at.astimezone(UTC):
+                    continue
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            logger.warning("scraper_image_outbox_invalid", extra={"source": source})
+            continue
+        try:
             await _submit_pending_image(client, metadata_path)
-        except (OSError, json.JSONDecodeError) as error:
-            raise BatchSyncError("scraper_image_outbox_invalid") from error
+        except (OSError, json.JSONDecodeError):
+            logger.warning("scraper_image_outbox_invalid", extra={"source": source})
+            continue
+        except BatchSyncError:
+            continue
         else:
             uploaded += 1
     return uploaded
+
+
+def pending_image_outbox_status(source: str) -> dict[str, int]:
+    directory = _image_outbox_dir(source)
+    result = {"pending": 0, "dead_letter": 0, "backoff": 0}
+    if not directory.exists():
+        return result
+    now = datetime.now(UTC)
+    for path in directory.glob("*.json"):
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            result["pending"] += 1
+            continue
+        if metadata.get("status") == "DEAD_LETTER":
+            result["dead_letter"] += 1
+            continue
+        result["pending"] += 1
+        retry = metadata.get("next_retry_at")
+        if retry:
+            try:
+                retry_at = datetime.fromisoformat(retry)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                if retry_at.astimezone(UTC) > now:
+                    result["backoff"] += 1
+            except (TypeError, ValueError):
+                pass
+    return result
 
 
 async def download_and_upload_product_image(
@@ -174,11 +340,11 @@ async def download_and_upload_product_image(
     )
     if rejection:
         return {
-            "image_failure_reason": _failure_reason(
-                rejection, "image_source_rejected"
-            )
+            "image_failure_reason": _failure_reason(rejection, "image_source_rejected")
         }
     generic = is_generic_image_url(image_url)
+    if _source_image_is_blocked(source, image_url):
+        return {"image_failure_reason": "image_source_previously_blocked"}
     if generic and _generic_image_is_cached(
         {
             "source": source,
@@ -205,11 +371,15 @@ async def download_and_upload_product_image(
     except httpx.HTTPError:
         return {"image_failure_reason": "image_download_transport_error"}
     except InvalidMedicineImage as error:
-        return {
-            "image_failure_reason": _failure_reason(
-                str(error), "invalid_source_image"
+        reason = _failure_reason(str(error), "invalid_source_image")
+        if reason in {"image_source_http_403", "image_source_http_404"}:
+            _remember_blocked_source_image(
+                source,
+                image_url,
+                str(product.get("sku_interno") or ""),
+                reason,
             )
-        }
+        return {"image_failure_reason": reason}
     except OSError:
         return {"image_failure_reason": "image_local_io_error"}
     except ValueError:

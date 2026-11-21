@@ -57,12 +57,16 @@ async def test_image_outbox_retries_same_binary_and_upload_id(monkeypatch, tmp_p
         assert metadata["upload_id"]
         assert metadata["content_sha256"]
         assert len(saved_content) <= 512 * 1024
+        # Simulate that the persisted retry-after time has elapsed.
+        metadata["next_retry_at"] = None
+        manifest.write_text(json.dumps(metadata), encoding="utf-8")
 
         assert (
             await scraper_image_client.sync_pending_image_outbox(client, "araujo") == 1
         )
 
-    assert attempts[0][0] == attempts[1][0] == metadata
+    assert attempts[0][0] == attempts[1][0]
+    assert attempts[0][0]["upload_id"] == metadata["upload_id"]
     assert attempts[0][1] == attempts[1][1] == saved_content
     assert not manifest.exists()
     assert not image_path.exists()
@@ -87,7 +91,9 @@ async def test_image_outbox_quarantines_orphaned_binary(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_http_409_keeps_pending_image_for_manual_review(monkeypatch, tmp_path):
+async def test_http_409_dead_letters_pending_image_without_deleting_bytes(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
     outbox = tmp_path / "outbox" / "images" / "pacheco"
     outbox.mkdir(parents=True)
@@ -107,16 +113,101 @@ async def test_http_409_keeps_pending_image_for_manual_review(monkeypatch, tmp_p
 
     async def conflict(_client, sent_metadata, sent_content):
         attempts.append((sent_metadata, sent_content))
-        raise BatchSyncError("scraper_image_upload_rejected:409")
+        raise BatchSyncError("scraper_image_upload_rejected:409", status_code=409)
 
     monkeypatch.setattr(scraper_image_client, "post_image_upload", conflict)
     async with httpx.AsyncClient() as client:
-        with pytest.raises(BatchSyncError, match="rejected:409"):
-            await scraper_image_client.sync_pending_image_outbox(client, "pacheco")
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "pacheco") == 0
+        )
 
     assert attempts == [(metadata, b"pending image bytes")]
-    assert json.loads(manifest.read_text(encoding="utf-8")) == metadata
+    stored = json.loads(manifest.read_text(encoding="utf-8"))
+    assert stored["status"] == "DEAD_LETTER"
+    assert stored["attempt_count"] == 1
+    assert stored["last_error"] == "scraper_image_upload_rejected:409"
     assert content.read_bytes() == b"pending image bytes"
+    assert scraper_image_client.pending_image_outbox_status("pacheco") == {
+        "pending": 0,
+        "dead_letter": 1,
+        "backoff": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_transient_image_upload_uses_backoff_and_preserves_manifest(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "araujo"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "pending.json"
+    content = outbox / "pending.bin"
+    manifest.write_text(
+        json.dumps(
+            {
+                "upload_id": "pending",
+                "source": "araujo",
+                "sku": "ARJ1",
+                "product_url": "https://www.araujo.com.br/produto/1",
+                "source_image_url": "https://images.example.test/1.webp",
+            }
+        ),
+        encoding="utf-8",
+    )
+    content.write_bytes(b"normalized image")
+    calls = []
+
+    async def unavailable(*_args):
+        calls.append(1)
+        raise BatchSyncError("image server error", status_code=503)
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", unavailable)
+    async with httpx.AsyncClient() as client:
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "araujo") == 0
+        )
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "araujo") == 0
+        )
+
+    stored = json.loads(manifest.read_text(encoding="utf-8"))
+    assert len(calls) == 1
+    assert stored["status"] == "PENDING"
+    assert stored["attempt_count"] == 1
+    assert stored["next_retry_at"]
+    assert content.read_bytes() == b"normalized image"
+    assert scraper_image_client.pending_image_outbox_status("araujo")["backoff"] == 1
+
+
+@pytest.mark.asyncio
+async def test_image_source_403_is_recorded_and_not_retried(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    requests = []
+
+    async def blocked(request):
+        requests.append(request)
+        return httpx.Response(403)
+
+    product = {
+        "sku_interno": "ARJ87819",
+        "ean": None,
+        "link": "https://www.araujo.com.br/produto/87819.html",
+        "imagem_url": "https://i3-imagens-prd.araujo.com.br/87819/item.webp",
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(blocked)) as client:
+        first = await scraper_image_client.download_and_upload_product_image(
+            client, "araujo", product
+        )
+        second = await scraper_image_client.download_and_upload_product_image(
+            client, "araujo", product
+        )
+
+    assert first["image_failure_reason"] == "image_source_http_403"
+    assert second["image_failure_reason"] == "image_source_previously_blocked"
+    assert len(requests) == 1
+    stored = json.loads((tmp_path / "blocked-source-images.json").read_text())
+    assert len(stored) == 1
 
 
 @pytest.mark.asyncio
@@ -223,9 +314,7 @@ async def test_source_image_timeout_is_recorded_without_retries(monkeypatch, tmp
         "link": "https://www.araujo.com.br/produto/101392.html",
         "imagem_url": "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
     }
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(timeout)
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
         result = await scraper_image_client.download_and_upload_product_image(
             client, "araujo", product
         )

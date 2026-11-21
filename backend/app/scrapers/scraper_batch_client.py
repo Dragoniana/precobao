@@ -16,8 +16,17 @@ import httpx
 
 
 class BatchSyncError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.error_code = error_code
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(message)
 
 
@@ -98,8 +107,19 @@ async def post_batch(
                 payload = response.json()
             except ValueError as error:
                 raise BatchSyncError("scraper_ingest_invalid_response") from error
-            if payload.get("status") != "COMPLETE":
+            if payload.get("status") not in {"COMPLETE", "PARTIAL"}:
                 raise BatchSyncError("scraper_ingest_batch_not_complete")
+            accepted = int(
+                payload.get("accepted_count", payload.get("product_count", 0))
+            )
+            rejected = int(payload.get("rejected_count", 0))
+            if (
+                accepted < 0
+                or rejected < 0
+                or accepted + rejected
+                != int(payload.get("product_count", accepted + rejected))
+            ):
+                raise BatchSyncError("scraper_ingest_partial_counts_invalid")
             return payload
         if response.status_code == 403:
             raise BatchSyncError("scraper_ingest_forbidden", status_code=403)
@@ -107,7 +127,9 @@ async def post_batch(
             retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
             if attempt >= max_retries:
                 raise BatchSyncError(
-                    f"scraper_ingest_rate_limited:{retry_after}", status_code=429
+                    f"scraper_ingest_rate_limited:{retry_after}",
+                    status_code=429,
+                    retry_after_seconds=retry_after,
                 )
             await _sleep(float(retry_after) if retry_after is not None else delay)
             delay = min(delay * 2, 8.0)
@@ -121,9 +143,25 @@ async def post_batch(
             await _sleep(delay)
             delay = min(delay * 2, 8.0)
             continue
+        error_code = None
+        try:
+            detail = response.json().get("detail")
+            error_code = detail if isinstance(detail, str) else None
+        except (ValueError, AttributeError):
+            pass
+        category = {
+            400: "validation",
+            401: "hmac_invalid",
+            409: "identity_conflict"
+            if error_code == "scraper_product_identity_conflict"
+            else "batch_conflict",
+            403: "access_denied",
+            422: "validation",
+        }.get(response.status_code, "http_rejected")
         raise BatchSyncError(
-            f"scraper_ingest_rejected:{response.status_code}",
+            f"scraper_ingest_{category}:{response.status_code}",
             status_code=response.status_code,
+            error_code=error_code,
         )
     raise BatchSyncError("scraper_ingest_retry_exhausted")
 
@@ -199,7 +237,9 @@ async def post_image_upload(
             retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
             if attempt >= max_retries:
                 raise BatchSyncError(
-                    f"scraper_image_upload_rate_limited:{retry_after}", status_code=429
+                    f"scraper_image_upload_rate_limited:{retry_after}",
+                    status_code=429,
+                    retry_after_seconds=retry_after,
                 )
             await _sleep(float(retry_after) if retry_after is not None else delay)
             delay = min(delay * 2, 8.0)

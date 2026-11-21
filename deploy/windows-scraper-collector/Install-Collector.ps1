@@ -50,6 +50,11 @@ if (-not (Test-Path $settingsPath)) {
         log_file = (Join-Path $StateDir 'logs\collector.log')
         timezone = 'America/Sao_Paulo'
         schedule_times = @('08:00', '20:00')
+        max_products_per_run = 50
+        source_schedule_times = @{
+            araujo = @('08:00', '20:00')
+            pacheco = @('10:00', '22:00')
+        }
         missed_run_grace_minutes = 120
         sources = @{
             araujo = @{ mode = 'DISABLED'; access_confirmed = $false }

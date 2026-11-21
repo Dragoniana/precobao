@@ -26,6 +26,76 @@ def test_pilot_item_cap_limits_batches_across_source_pages():
     assert scraper_collector._select_page_products(page_two, 0, None) == page_two
 
 
+@pytest.mark.parametrize(
+    ("scheduled", "limit", "expected", "message"),
+    [
+        ("true", "", None, "SCHEDULED_PRODUCT_LIMIT_REQUIRED"),
+        ("true", "0", None, "MAX_PRODUCTS_PER_RUN_INVALID"),
+        ("true", "51", None, "MAX_PRODUCTS_PER_RUN_INVALID"),
+        ("true", "50", 50, None),
+        ("", "50", 50, None),
+    ],
+)
+def test_scheduled_product_limit_fails_closed(
+    monkeypatch, scheduled, limit, expected, message
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_SCHEDULED", scheduled)
+    monkeypatch.setenv("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", limit)
+    if message:
+        with pytest.raises(RuntimeError, match=message):
+            scraper_collector._configured_product_limit()
+    else:
+        assert scraper_collector._configured_product_limit() == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (401, "scraper_ingest_hmac_invalid:401", ("SYNC_AUTH_FAILED", "hmac_invalid")),
+        (403, "scraper_ingest_forbidden", ("SYNC_BLOCKED", "access_denied")),
+        (409, "scraper_ingest_batch_conflict:409", ("SYNC_CONFLICT", "batch_conflict")),
+        (429, "scraper_ingest_rate_limited", ("RATE_LIMITED", "rate_limited")),
+        (503, "scraper_ingest_server_error:503", ("SYNC_UNAVAILABLE", "server_error")),
+        (None, "scraper_ingest_timeout", ("SYNC_FAILED", "timeout")),
+        (None, "scraper_ingest_transport_error", ("SYNC_FAILED", "connection_error")),
+    ],
+)
+def test_sync_http_failures_have_distinct_categories(status, message, expected):
+    error = sync_client.BatchSyncError(message, status_code=status)
+    assert scraper_collector._sync_failure_state(error) == expected
+
+
+def test_rejected_item_queue_is_persistent_and_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    batch = {
+        "batch_id": "batch-one",
+        "products": [
+            {
+                "sku_interno": "PCH155349",
+                "ean": "7891721027468",
+                "preco": 9.4,
+                "link": "https://www.drogariaspacheco.com.br/produto/155349/p",
+            }
+        ],
+    }
+    rejected = [
+        {
+            "product_id": "155349",
+            "sku_interno": "PCH155349",
+            "ean": "7891721027468",
+            "link": batch["products"][0]["link"],
+            "reason": "ean_catalog_mismatch",
+        }
+    ]
+    scraper_collector._persist_rejected_products("pacheco", batch, rejected)
+    scraper_collector._persist_rejected_products("pacheco", batch, rejected)
+    path = tmp_path / "rejected" / "pacheco.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert len(stored) == 1
+    assert stored[0]["product"]["preco"] == 9.4
+    assert stored[0]["reason"] == "ean_catalog_mismatch"
+
+
 @pytest.mark.asyncio
 async def test_batch_client_uses_https_and_signed_body(monkeypatch):
     monkeypatch.setenv(
@@ -87,6 +157,74 @@ async def test_batch_client_does_not_retry_403(monkeypatch):
     with pytest.raises(sync_client.BatchSyncError, match="forbidden"):
         await sync_client.post_batch(client, {"batch_id": "blocked"})
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_client_classifies_409_without_retry(monkeypatch):
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv(
+        "SCRAPER_INGEST_HMAC_SECRET", "collector-secret-which-is-longer-than-32"
+    )
+
+    class Response:
+        status_code = 409
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"detail": "batch_id_payload_conflict"}
+
+    class Client:
+        calls = 0
+
+        async def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return Response()
+
+    client = Client()
+    with pytest.raises(sync_client.BatchSyncError) as captured:
+        await sync_client.post_batch(client, {"batch_id": "conflict"})
+    assert client.calls == 1
+    assert captured.value.status_code == 409
+    assert captured.value.error_code == "batch_id_payload_conflict"
+    assert scraper_collector._sync_failure_state(captured.value) == (
+        "SYNC_CONFLICT",
+        "batch_conflict",
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_client_accepts_partial_response_with_consistent_counts(
+    monkeypatch,
+):
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv(
+        "SCRAPER_INGEST_HMAC_SECRET", "collector-secret-which-is-longer-than-32"
+    )
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {
+                "status": "PARTIAL",
+                "product_count": 2,
+                "accepted_count": 1,
+                "rejected_count": 1,
+                "rejected_items": [
+                    {"sku_interno": "PCH1", "reason": "ean_catalog_mismatch"}
+                ],
+            }
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+    result = await sync_client.post_batch(Client(), {"batch_id": "partial"})
+    assert result["status"] == "PARTIAL"
+    assert result["accepted_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -264,6 +402,7 @@ async def test_image_failures_do_not_interrupt_confirmed_price_batches(
     pending_blob.write_bytes(b"image bytes remain queued")
 
     posted = []
+
     async def post_batch(_client, payload):
         posted.append(payload)
         return {"status": "COMPLETE", "offers_updated": len(payload["products"])}
