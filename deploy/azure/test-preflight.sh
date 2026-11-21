@@ -18,6 +18,17 @@ WEB_CONTAINER_IP=172.29.240.4
 DATABASE_URL=postgresql+psycopg2://preflight:non-secret-test-password@preflight.postgres.database.azure.com:5432/preflight?sslmode=verify-full&sslrootcert=/run/secrets/azure-postgres-root-ca.pem
 AZURE_PG_ROOT_CERT_PATH=/etc/ssl/certs/ca-certificates.crt
 JWT_SECRET=preflight-only-not-a-production-secret-9c6f34d220a2
+SMTP_HOST=smtp.example.test
+SMTP_PORT=587
+SMTP_STARTTLS=true
+SMTP_USERNAME=preflight@example.test
+SMTP_PASSWORD=preflight-only-password-not-for-deployment
+SMTP_FROM_EMAIL=preflight@example.test
+SMTP_FROM_NAME=Preflight
+SMTP_TIMEOUT_SECONDS=10
+PASSWORD_RESET_URL=https://precobao.app/reset-password
+SCRAPER_INGEST_HMAC_SECRET=preflight-only-hmac-secret-32-bytes-minimum
+SCRAPER_INGEST_ALLOWED_SOURCES=araujo,pacheco
 SCRAPER_STATE_HOST_DIR=$test_dir/scraper-state
 INDIANA_SCRAPER_ENABLED=true
 OFFER_REFRESH_ENABLED=true

@@ -1,4 +1,16 @@
-import { resolveApiUrl } from '../services/apiConfig';
+import { getConfiguredApiUrl, resolveApiUrl } from '../services/apiConfig';
+
+describe('production API configuration', () => {
+  it('uses the Expo manifest URL when Metro does not inline the environment variable', () => {
+    const configured = getConfiguredApiUrl(undefined, 'https://precobao.app/backend');
+    expect(resolveApiUrl(configured, 'web', false)).toBe('https://precobao.app/backend');
+  });
+
+  it('prefers the explicit build environment and preserves the /backend path', () => {
+    const configured = getConfiguredApiUrl('https://precobao.app/backend', 'https://other.example/api');
+    expect(resolveApiUrl(configured, 'web', false)).toBe('https://precobao.app/backend');
+  });
+});
 
 describe('resolveApiUrl', () => {
   it('uses the Android emulator host for a local development API', () => {

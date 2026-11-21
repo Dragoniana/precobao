@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
-import { api, tokenStorage } from '../services/api';
+import { api, guestSessionStorage, tokenStorage } from '../services/api';
 import { useAuthSession } from '../hooks/useAuthSession';
 
 const user = {
@@ -13,6 +13,9 @@ beforeEach(() => {
   (tokenStorage.get as jest.Mock).mockResolvedValue(null);
   (tokenStorage.set as jest.Mock).mockResolvedValue(undefined);
   (tokenStorage.delete as jest.Mock).mockResolvedValue(undefined);
+  (guestSessionStorage.get as jest.Mock).mockResolvedValue(false);
+  (guestSessionStorage.set as jest.Mock).mockResolvedValue(undefined);
+  (guestSessionStorage.delete as jest.Mock).mockResolvedValue(undefined);
 });
 
 it('only completes login after validating the token and supports persistent logout', async () => {
@@ -48,6 +51,26 @@ it('restores only a token validated by the backend', async () => {
   await waitFor(() => expect(expired.result.current.isLoading).toBe(false));
   expect(expired.result.current.isAuthenticated).toBe(false);
   expect(tokenStorage.delete).toHaveBeenCalled();
+});
+
+it('restores a previously selected guest session after reload', async () => {
+  (guestSessionStorage.get as jest.Mock).mockResolvedValue(true);
+  const { result } = await renderHook(() => useAuthSession());
+
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+  expect(result.current.isAuthenticated).toBe(false);
+  expect(result.current.hasGuestSession).toBe(true);
+  expect(api.get).not.toHaveBeenCalled();
+});
+
+it('persists guest mode and removes any saved account token', async () => {
+  const { result } = await renderHook(() => useAuthSession());
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+  await act(async () => { await result.current.continueAsGuest(); });
+  expect(guestSessionStorage.set).toHaveBeenCalled();
+  expect(tokenStorage.delete).toHaveBeenCalled();
+  expect(result.current.hasGuestSession).toBe(true);
 });
 
 it('keeps a saved token after a network failure and restores it on retry', async () => {

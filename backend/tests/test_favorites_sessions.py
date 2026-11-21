@@ -33,6 +33,7 @@ def test_favorites_survive_logout_login_and_stay_private():
             laboratorio="Teste",
             categorias=[],
             exige_receita_confirmada=False,
+            controle_especial=False,
         )
         pharmacy = Farmacia(
             cnpj="12345678901234",

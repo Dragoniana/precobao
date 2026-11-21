@@ -2,10 +2,12 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useEffect, useState } from 'react';
 import { Image, ImageStyle, StyleProp, Text, View, ViewStyle } from 'react-native';
 
-import { resolveMedicineImages } from '../services/catalog';
+import { isGenericOfferImage, resolveMedicineImages } from '../services/catalog';
 
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 import { Medicamento } from '../types/api';
+
+const IMAGE_REQUEST_TIMEOUT_MS = 12_000;
 
 type MedicineImageProps = {
   medicine: Medicamento;
@@ -23,11 +25,20 @@ export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem ind
   const [failedIndex, setFailedIndex] = useState(0);
   const [imageLoaded, setImageLoaded] = useState(false);
   const visibleUrl = imageUrls[failedIndex];
+  const genericFallback = isGenericOfferImage(medicine, visibleUrl);
 
   useEffect(() => {
     setFailedIndex(0);
     setImageLoaded(false);
   }, [imageKey]);
+
+  useEffect(() => {
+    if (!visibleUrl || imageLoaded) return undefined;
+    const timeout = setTimeout(() => {
+      setFailedIndex((index) => index + 1);
+    }, IMAGE_REQUEST_TIMEOUT_MS);
+    return () => clearTimeout(timeout);
+  }, [imageLoaded, visibleUrl]);
 
   return (
     <View testID="medicine-image-frame" style={[styles.container, style]}>
@@ -35,7 +46,9 @@ export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem ind
         <Image
           key={visibleUrl}
           testID="medicine-image"
-          accessibilityLabel={`Embalagem de ${medicine.nome}`}
+          accessibilityLabel={genericFallback
+            ? `Imagem ilustrativa fornecida pela farmácia para ${medicine.nome}`
+            : `Embalagem de ${medicine.nome}`}
           source={{ uri: visibleUrl }}
           resizeMode="contain"
           onLoad={() => { setImageLoaded(true); onLoad?.(); }}

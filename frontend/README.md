@@ -130,3 +130,19 @@ A suíte cobre: fluxo de catálogo, filtros de laboratório, sessões, favoritos
 npm test                 # Roda todos os testes
 npm test -- --watch      # Modo watch durante desenvolvimento
 ```
+
+## Exportação Web para produção
+
+A exportação destinada à Azure exige `EXPO_PUBLIC_API_URL=https://precobao.app/backend`.
+O Dockerfile de produção recebe esse valor como argumento de build; `app.config.js`
+também o inclui no manifesto público do Expo, usado como fallback se o Metro não
+substituir a variável no JavaScript. A exportação valida a URL antes do build e
+confirma que o destino e as rotas esperadas foram incluídos no pacote.
+
+```sh
+$env:EXPO_PUBLIC_API_URL = 'https://precobao.app/backend'
+npm run export:web
+npm run test:web-build-validation
+```
+
+Não coloque segredos em `EXPO_PUBLIC_*`: essas variáveis são distribuídas ao navegador.

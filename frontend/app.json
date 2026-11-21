@@ -31,6 +31,7 @@
       "backgroundColor": "#F6F8FC"
     },
     "ios": {
+      "bundleIdentifier": "com.dragoniana.precobao",
       "supportsTablet": true
     },
     "android": {

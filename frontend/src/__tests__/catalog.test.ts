@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { api } from '../services/api';
-import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages } from '../services/catalog';
+import { fetchCatalogPage, fetchFilterOptions, FilterOption, isGenericOfferImage, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
 
@@ -11,6 +11,18 @@ const item = {
 };
 
 beforeEach(() => jest.clearAllMocks());
+
+it('keeps sale type exclusive while allowing category and laboratory filters together', () => {
+  const saleFree: FilterOption = { id: 'tipo_venda:venda_livre', type: 'tipo_venda', label: 'Venda livre', value: 'venda_livre' };
+  const withPrescription: FilterOption = { id: 'tipo_venda:com_receita', type: 'tipo_venda', label: 'Com receita', value: 'com_receita' };
+  const specialControl: FilterOption = { id: 'tipo_venda:controle_especial', type: 'tipo_venda', label: 'Controle especial', value: 'controle_especial' };
+  const category: FilterOption = { id: 'categoria:similar', type: 'categoria', label: 'Similar', value: 'similar' };
+  const lab: FilterOption = { id: 'laboratorio:cimed', type: 'laboratorio', label: 'Cimed', value: 'Cimed' };
+  const selected = [saleFree, category, lab];
+
+  expect(toggleFilterSelection(selected, specialControl)).toEqual([category, lab, specialControl]);
+  expect(toggleFilterSelection([withPrescription, category], withPrescription)).toEqual([category]);
+});
 
 it('renders only API-resolved registry URLs without pharmacy-specific rules', () => {
   const medicine = {
@@ -36,6 +48,73 @@ it('renders only API-resolved registry URLs without pharmacy-specific rules', ()
   expect(resolveMedicineImages(medicine)).toEqual(medicine.imagem_urls ?? []);
   expect(resolveMedicineImage(medicine)).toBe(medicine.imagem_urls?.[0]);
   expect(resolveMedicineImages({ ...medicine, imagem_urls: [] })).toEqual([]);
+});
+
+it('prefers the API-served database image while keeping legacy URLs as fallback', () => {
+  const medicine = {
+    ...item,
+    id: 42,
+    nome: 'Paracetamol',
+    imagem_armazenada: true,
+    imagem_ref: '/catalogo/medicamentos/42/imagem?v=abc123',
+    imagem_urls: ['https://cdn.example.test/legacy-pack.jpg'],
+    imagem_url: 'https://shop.example.test/older-pack.jpg',
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toContain('/catalogo/medicamentos/42/imagem?v=abc123');
+  expect(images).toContain('https://cdn.example.test/legacy-pack.jpg');
+  expect(images).toContain('https://shop.example.test/older-pack.jpg');
+});
+
+it('uses a pharmacy-scoped generic image after specific catalog images', () => {
+  const medicine = {
+    ...item,
+    id: 71,
+    nome: 'Medicamento de teste',
+    imagem_urls: ['https://cdn.example.test/specific-pack.webp'],
+    ofertas: [{
+      id: 915,
+      farmacia_id: 2,
+      catalogo_id: 71,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/915/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/915/imagem?v=abc123',
+    }],
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toBe('https://cdn.example.test/specific-pack.webp');
+  expect(images[1]).toContain('/catalogo/ofertas/915/imagem?v=abc123');
+  expect(isGenericOfferImage(medicine, images[1])).toBe(true);
+});
+
+it('bounds image attempts and reserves attempts for pharmacy fallbacks', () => {
+  const medicine = {
+    ...item,
+    id: 72,
+    nome: 'Catálogo com muitos fallbacks',
+    imagem_urls: Array.from({ length: 8 }, (_, index) => `https://cdn.example.test/specific-${index}.webp`),
+    ofertas: [1, 2, 3].map((id) => ({
+      id: 920 + id,
+      farmacia_id: id,
+      catalogo_id: 72,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: `https://www.drogariaspacheco.com.br/produto/${id}/p`,
+      imagem_generica: true,
+      imagem_ref: `/catalogo/ofertas/${920 + id}/imagem?v=generic-${id}`,
+    })),
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images).toHaveLength(5);
+  expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
+  expect(images.slice(3).every((url) => url.includes('/catalogo/ofertas/'))).toBe(true);
 });
 
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
@@ -69,8 +148,8 @@ it('requests only the selected server page and serializes combined filters and s
     filters: [
       { id: 'categoria:similar', label: 'Similar', value: 'similar', type: 'categoria' },
       { id: 'laboratorio:lab-a', label: 'Lab A', value: 'Lab A', type: 'laboratorio' },
-      { id: 'receita:com_receita', label: 'Com receita', value: 'com_receita', type: 'receita' },
-      { id: 'controle_especial:sim', label: 'Controle especial', value: 'sim', type: 'controle_especial' },
+      { id: 'tipo_venda:com_receita', label: 'Com receita', value: 'com_receita', type: 'tipo_venda' },
+      { id: 'tipo_venda:controle_especial', label: 'Controle especial', value: 'controle_especial', type: 'tipo_venda' },
       staleReference,
       staleClassification,
     ],
@@ -81,9 +160,9 @@ it('requests only the selected server page and serializes combined filters and s
   expect(requestedUrl).toContain('termo_busca=paracetamol');
   expect(requestedUrl).toContain('farmacia_id=3');
   expect(requestedUrl).toContain('ordenar=menor_preco');
-  expect(requestedUrl.match(/filtros=/g)).toHaveLength(4);
-  expect(requestedUrl).toContain('filtros=receita%3Acom_receita');
-  expect(requestedUrl).toContain('filtros=controle_especial%3Asim');
+  expect(requestedUrl.match(/filtros=/g)).toHaveLength(3);
+  expect(requestedUrl).not.toContain('filtros=tipo_venda%3Acom_receita');
+  expect(requestedUrl).toContain('filtros=tipo_venda%3Acontrole_especial');
   expect(requestedUrl).not.toContain('referencia%3A');
   expect(requestedUrl).not.toContain('classificacao%3A');
   expect(page.total).toBe(37);
@@ -110,7 +189,7 @@ it('does not expose or serialize legacy active-ingredient filters while preservi
   expect(page.items[0].principio_ativo).toBe('Paracetamol');
 });
 
-it('exposes only confirmed sale filters and omits unavailable or retired classifications', async () => {
+it('exposes all sale type filters even when counts are zero and omits retired classifications', async () => {
   (api.get as jest.Mock).mockResolvedValue({ data: {
     categorias: ['Similar', 'Genérico', 'Biológico'],
     laboratorios: [],
@@ -119,11 +198,12 @@ it('exposes only confirmed sale filters and omits unavailable or retired classif
 
   const options = await fetchFilterOptions();
 
-  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Com receita', 'Controle especial']));
+  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Venda livre', 'Com receita', 'Controle especial']));
   expect(options.map(({ label }) => label)).not.toEqual(expect.arrayContaining([
-    'Venda livre', 'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
+    'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
   ]));
-  expect(options.filter(({ type }) => type === 'receita' || type === 'controle_especial')).toHaveLength(2);
+  expect(options.filter(({ type }) => type === 'tipo_venda')).toHaveLength(3);
+  expect(options.find(({ value }) => value === 'venda_livre')?.count).toBe(0);
 });
 
 it('keeps a bounded item cache and requests detail by identifier on demand', async () => {

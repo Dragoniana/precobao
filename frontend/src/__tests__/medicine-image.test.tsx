@@ -47,6 +47,99 @@ it('shows a neutral loading placeholder until a remote image loads', async () =>
   expect(screen.queryByText('Carregando imagem…')).toBeNull();
 });
 
+it('labels a pharmacy generic fallback as illustrative rather than exact packaging', async () => {
+  const medicine = {
+    id: 12,
+    nome: 'Medicamento de teste',
+    codigo_barras: '7891234567895',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: [],
+    ofertas: [{
+      id: 916,
+      farmacia_id: 2,
+      catalogo_id: 12,
+      preco: 8.5,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/916/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/916/imagem?v=def456',
+    }],
+  } as Medicamento;
+
+  const screen = await render(<MedicineImage medicine={medicine} />);
+  expect(screen.getByLabelText('Imagem ilustrativa fornecida pela farmácia para Medicamento de teste')).toBeTruthy();
+});
+
+it('falls through failed specific images to a pharmacy fallback and then the placeholder', async () => {
+  const medicine = {
+    id: 13,
+    nome: 'Medicamento com fallback',
+    codigo_barras: '7891234567895',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: ['https://api.example.test/catalogo/medicamentos/13/imagem'],
+    ofertas: [{
+      id: 917,
+      farmacia_id: 2,
+      catalogo_id: 13,
+      preco: 8.5,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/917/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/917/imagem?v=generic',
+    }],
+  } as Medicamento;
+
+  const screen = await render(<MedicineImage medicine={medicine} />);
+  await fireEvent(screen.getByLabelText(`Embalagem de ${medicine.nome}`), 'error');
+  const genericLabel = `Imagem ilustrativa fornecida pela farmácia para ${medicine.nome}`;
+  expect(screen.getByLabelText(genericLabel).props.source.uri).toContain('/catalogo/ofertas/917/imagem');
+  await fireEvent(screen.getByLabelText(genericLabel), 'error');
+  expect(screen.queryByTestId('medicine-image')).toBeNull();
+  expect(screen.getByText('Imagem indisponível')).toBeTruthy();
+});
+
+it('moves past a timed out image request instead of leaving a spinner indefinitely', async () => {
+  jest.useFakeTimers();
+  try {
+    const medicine = {
+      id: 14,
+      nome: 'Medicamento com timeout',
+      codigo_barras: '',
+      principio_ativo: '',
+      laboratorio: '',
+      exige_receita: false,
+      categorias: [],
+      imagem_urls: ['https://api.example.test/catalogo/medicamentos/14/imagem'],
+      ofertas: [{
+        id: 918,
+        farmacia_id: 1,
+        catalogo_id: 14,
+        preco: 8.5,
+        quantidade_estoque: 1,
+        disponivel: true,
+        url_origem: 'https://www.araujo.com.br/produto/918/p',
+        imagem_generica: true,
+        imagem_ref: '/catalogo/ofertas/918/imagem?v=fallback',
+      }],
+    } as Medicamento;
+    const screen = await render(<MedicineImage medicine={medicine} />);
+
+    await act(async () => { jest.advanceTimersByTime(12_000); });
+    expect(screen.getByLabelText(`Imagem ilustrativa fornecida pela farmácia para ${medicine.nome}`).props.source.uri)
+      .toContain('/catalogo/ofertas/918/imagem');
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 it('resets the fallback cursor when the persisted image reference changes', async () => {
   const medicine = {
     id: 10,

@@ -73,7 +73,7 @@ def validate_source_response(response: Any, *, accepted: set[int]) -> None:
         return
     retry_after = (
         retry_after_seconds(response.headers.get("Retry-After"))
-        if status == 429
+        if status in {403, 429}
         else None
     )
     raise SourceHTTPError(status, retry_after_seconds=retry_after)

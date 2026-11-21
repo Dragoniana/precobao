@@ -11,6 +11,19 @@ from pathlib import Path
 
 from app.scrapers.araujo import AraujoScraper
 from app.scrapers.partner_feed import PartnerFeedForbidden, PartnerFeedRateLimited
+from app.scrapers.source_403_recovery import (
+    begin_due_attempt,
+    clear_403_state,
+    record_403_failure,
+    retry_due,
+    wait_for_retry_time,
+)
+from app.scrapers.source_403_recovery import (
+    enabled as recovery_enabled,
+)
+from app.scrapers.source_403_recovery import (
+    manually_paused as recovery_manually_paused,
+)
 from app.scrapers.source_modes import (
     SourceHTTPError,
     SourceMode,
@@ -80,6 +93,20 @@ def _persistence_failed(persistence: dict[str, int]) -> bool:
     )
 
 
+def _source_checkpoint(scraper: AraujoScraper) -> dict:
+    path = getattr(scraper, "source_checkpoint_path", None)
+    if path is None:
+        return {}
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not value.get("last_completed_page"):
+        return {}
+    keys = ("last_completed_page", "products_queued", "updated_at")
+    return {key: value[key] for key in keys if value.get(key) is not None}
+
+
 def _log(event: str, **fields: object) -> None:
     print(
         json.dumps(
@@ -123,23 +150,68 @@ async def serve() -> None:
             continue
 
         state = _checkpoint()
+        recovering_403 = False
         if state.get("stop_reason") == "http_403":
-            _log(
-                "paused",
-                reason="source_http_403_requires_manual_access_review",
-                source_mode=mode.value,
-            )
-            await asyncio.sleep(3600)
-            continue
+            if not recovery_enabled("araujo") or recovery_manually_paused("araujo"):
+                _log(
+                    "paused",
+                    reason="source_http_403_recovery_disabled_or_manual_pause",
+                    source_mode=mode.value,
+                    cycles=state.get("http_403_failed_cycles", 0),
+                )
+                await asyncio.sleep(60)
+                continue
+            if "http_403_attempts" not in state:
+                state = record_403_failure(
+                    state, source="araujo", now=datetime.now(UTC)
+                )
+                _write_checkpoint(state)
+            due = retry_due(state, datetime.now(UTC))
+            if due is None:
+                _log(
+                    "circuit_open",
+                    reason="source_http_403_cycle_limit_reached",
+                    source_mode=mode.value,
+                    cycles=state.get("http_403_failed_cycles", 0),
+                )
+                await asyncio.sleep(60)
+                continue
+            delay = max(0.0, (due - datetime.now(UTC)).total_seconds())
+            if delay:
+                _log(
+                    "http_403_retry_wait",
+                    next_attempt=due.isoformat(),
+                    delay_seconds=delay,
+                )
+                if not await wait_for_retry_time(
+                    "araujo",
+                    due,
+                    now=lambda: datetime.now(UTC),
+                    sleep=asyncio.sleep,
+                ):
+                    _log("paused", reason="manual_403_recovery_pause")
+                    continue
+            due_state = begin_due_attempt(state, now=datetime.now(UTC))
+            if due_state is None:
+                continue
+            if due_state != state:
+                state = due_state
+                _write_checkpoint(state)
+            recovering_403 = True
         now = datetime.now(UTC)
-        due = _next_run(now, state)
+        due = now if recovering_403 else _next_run(now, state)
         delay = max(0.0, (due - now).total_seconds())
         if delay:
             _log("waiting", next_run=due.isoformat())
             await asyncio.sleep(delay)
 
         started = datetime.now(UTC)
-        state = {**state, "status": "running", "started_at": started.isoformat()}
+        state = {
+            **state,
+            "status": "running",
+            "stop_reason": None,
+            "started_at": started.isoformat(),
+        }
         _write_checkpoint(state)
         _log("run_started", started_at=started.isoformat())
         scraper = AraujoScraper(source_mode=mode)
@@ -157,6 +229,9 @@ async def serve() -> None:
                 ),
                 "products_queued": scraper.products_queued,
                 "persistence": persistence,
+                "failure_category": (
+                    "database_persistence_error" if persistence_failed else None
+                ),
             }
         except Exception as error:
             blocked = isinstance(error, PartnerFeedForbidden)
@@ -166,6 +241,22 @@ async def serve() -> None:
             )
             blocked = blocked or status_code == 403
             rate_limited = rate_limited or status_code == 429
+            error_name = type(error).__name__.casefold()
+            failure_category = (
+                "source_access_blocked"
+                if blocked
+                else "rate_limited"
+                if rate_limited
+                else "authentication_error"
+                if status_code in {401, 407}
+                else "transient_server_error"
+                if status_code in {500, 502, 503, 504}
+                else "tls_certificate_error"
+                if any(word in error_name for word in ("ssl", "tls", "certificate"))
+                else "network_timeout"
+                if "timeout" in error_name
+                else "source_or_persistence_error"
+            )
             state = {
                 **state,
                 "status": (
@@ -183,16 +274,41 @@ async def serve() -> None:
                     else type(error).__name__
                 ),
                 "retry_after_seconds": getattr(error, "retry_after_seconds", None),
+                "failure_category": failure_category,
                 "error": str(error),
                 "products_queued": scraper.products_queued,
                 "persistence": scraper.persistence_stats.copy(),
             }
+            if blocked and recovery_enabled("araujo"):
+                source_checkpoint = _source_checkpoint(scraper)
+                state = record_403_failure(
+                    state,
+                    source="araujo",
+                    now=datetime.now(UTC),
+                    retry_after_seconds=getattr(error, "retry_after_seconds", None),
+                    last_valid_checkpoint=source_checkpoint or None,
+                )
+                if state.get("http_403_alert"):
+                    _log(
+                        "persistent_403_alert",
+                        cycles=state["http_403_failed_cycles"],
+                        source=state["http_403_origin"],
+                    )
+                _log(
+                    "403_cycle_failed",
+                    attempt=state["http_403_attempts"],
+                    failed_cycles=state["http_403_failed_cycles"],
+                    cooldown_until=state["http_403_cooldown_until"],
+                    circuit_open=state["http_403_circuit_open"],
+                )
             _log(
                 "run_failed",
                 error_type=type(error).__name__,
                 reason=str(error),
             )
         state["finished_at"] = datetime.now(UTC).isoformat()
+        if state.get("stop_reason") != "http_403":
+            state = clear_403_state(state)
         _write_checkpoint(state)
         _log(
             "run_finished",

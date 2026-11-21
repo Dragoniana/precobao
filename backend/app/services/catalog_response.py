@@ -19,6 +19,7 @@ def with_registry_images(medicine: CatalogoBase) -> CatalogoComOfertasOut:
         catalog_ean=medicine.codigo_barras,
         require_offer_match=True,
     )
+    urls = [url for url in urls if not is_generic_image_url(url)]
     stored_url = medicine.imagem_url
     if (
         medicine.imagem_status == "verificada"
@@ -36,7 +37,28 @@ def with_registry_images(medicine: CatalogoBase) -> CatalogoComOfertasOut:
         ):
             urls = [stored_url, *(url for url in urls if url != stored_url)]
     result = CatalogoComOfertasOut.model_validate(medicine)
-    offers = [offer.model_copy(update={"imagem_url": None}) for offer in result.ofertas]
+    stored = next((link for link in medicine.image_links if link.is_primary), None)
+    offers = []
+    for offer in result.ofertas:
+        source_offer = next(
+            (item for item in medicine.ofertas if item.id == offer.id), None
+        )
+        link = next(
+            (
+                item
+                for item in (source_offer.image_links if source_offer else [])
+                if item.is_generic
+            ),
+            None,
+        )
+        image_ref = (
+            f"/catalogo/ofertas/{offer.id}/imagem?v={link.blob.sha256[:12]}"
+            if link is not None
+            else None
+        )
+        offers.append(
+            offer.model_copy(update={"imagem_url": None, "imagem_ref": image_ref})
+        )
     return result.model_copy(
         update={
             "imagem_urls": urls,
@@ -44,6 +66,8 @@ def with_registry_images(medicine: CatalogoBase) -> CatalogoComOfertasOut:
             "imagem_fonte": None,
             "imagem_status": None,
             "imagem_motivo_rejeicao": None,
+            "imagem_armazenada": stored is not None,
+            "imagem_hash": stored.blob.sha256 if stored is not None else None,
             "ofertas": offers,
         }
     )

@@ -138,7 +138,7 @@ android {
 
     namespace 'com.dragoniana.precobao'
     defaultConfig {
-        applicationId 'com.dragoniana.precobao'
+        applicationId "com.dragoniana.precobao"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

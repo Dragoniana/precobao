@@ -14,7 +14,12 @@ import {
 import { FilterChip } from './FilterChip';
 import { FilterOption, useCatalogContext } from '../context/AppContext';
 import { api } from '../services/api';
-import { formatLaboratoryLabel, normalizeText } from '../services/catalog';
+import {
+  formatLaboratoryLabel,
+  isSaleTypeFilter,
+  normalizeText,
+  toggleFilterSelection,
+} from '../services/catalog';
 import { radius, spacing } from '../theme';
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
@@ -69,7 +74,7 @@ export function CatalogFiltersSidebar() {
     const visible = filterOptions.filter((option) => !needle || normalizeText(option.label).includes(needle));
     return {
       categoria: visible.filter((option) => option.type === 'categoria' && ['similar', 'generico'].includes(normalizeText(option.value))),
-      tipo_venda: visible.filter((option) => option.type === 'receita' || option.type === 'controle_especial'),
+      tipo_venda: visible.filter(isSaleTypeFilter),
     } satisfies Record<Section, FilterOption[]>;
   }, [filterOptions, search]);
 
@@ -85,9 +90,7 @@ export function CatalogFiltersSidebar() {
   const hasChanges = appliedIds !== draftIds || selectedPharmacyId !== draftPharmacyId;
   const selectionCount = draftFilters.length + Number(draftPharmacyId !== null);
 
-  const toggleFilter = (option: FilterOption) => setDraftFilters((current) => current.some((item) => item.id === option.id)
-    ? current.filter((item) => item.id !== option.id)
-    : [...current, option]);
+  const toggleFilter = (option: FilterOption) => setDraftFilters((current) => toggleFilterSelection(current, option));
   const toggleSection = (section: Section) => setExpanded((current) => current.includes(section)
     ? current.filter((item) => item !== section)
     : [...current, section]);
@@ -147,7 +150,7 @@ export function CatalogFiltersSidebar() {
           const options = groupedOptions[section];
           if (!options.length) return null;
           const selected = section === 'tipo_venda'
-            ? draftFilters.filter((option) => option.type === 'receita' || option.type === 'controle_especial')
+            ? draftFilters.filter(isSaleTypeFilter)
             : draftFilters.filter((option) => option.type === 'categoria');
           const isExpanded = expanded.includes(section) || Boolean(search.trim());
           return (
