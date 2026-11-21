@@ -8,7 +8,8 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "export:web": "expo export --platform web --output-dir dist && node scripts/copy-staticwebapp-config.mjs",
+    "export:web": "node scripts/validate-web-build.mjs --config && expo export --platform web --output-dir dist && node scripts/copy-staticwebapp-config.mjs && node scripts/validate-web-build.mjs --bundle",
+    "test:web-build-validation": "node scripts/test-web-build-validation.mjs",
     "lint": "expo lint",
     "test": "jest --runInBand"
   },
