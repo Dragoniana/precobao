@@ -8,6 +8,7 @@ import email.utils
 import hashlib
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -142,6 +143,7 @@ class PachecoScraper(BasePharmacyScraper):
             "root_search_capped": False,
             "retryable": False,
             "last_http_status": None,
+            "failure_category": None,
             "retry_after_seconds": None,
             "partition_errors": [],
             "partition_discrepancies": [],
@@ -153,6 +155,13 @@ class PachecoScraper(BasePharmacyScraper):
     def _start_run(self) -> None:
         previous = self._read_checkpoint()
         self.stats = self._new_stats(previous)
+        self.stats.update(
+            {
+                key: value
+                for key, value in previous.items()
+                if key.startswith("http_403_")
+            }
+        )
         self.items_enqueued = 0
         self.persistence_stats = {key: 0 for key in self.persistence_stats}
         self._seen_source_ids.clear()
@@ -226,6 +235,11 @@ class PachecoScraper(BasePharmacyScraper):
                 raise
             finally:
                 self.stats["persistence"] = self.persistence_stats.copy()
+                if any(
+                    self.persistence_stats[key]
+                    for key in ("persistence_errors", "image_errors")
+                ):
+                    self.stats["failure_category"] = "database_persistence_error"
                 self.stats["finished_at"] = datetime.now(UTC).isoformat()
                 if self.stats["status"] == "running":
                     persistence_ok = not any(
@@ -463,6 +477,38 @@ class PachecoScraper(BasePharmacyScraper):
                 if not isinstance(raw_products, list):
                     self._page_failed(f"Non-list JSON at {partition} offset {offset}")
                     return False
+                range_header = getattr(response, "headers", {}).get(
+                    "resources"
+                ) or getattr(response, "headers", {}).get("Content-Range")
+                if response.status_code == 206 and range_header:
+                    match = re.search(r"(\d+)-(\d+)/(\d+|\*)", range_header)
+                    if not match:
+                        self._page_failed(
+                            "Invalid partial-content range at "
+                            f"{partition} offset {offset}"
+                        )
+                        return False
+                    range_start, range_end = int(match.group(1)), int(match.group(2))
+                    range_total = int(match.group(3)) if match.group(3) != "*" else None
+                    if (
+                        range_start != offset
+                        or range_end < range_start
+                        or range_end - range_start + 1 != len(raw_products)
+                        or range_end > end
+                        or (range_total is not None and range_end >= range_total)
+                        or (
+                            expected_count is not None
+                            and range_total is not None
+                            and expected_count != range_total
+                        )
+                    ):
+                        self._page_failed(
+                            "Incomplete partial-content page at "
+                            f"{partition} offset {offset}"
+                        )
+                        return False
+                    if expected_count is None and range_total is not None:
+                        expected_count = range_total
                 if not raw_products:
                     if expected_count is not None and offset < expected_count:
                         self.stats["partition_discrepancies"].append(
@@ -471,12 +517,28 @@ class PachecoScraper(BasePharmacyScraper):
                         )
                         return True
                     if expected_count is None:
+                        if response.status_code == 206:
+                            self._page_failed(
+                                "HTTP 206 empty page has no advertised total: "
+                                f"{partition} offset {offset}"
+                            )
+                            return False
                         self.stats["complete"] = True
                         self.stats["stop_reason"] = "empty_page"
                     return True
                 if len(raw_products) > self.ITEMS_PER_PAGE:
                     self._page_failed(
                         f"Page exceeded {self.ITEMS_PER_PAGE} items at {partition}"
+                    )
+                    return False
+                if (
+                    expected_count is None
+                    and len(raw_products) < self.ITEMS_PER_PAGE
+                    and response.status_code == 206
+                ):
+                    self._page_failed(
+                        "HTTP 206 short page has no advertised total: "
+                        f"{partition} offset {offset}"
                     )
                     return False
 
@@ -537,6 +599,20 @@ class PachecoScraper(BasePharmacyScraper):
                     return True
                 offset += self.ITEMS_PER_PAGE
             except Exception as error:
+                error_name = type(error).__name__.casefold()
+                if any(
+                    marker in error_name for marker in ("ssl", "tls", "certificate")
+                ):
+                    self.stats["failure_category"] = "tls_certificate_error"
+                elif "timeout" in error_name:
+                    self.stats["failure_category"] = "network_timeout"
+                elif any(
+                    marker in error_name
+                    for marker in ("jsondecode", "validation", "parse")
+                ):
+                    self.stats["failure_category"] = "parser_error"
+                else:
+                    self.stats["failure_category"] = "transient_network_error"
                 self._page_failed(
                     f"{type(error).__name__} at {partition} offset {offset}: {error}"
                 )
@@ -599,14 +675,24 @@ class PachecoScraper(BasePharmacyScraper):
 
     def _record_http_failure(self, response: Any, reason: str) -> None:
         status = int(response.status_code)
+        self.stats["failure_category"] = (
+            "source_access_blocked"
+            if status == 403
+            else "rate_limited"
+            if status == 429
+            else "authentication_error"
+            if status in {401, 407}
+            else "transient_server_error"
+            if status in {500, 502, 503, 504}
+            else "source_http_error"
+        )
         if status in {403, 429}:
             self.stats["last_http_status"] = status
             self.stats["retryable"] = False
             self.stats["stop_reason"] = f"http_{status}"
-            if status == 429:
-                self.stats["retry_after_seconds"] = _retry_after_seconds(
-                    getattr(response, "headers", {}).get("Retry-After")
-                )
+            self.stats["retry_after_seconds"] = _retry_after_seconds(
+                getattr(response, "headers", {}).get("Retry-After")
+            )
             self.stats["pages_failed"] += 1
             self.stats["errors"].append(reason)
             self._write_checkpoint()
@@ -619,6 +705,8 @@ class PachecoScraper(BasePharmacyScraper):
     def _page_failed(self, reason: str, *, retryable: bool = True) -> None:
         self.stats["pages_failed"] += 1
         self.stats["retryable"] = retryable
+        if self.stats.get("failure_category") is None:
+            self.stats["failure_category"] = "parser_or_source_data_error"
         self.stats["errors"].append(reason)
         self.stats["stop_reason"] = reason
         self._write_checkpoint()

@@ -5,10 +5,25 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.scrapers.pacheco import PachecoScraper
+from app.scrapers.source_403_recovery import (
+    begin_due_attempt,
+    checkpoint_snapshot,
+    clear_403_state,
+    record_403_failure,
+    retry_due,
+    wait_for_retry_time,
+)
+from app.scrapers.source_403_recovery import (
+    enabled as recovery_enabled,
+)
+from app.scrapers.source_403_recovery import (
+    manually_paused as recovery_manually_paused,
+)
 from app.scrapers.source_modes import (
     SourceMode,
     direct_access_ready,
@@ -46,6 +61,21 @@ def _checkpoint() -> dict:
         return json.loads(_state_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _write_checkpoint(state: dict) -> None:
+    path = _state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".pacheco-scheduler-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(state, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _next_run(now: datetime, state: dict) -> datetime:
@@ -95,19 +125,60 @@ async def serve() -> None:
 
     while True:
         state = _checkpoint()
+        recovering_403 = False
         mode = source_mode("pacheco")
         if mode is SourceMode.DISABLED:
             _log("paused", reason="source_disabled", source_mode=mode.value)
             await asyncio.sleep(3600)
             continue
         if state.get("stop_reason") == "http_403":
-            _log(
-                "paused",
-                reason="source_http_403_requires_manual_access_review",
-                source_mode=mode.value,
-            )
-            await asyncio.sleep(3600)
-            continue
+            if not recovery_enabled("pacheco") or recovery_manually_paused("pacheco"):
+                _log(
+                    "paused",
+                    reason="source_http_403_recovery_disabled_or_manual_pause",
+                    source_mode=mode.value,
+                    cycles=state.get("http_403_failed_cycles", 0),
+                )
+                await asyncio.sleep(60)
+                continue
+            if "http_403_attempts" not in state:
+                state = record_403_failure(
+                    state, source="pacheco", now=datetime.now(UTC)
+                )
+                _write_checkpoint(state)
+            due = retry_due(state, datetime.now(UTC))
+            if due is None:
+                _log(
+                    "circuit_open",
+                    reason="source_http_403_cycle_limit_reached",
+                    source_mode=mode.value,
+                    cycles=state.get("http_403_failed_cycles", 0),
+                )
+                await asyncio.sleep(60)
+                continue
+            delay = max(0.0, (due - datetime.now(UTC)).total_seconds())
+            if delay:
+                _log(
+                    "http_403_retry_wait",
+                    next_attempt=due.isoformat(),
+                    delay_seconds=delay,
+                )
+                if not await wait_for_retry_time(
+                    "pacheco",
+                    due,
+                    now=lambda: datetime.now(UTC),
+                    sleep=asyncio.sleep,
+                ):
+                    _log("paused", reason="manual_403_recovery_pause")
+                    continue
+            state = _checkpoint()
+            due_state = begin_due_attempt(state, now=datetime.now(UTC))
+            if due_state is None:
+                continue
+            if due_state != state:
+                state = due_state
+                _write_checkpoint(state)
+            recovering_403 = True
         if mode is SourceMode.FEED and not (
             os.getenv("PACHECO_PARTNER_FEED_FILE", "").strip()
             or os.getenv("PACHECO_PARTNER_FEED_URL", "").strip()
@@ -125,13 +196,14 @@ async def serve() -> None:
             continue
 
         now = datetime.now(UTC)
-        due = _next_run(now, state)
+        due = now if recovering_403 else _next_run(now, state)
         delay = max(0.0, (due - now).total_seconds())
         if delay:
             _log("waiting", next_run=due.isoformat())
             await asyncio.sleep(delay)
 
         started = datetime.now(UTC)
+        previous_state = state
         _log("run_started", started_at=started.isoformat())
         try:
             await PachecoScraper().run()
@@ -144,6 +216,38 @@ async def serve() -> None:
         finished = datetime.now(UTC)
         elapsed = (finished - started).total_seconds()
         state = _checkpoint()
+        if state.get("stop_reason") == "http_403" and recovery_enabled("pacheco"):
+            recovery_metadata = {
+                key: value
+                for key, value in previous_state.items()
+                if key.startswith("http_403_")
+            }
+            checkpoint = checkpoint_snapshot(state) or checkpoint_snapshot(
+                previous_state
+            )
+            state = record_403_failure(
+                {**state, **recovery_metadata},
+                source="pacheco",
+                now=finished,
+                retry_after_seconds=state.get("retry_after_seconds"),
+                last_valid_checkpoint=checkpoint or None,
+            )
+            if state.get("http_403_alert"):
+                _log(
+                    "persistent_403_alert",
+                    cycles=state["http_403_failed_cycles"],
+                    source=state["http_403_origin"],
+                )
+            _log(
+                "403_cycle_failed",
+                attempt=state["http_403_attempts"],
+                failed_cycles=state["http_403_failed_cycles"],
+                cooldown_until=state["http_403_cooldown_until"],
+                circuit_open=state["http_403_circuit_open"],
+            )
+        elif state.get("stop_reason") != "http_403":
+            state = clear_403_state(state)
+        _write_checkpoint(state)
         _log(
             "run_finished",
             status=state.get("status", "unknown"),
