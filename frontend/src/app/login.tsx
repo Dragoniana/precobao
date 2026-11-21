@@ -19,6 +19,7 @@ import { z } from 'zod';
 
 import { Screen } from '../components/Screen';
 import { useSessionContext } from '../context/AppContext';
+import { shouldRedirectToAppForActiveSession } from '../services/sessionRouting';
 import { radius, spacing } from '../theme';
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
@@ -167,7 +168,7 @@ export default function LoginScreen() {
   useEffect(() => {
     // Keep the explicit login route available even when a guest session is
     // persisted. The root route still restores returning guests to the app.
-    if (pathname !== '/login' && !isRestoringSession && (isAuthenticated || hasGuestSession)) {
+    if (shouldRedirectToAppForActiveSession(pathname, isRestoringSession, isAuthenticated, hasGuestSession)) {
       router.replace('/(app)/home' as never);
     }
   }, [hasGuestSession, isAuthenticated, isRestoringSession, pathname]);
