@@ -109,5 +109,5 @@ Path(sys.argv[1]).write_text(json.dumps({
 PY
 mv "$base.manifest.tmp" "$base.manifest.json"
 chmod 600 "$base".*
-POSTGRES_CLIENT_IMAGE="$postgres_client_image" "$script_dir/verify-backup.sh" "$base"
+POSTGRES_CLIENT_IMAGE="$postgres_client_image" bash "$script_dir/verify-backup.sh" "$base"
 echo "Encrypted local backup created and structurally verified: $base. A restore test is still required before migration."
