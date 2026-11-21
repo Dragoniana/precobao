@@ -172,13 +172,17 @@ async def test_generic_source_image_is_downloaded_and_uploaded_as_fallback(
 
 
 @pytest.mark.asyncio
-async def test_unavailable_source_image_does_not_create_outbox(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("response_status", "reason"),
+    [(403, "image_source_http_403"), (404, "image_source_http_404")],
+)
+async def test_unavailable_source_image_is_nonfatal_and_does_not_create_outbox(
+    monkeypatch, tmp_path, response_status, reason
 ):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
 
     async def missing_image(_request):
-        return httpx.Response(404)
+        return httpx.Response(response_status)
 
     async def upload(*_args, **_kwargs):
         raise AssertionError("unavailable images must not be uploaded")
@@ -197,8 +201,37 @@ async def test_unavailable_source_image_does_not_create_outbox(
             client, "araujo", product
         )
 
-    assert result is None
+    assert result == {"image_failure_reason": reason}
     assert not (tmp_path / "outbox" / "images" / "araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_source_image_timeout_is_recorded_without_retries(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    requests = []
+
+    async def timeout(_request):
+        requests.append(1)
+        raise httpx.ReadTimeout("simulated timeout")
+
+    async def upload(*_args, **_kwargs):
+        raise AssertionError("a timed out image must not be uploaded")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
+    product = {
+        "sku_interno": "ARJ101392",
+        "link": "https://www.araujo.com.br/produto/101392.html",
+        "imagem_url": "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(timeout)
+    ) as client:
+        result = await scraper_image_client.download_and_upload_product_image(
+            client, "araujo", product
+        )
+
+    assert result == {"image_failure_reason": "image_download_timeout"}
+    assert requests == [1]
 
 
 @pytest.mark.asyncio

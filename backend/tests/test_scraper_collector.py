@@ -236,3 +236,96 @@ async def test_collector_replays_pending_outbox_before_source_collection(
     assert posted == [pending]
     assert source_calls == ["called"]
     assert not scraper_collector._outbox_path("araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_image_failures_do_not_interrupt_confirmed_price_batches(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SCRAPER_COLLECTOR_ENABLED", "true")
+    monkeypatch.setenv("SCRAPER_COLLECTION_ENV_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv(
+        "SCRAPER_INGEST_HMAC_SECRET", "collector-secret-which-is-longer-than-32"
+    )
+
+    pending_dir = tmp_path / "outbox" / "images" / "araujo"
+    pending_dir.mkdir(parents=True)
+    pending_manifest = pending_dir / "pending.json"
+    pending_blob = pending_dir / "pending.bin"
+    pending_manifest.write_text(
+        json.dumps({"sku": "ARJ-PENDING", "upload_id": "pending-id"}),
+        encoding="utf-8",
+    )
+    pending_blob.write_bytes(b"image bytes remain queued")
+
+    posted = []
+    async def post_batch(_client, payload):
+        posted.append(payload)
+        return {"status": "COMPLETE", "offers_updated": len(payload["products"])}
+
+    async def replay_fails(_client, _source):
+        raise sync_client.BatchSyncError("scraper_image_upload_server_error:503")
+
+    async def image_upload(_client, _source, product):
+        if product["sku_interno"] == "ARJ-FAIL":
+            raise sync_client.BatchSyncError("scraper_image_upload_server_error:503")
+        return {
+            "status": "STORED",
+            "is_generic_fallback": True,
+            "normalized_size_bytes": 42,
+        }
+
+    class FakeAraujoScraper:
+        products_queued = 2
+        allow_page_limit = False
+        stats = {"complete": True}
+
+        def __init__(self, **_kwargs):
+            pass
+
+        @staticmethod
+        def _run_lock():
+            return nullcontext()
+
+        async def _extract_direct_catalog(self):
+            await self.products_callback(
+                [
+                    {
+                        "sku_interno": "ARJ-FAIL",
+                        "imagem_url": "https://images.example.test/fail.webp",
+                    },
+                    {
+                        "sku_interno": "ARJ-OK",
+                        "imagem_url": "https://images.example.test/ok.webp",
+                    },
+                ]
+            )
+
+    monkeypatch.setattr(scraper_collector, "post_batch", post_batch)
+    monkeypatch.setattr(scraper_collector, "sync_pending_image_outbox", replay_fails)
+    monkeypatch.setattr(
+        scraper_collector, "download_and_upload_product_image", image_upload
+    )
+    monkeypatch.setattr("app.scrapers.araujo.AraujoScraper", FakeAraujoScraper)
+
+    result = await scraper_collector.collect_source("araujo")
+    state = scraper_collector._read_state("araujo")
+
+    assert result["status"] == "COMPLETE"
+    assert result["products_sent"] == 2
+    assert len(posted) == 1
+    assert state["image_sync_status"] == "PARTIAL"
+    assert state["image_upload_failures"] == 1
+    assert state["pending_image_replay_failures"] == 1
+    assert {failure["sku"] for failure in state["image_failures"]} == {
+        "ARJ-FAIL",
+        "ARJ-PENDING",
+    }
+    assert pending_manifest.exists()
+    assert pending_blob.read_bytes() == b"image bytes remain queued"
+    assert not scraper_collector._outbox_path("araujo").exists()

@@ -92,6 +92,31 @@ it('uses a pharmacy-scoped generic image after specific catalog images', () => {
   expect(isGenericOfferImage(medicine, images[1])).toBe(true);
 });
 
+it('bounds image attempts and reserves attempts for pharmacy fallbacks', () => {
+  const medicine = {
+    ...item,
+    id: 72,
+    nome: 'Catálogo com muitos fallbacks',
+    imagem_urls: Array.from({ length: 8 }, (_, index) => `https://cdn.example.test/specific-${index}.webp`),
+    ofertas: [1, 2, 3].map((id) => ({
+      id: 920 + id,
+      farmacia_id: id,
+      catalogo_id: 72,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: `https://www.drogariaspacheco.com.br/produto/${id}/p`,
+      imagem_generica: true,
+      imagem_ref: `/catalogo/ofertas/${920 + id}/imagem?v=generic-${id}`,
+    })),
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images).toHaveLength(5);
+  expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
+  expect(images.slice(3).every((url) => url.includes('/catalogo/ofertas/'))).toBe(true);
+});
+
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
   const medicine = {
     id: 9,
