@@ -12,7 +12,7 @@ Este pacote executa os coletores existentes no Windows e envia somente os lotes 
 
 O estado operacional pertence a uma única cópia do repositório por conta Windows. O instalador interrompe outra instalação com raiz diferente antes de alterar o estado; use uma conta Windows separada para operar instalações independentes.
 
-Após a confirmação de cada lote de produtos, o coletor baixa e normaliza as imagens em série no Windows e as envia em requisições binárias HMAC separadas; o endpoint deriva da URL configurada do lote. O outbox mantém metadados e bytes da imagem até a API confirmar o armazenamento, permitindo retomar um upload sem reenviar ofertas. O estado e o outbox ficam sob a mesma pasta local com ACL restrita. Imagens inválidas ou indisponíveis não interrompem o lote de preço e a aplicação mantém as referências legadas como fallback.
+Após a confirmação de cada lote de produtos, o coletor baixa e normaliza as imagens em série no Windows e as envia em requisições binárias HMAC separadas; o endpoint deriva da URL configurada do lote. O outbox mantém metadados e bytes da imagem até a API confirmar o armazenamento, permitindo retomar um upload sem reenviar ofertas. Falhas de download, timeout ou upload são registradas por SKU com um motivo seguro e não desfazem nem interrompem os lotes de preço já confirmados. Um download da origem é tentado uma vez por produto em cada execução, sem retry em 403/404; falhas de envio mantêm o item no outbox para um ciclo posterior. O estado e o outbox ficam sob a mesma pasta local com ACL restrita. Imagens específicas armazenadas são priorizadas, seguidas dos fallbacks genéricos oficiais e do placeholder interno.
 
 Não habilite as fontes antes da instalação da API/migration aprovada e da homologação final. A API Azure precisa continuar com TLS verificado; o coletor rejeita HTTP e não usa variáveis de proxy (`trust_env=False`).
 
@@ -44,7 +44,7 @@ Não habilite as fontes antes da instalação da API/migration aprovada e da hom
 
 ## Execução e recuperação
 
-O Agendador de Tarefas executa às 08h e 20h do fuso local validado como `America/Sao_Paulo`. `StartWhenAvailable` permite uma única recuperação após retorno do computador; execuções atrasadas até 120 minutos são anotadas e coalescidas numa só execução. Atrasos maiores são anotados como perdidos e ignorados. IDs de slot persistidos impedem disparo duplicado; a trava global impede sobreposição. Os checkpoints e outbox atômicos estão sob `%LOCALAPPDATA%\PrecoBaoCollector\state`. Se a API falhar após coleta, o outbox permanece para reenvio no próximo ciclo.
+O agendamento está preparado para 08h e 20h no fuso local `America/Sao_Paulo`, mas `Register-Schedule.ps1` não é executado pelo instalador e as tarefas não são registradas automaticamente. `StartWhenAvailable` permite uma única recuperação após retorno do computador; execuções atrasadas até 120 minutos são anotadas e coalescidas numa só execução. Atrasos maiores são anotados como perdidos e ignorados. IDs de slot persistidos impedem disparo duplicado; a trava global impede sobreposição. Os checkpoints e outbox atômicos estão sob `%LOCALAPPDATA%\PrecoBaoCollector\state`. Se a API falhar após coleta, o outbox permanece para reenvio no próximo ciclo.
 
 `Stop-Collector.ps1` cria um marcador local. A coleta em andamento termina a sincronização da página atual, para antes de buscar a próxima e mantém qualquer outbox pendente; tarefas agendadas ficam suspensas. Uma execução manual/agendada posterior remove o marcador ao iniciar. Logs não registram corpo, HMAC ou credenciais.
 
