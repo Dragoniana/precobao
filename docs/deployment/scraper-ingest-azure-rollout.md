@@ -64,3 +64,21 @@ O deploy da migration/API/frontend, alteração de `.env.azure`, restart dos con
 2. Restaurar a tag/digest anterior da API e da configuração do worker; recriar somente `api` e `offer-refresh` sem dependências e sem `--remove-orphans`. Reverter a variável diária A/P somente se a decisão operacional for voltar ao comportamento anterior; manter o padrão desligado para evitar chamadas Azure indesejadas.
 3. Não fazer downgrade da migration no rollback normal. A tabela aditiva é ignorada pela imagem antiga. Só remover a tabela após interromper ingestão e arquivar auditoria, com aprovação para perda desses registros.
 4. Restauração do banco de produção é plano de desastre separado, apenas para banco novo aprovado; não restaurar dump sobre a base ativa. Validar API, Caddy, ofertas e volume de imagens antes de qualquer troca de tráfego.
+
+## Homologação da release candidata PR #5 — 2026-11-21
+
+O branch `codex/scraper-integration-20261120`, commit `3f46275`, foi restaurado na VM em um projeto Docker independente, com rede interna, banco PostgreSQL 15.19, API candidata e Caddy com CA de teste. A porta HTTPS do staging ficou ligada somente a `127.0.0.1`; a rede do projeto não tem rota externa. O banco de produção não foi usado para escrita.
+
+O backup atualizado foi criado como `/var/backups/preco-bao/preco-bao-20261121T043258Z`: dump PostgreSQL e registro de referências de imagens cifrados, hashes SHA-256 e manifesto. A validação estrutural passou e o dump foi restaurado por `pg_restore` 15.19. Antes das migrations, as contagens foram 12.779 itens de catálogo, 15.128 ofertas, 18.041 históricos, 3 farmácias, 13 usuários e 28 favoritos. O Alembic estava em `d30c5f9b24a1`; após as migrations, chegou ao único head `b7e1c4a9d602`. `alembic check` não encontrou drift. A aplicação de migration preservou as contagens; os testes de ingestão seguintes acrescentaram somente dados sintéticos.
+
+O teste [staging_https_smoke.py](../../deploy/azure/staging_https_smoke.py) exige confirmação explícita, endpoint `staging.precobao.test` e banco `restore-db/preco_bao_staging`; recusa outras origens. No staging real, o cliente verificou a cadeia CA interna sem desligar TLS, enviou lotes HMAC das duas origens, rejeitou assinatura inválida, armazenou imagens em BYTEA, deduplicou duas imagens idênticas em um blob, leu a imagem com ETag e recebeu 304 condicional. A recuperação de timeout foi exercitada com transporte HTTP simulado. Os quatro marcadores de outbox foram mantidos, a API de staging foi reiniciada e o replay dos lotes/imagens retornou duplicatas idempotentes.
+
+Os scripts de backup e restauração agora usam a imagem de cliente PostgreSQL configurável e versionada, padrão `postgres:15.19-alpine`, com conferência de versão maior entre cliente e servidor. Credenciais libpq temporárias são armazenadas em arquivos root-only e removidas ao sair. O backup automatiza a validação de hash, descriptografia, leitura do archive, esquema do registro de imagens e manifesto. Restauração com `pg_restore` 15 não emite `SET transaction_timeout` do PostgreSQL 17.
+
+### Compatibilidade com a release ativa
+
+Na VM, a Web está na imagem identificada pela release `e6c42a4`, descendente da correção mobile `84c1aa2` e das alterações recentes de filtro e recuperação de senha. Desde `e6c42a4`, o diff Web do PR #5 contém somente suporte para priorizar imagens armazenadas no PostgreSQL e seus tipos/testes. A Web não é necessária para habilitar ingestão HMAC; o rollout inicial de infraestrutura pode atualizar a API, mantendo a Web sem reinício. Para exibir as imagens BYTEA no site, atualizar a Web em etapa separada.
+
+O PR #5 continua rascunho e não foi integrado. Ele mostra 94 arquivos contra `main` porque a branch de `main` está atrás de funcionalidades que já constam da release implantada; a comparação do deploy precisa usar o digest real da VM. Atualizar a API candidata exige a cadeia `f81c3a2d9b10`, `9a6d2f81c4b7` e `b7e1c4a9d602`. Os schedulers Araújo/Pacheco permanecem desativados. Os ciclos de 403 são somente simulados até a condição de acesso às origens ser esclarecida.
+
+Nenhum container, configuração ou dado de produção foi modificado durante esta homologação. O dump cifrado atual foi verificado e restaurado no ambiente isolado; cópias de backup anteriores foram preservadas.
