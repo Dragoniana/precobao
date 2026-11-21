@@ -43,14 +43,14 @@ it('omits active ingredient filtering and only lists supported medicine categori
   expect(ui.queryByText('Categoria não confirmada')).toBeNull();
 });
 
-it('shows the sale type explanation and allows only one sale type at a time', async () => {
+it('shows the sale type options without the removed explanation and allows only one at a time', async () => {
   const ui = await render(<FiltersScreen />);
 
   expect(ui.getByText('Venda livre')).toBeTruthy();
   expect(ui.getByText('Com receita')).toBeTruthy();
   expect(ui.getByText('Controle especial')).toBeTruthy();
   expect(ui.getAllByText('Controle especial')).toHaveLength(1);
-  expect(ui.getByText(/sem controle especial/i)).toBeTruthy();
+  expect(ui.queryByText(/sem controle especial/i)).toBeNull();
 
   await fireEvent.press(ui.getByRole('button', { name: 'Com receita' }));
   await fireEvent.press(ui.getByRole('button', { name: 'Controle especial' }));

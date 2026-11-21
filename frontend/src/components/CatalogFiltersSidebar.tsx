@@ -18,7 +18,6 @@ import {
   formatLaboratoryLabel,
   isSaleTypeFilter,
   normalizeText,
-  SALE_TYPE_HELP_TEXT,
   toggleFilterSelection,
 } from '../services/catalog';
 import { radius, spacing } from '../theme';
@@ -163,7 +162,6 @@ export function CatalogFiltersSidebar() {
               </Pressable>
               {isExpanded && <View style={styles.options}>
                 {options.map((option) => <FilterChip key={option.id} label={option.label} active={draftFilters.some((item) => item.id === option.id)} compact onPress={() => toggleFilter(option)} />)}
-                {section === 'tipo_venda' && <Text style={styles.saleTypeNote}>{SALE_TYPE_HELP_TEXT}</Text>}
               </View>}
             </View>
           );
@@ -282,7 +280,6 @@ const useStyles = createThemedStyles((palette) => ({
   sectionTitle: { color: palette.text, fontSize: 13, fontWeight: '700' },
   sectionSummary: { marginTop: 2, color: palette.textSoft, fontSize: 11 },
   options: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, paddingBottom: spacing.xs },
-  saleTypeNote: { width: '100%', color: palette.textSoft, fontSize: 11, lineHeight: 15, paddingTop: spacing.xs },
   selectButton: { minHeight: 34, paddingHorizontal: spacing.sm, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, borderWidth: 1, borderColor: palette.border },
   selectText: { color: palette.primaryDark, fontSize: 11, fontWeight: '700' },
   pharmacyLoading: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },

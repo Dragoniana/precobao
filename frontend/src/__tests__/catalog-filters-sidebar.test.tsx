@@ -33,7 +33,7 @@ it('shows every sale type and switches the exclusive selection in the desktop si
   expect(ui.getByText('Venda livre')).toBeTruthy();
   expect(ui.getByText('Com receita')).toBeTruthy();
   expect(ui.getByText('Controle especial')).toBeTruthy();
-  expect(ui.getByText(/sem controle especial/i)).toBeTruthy();
+  expect(ui.queryByText(/sem controle especial/i)).toBeNull();
 
   await fireEvent.press(ui.getByRole('button', { name: 'Com receita' }));
   await fireEvent.press(ui.getByRole('button', { name: 'Venda livre' }));

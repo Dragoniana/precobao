@@ -14,9 +14,6 @@ export type CatalogQuery = {
   sortBy?: CatalogSort;
 };
 
-export const SALE_TYPE_HELP_TEXT =
-  '“Venda livre” neste filtro significa sem controle especial; não confirma dispensa de receita.';
-
 const saleTypeValues = new Set(['venda_livre', 'com_receita', 'controle_especial']);
 
 export function saleTypeMode(filter: FilterOption): string | null {
