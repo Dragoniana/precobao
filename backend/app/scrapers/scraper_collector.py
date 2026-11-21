@@ -211,6 +211,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "images_missing": 0,
         "image_blobs_uploaded": 0,
         "image_download_failures": 0,
+        "images_skipped_generic": 0,
     }
     _write_state(source, state)
     timeout = float(os.getenv("SCRAPER_INGEST_TIMEOUT_SECONDS", "30"))
@@ -309,6 +310,10 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                     )
                     if image_result is None:
                         state["image_download_failures"] += 1
+                        continue
+                    if image_result.get("skipped") == "generic_asset":
+                        state["images_skipped_generic"] += 1
+                        _write_state(source, state)
                         continue
                     state["image_blobs_uploaded"] += 1
                     state["image_bytes_uploaded"] = int(

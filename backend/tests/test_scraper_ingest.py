@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes import scraper_ingest
 from app.core.database import get_db
 from app.main import app
-from app.models import Base, CatalogoBase, HistoricoPreco, OfertaFarmacia
+from app.models import Base, CatalogoBase, Farmacia, HistoricoPreco, OfertaFarmacia
 from app.scrapers import base as scraper_base
 from app.services.enriquecimento import ServicoEnriquecimentoFarmacologico
 
@@ -286,7 +286,7 @@ def test_ingest_clears_invalid_ean_before_persistence(ingest_client):
         assert db.query(CatalogoBase).one().codigo_barras is None
 
 
-def test_ingest_accepts_associated_generic_pacheco_image(ingest_client):
+def test_ingest_does_not_register_generic_pacheco_image(ingest_client):
     client, sessions = ingest_client
     payload = {
         "batch_id": "a7791c70-28cc-49bd-9a65-152e1adfc35a",
@@ -312,9 +312,128 @@ def test_ingest_accepts_associated_generic_pacheco_image(ingest_client):
     response = client.post(ENDPOINT, content=body, headers=_headers(body))
 
     assert response.status_code == 200
-    assert response.json()["images_registered"] == 1
+    assert response.json()["images_registered"] == 0
+    assert response.json()["images_missing"] == 1
     with sessions() as db:
         assert db.query(OfertaFarmacia).one().sku_interno == "PCH155349"
+
+
+@pytest.mark.parametrize(
+    (
+        "existing_sku",
+        "existing_url",
+        "existing_ean",
+        "incoming_sku",
+        "incoming_url",
+        "incoming_ean",
+        "expected_status",
+    ),
+    [
+        (
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            "7891721201806",
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            "7891721027468",
+            409,
+        ),
+        (
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            "7891721201806",
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos-alternativo/p",
+            "7891721201806",
+            409,
+        ),
+        (
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            "7891721201806",
+            "PCH155349",
+            "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+            "7891721201806",
+            200,
+        ),
+    ],
+    ids=["ean-conflict", "sku-url-conflict", "matching-identity"],
+)
+def test_ingest_checks_existing_pacheco_offer_identity_before_writes(
+    ingest_client,
+    existing_sku,
+    existing_url,
+    existing_ean,
+    incoming_sku,
+    incoming_url,
+    incoming_ean,
+    expected_status,
+):
+    client, sessions = ingest_client
+    with sessions() as db:
+        pharmacy = Farmacia(
+            cnpj="33438250000167",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Pacheco",
+            endereco_completo="Loja online",
+        )
+        catalog = CatalogoBase(
+            codigo_barras=existing_ean,
+            name_search="Glifage XR 500mg 30 comprimidos",
+            principio_ativo="cloridrato de metformina",
+            laboratorio="Merck S/A",
+            categorias=[],
+        )
+        db.add_all([pharmacy, catalog])
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno=existing_sku,
+                preco=10.37,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem=existing_url,
+                contexto_chave="global",
+                farmacia_id=pharmacy.id,
+                catalogo_id=catalog.id,
+            )
+        )
+        db.commit()
+
+    payload = {
+        "batch_id": "a7791c70-28cc-49bd-9a65-152e1adfc35b",
+        "source": "pacheco",
+        "observed_at": "2026-11-15T10:00:00-03:00",
+        "products": [
+            {
+                "id": "155349",
+                "sku_interno": incoming_sku,
+                "ean": incoming_ean,
+                "name_search": "Glifage XR 500mg 30 comprimidos",
+                "preco": 9.40,
+                "disponivel": True,
+                "quantidade_estoque": 1,
+                "link": incoming_url,
+                "imagem_url": None,
+                "fonte_observado_em": "2026-11-15T10:00:00-03:00",
+            }
+        ],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+
+    response = client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert response.status_code == 409
+        assert response.json()["detail"] == "scraper_product_identity_conflict"
+    with sessions() as db:
+        assert db.query(CatalogoBase).count() == 1
+        assert db.query(OfertaFarmacia).count() == 1
+        assert db.query(HistoricoPreco).count() == (1 if expected_status == 200 else 0)
+        assert db.query(scraper_ingest.ScraperImportBatch).count() == (
+            1 if expected_status == 200 else 0
+        )
 
 
 def test_failed_batch_retries_with_same_id_after_recovery(ingest_client, monkeypatch):

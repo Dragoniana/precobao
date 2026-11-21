@@ -371,6 +371,27 @@ def test_image_upload_rejects_bad_hmac_and_non_image_content(image_client):
         assert db.query(MedicineImageBlob).count() == 0
 
 
+def test_image_upload_rejects_known_generic_pharmacy_art(image_client):
+    client, sessions, _catalog_id = image_client
+    content = _image_bytes()
+    body = _request_body(
+        content,
+        source_image_url=(
+            "https://i3-imagens-prd.araujo.com.br/128666_7896026306751_1.webp"
+        ),
+    )
+
+    response = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body)
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid_image_source"
+    with sessions() as db:
+        assert db.query(MedicineImageBlob).count() == 0
+        assert db.query(MedicineImageLink).count() == 0
+
+
 def test_upload_id_cannot_be_replayed_with_different_payload(image_client):
     client, _sessions, _catalog_id = image_client
     content = _image_bytes()

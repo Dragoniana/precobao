@@ -81,3 +81,80 @@ async def test_image_outbox_removes_orphaned_binary(monkeypatch, tmp_path):
             await scraper_image_client.sync_pending_image_outbox(client, "pacheco") == 0
         )
     assert not orphan.exists()
+
+
+@pytest.mark.asyncio
+async def test_generic_source_image_is_skipped_without_download_or_upload(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    requests: list[httpx.Request] = []
+
+    async def image_response(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/webp"},
+            content=_png(),
+        )
+
+    async def upload(*_args, **_kwargs):
+        raise AssertionError("generic artwork must not be uploaded")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
+    product = {
+        "sku_interno": "ARJ87819",
+        "ean": None,
+        "link": "https://www.araujo.com.br/produto/87819.html",
+        "imagem_url": "https://www.araujo.com.br/on/demandware.static/Sites-Araujo-Site/-/default/dw4f56ef98/images/generico.webp",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(image_response)
+    ) as client:
+        result = await scraper_image_client.download_and_upload_product_image(
+            client, "araujo", product
+        )
+
+    assert result == {"skipped": "generic_asset"}
+    assert requests == []
+    assert not (tmp_path / "outbox" / "images" / "araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_generic_image_outbox_is_quarantined_and_preserved(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "pacheco"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "pending.json"
+    content = outbox / "pending.bin"
+    manifest.write_text(
+        json.dumps(
+            {
+                "upload_id": "5ea270b4-3985-432d-a5a5-ada953993ca1",
+                "source": "pacheco",
+                "sku": "PCH155349",
+                "ean": "7891721027468",
+                "product_url": "https://www.drogariaspacheco.com.br/glifage-xr-500mg-merck-sharp-30-comprimidos/p",
+                "source_image_url": "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1138787/de-referencia-tarja-vermelha-em-comprimido-pacheco.jpg?v=638297968647200000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    content.write_bytes(b"preserved image bytes")
+
+    async with httpx.AsyncClient() as client:
+        first_run = await scraper_image_client.sync_pending_image_outbox(
+            client, "pacheco"
+        )
+        second_run = await scraper_image_client.sync_pending_image_outbox(
+            client, "pacheco"
+        )
+        assert first_run == second_run == 0
+
+    quarantined = outbox / "quarantine"
+    assert not manifest.exists()
+    assert not content.exists()
+    assert (quarantined / manifest.name).exists()
+    assert (quarantined / content.name).read_bytes() == b"preserved image bytes"

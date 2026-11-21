@@ -26,7 +26,10 @@ from app.models.medicine_image import (
     MedicineImageLink,
     MedicineImageUpload,
 )
-from app.services.imagens import offer_image_delivery_rejection_reason
+from app.services.imagens import (
+    image_rejection_reason,
+    offer_image_delivery_rejection_reason,
+)
 from app.services.medicine_images import (
     InvalidMedicineImage,
     validate_normalized_medicine_image,
@@ -159,10 +162,12 @@ async def ingest_medicine_image(
     offer, pharmacy, catalog = match
     if metadata.ean and catalog.codigo_barras and metadata.ean != catalog.codigo_barras:
         raise HTTPException(status_code=409, detail="image_ean_catalog_mismatch")
-    rejection = offer_image_delivery_rejection_reason(
-        metadata.source_image_url,
-        metadata.product_url,
-        "Araujo" if metadata.source == "araujo" else "Pacheco",
+    rejection = image_rejection_reason(metadata.source_image_url) or (
+        offer_image_delivery_rejection_reason(
+            metadata.source_image_url,
+            metadata.product_url,
+            "Araujo" if metadata.source == "araujo" else "Pacheco",
+        )
     )
     if rejection:
         raise HTTPException(status_code=422, detail="invalid_image_source")

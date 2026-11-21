@@ -12,7 +12,10 @@ from uuid import uuid4
 import httpx
 
 from app.scrapers.scraper_batch_client import BatchSyncError, post_image_upload
-from app.services.imagens import offer_image_delivery_rejection_reason
+from app.services.imagens import (
+    is_generic_image_url,
+    offer_image_delivery_rejection_reason,
+)
 from app.services.medicine_images import InvalidMedicineImage, normalize_medicine_image
 
 
@@ -71,6 +74,9 @@ async def _submit_pending_image(
     client: httpx.AsyncClient, metadata_path: Path
 ) -> dict[str, Any]:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    image_url = str(metadata.get("source_image_url") or "")
+    if is_generic_image_url(image_url):
+        raise BatchSyncError("scraper_generic_image_quarantined")
     content_path = metadata_path.with_suffix(".bin")
     if not content_path.is_file():
         raise BatchSyncError("scraper_image_outbox_content_missing")
@@ -92,12 +98,28 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
         if content_path.stem not in manifests:
             content_path.unlink(missing_ok=True)
     uploaded = 0
+    quarantine = directory / "quarantine"
     for metadata_path in sorted(directory.glob("*.json")):
         try:
             await _submit_pending_image(client, metadata_path)
+        except BatchSyncError as error:
+            if str(error) != "scraper_generic_image_quarantined":
+                raise
+            content_path = metadata_path.with_suffix(".bin")
+            quarantine.mkdir(parents=True, exist_ok=True)
+            quarantined_metadata = quarantine / metadata_path.name
+            quarantined_content = quarantine / content_path.name
+            if quarantined_metadata.exists() or quarantined_content.exists():
+                raise BatchSyncError("scraper_generic_image_quarantine_conflict")
+            # Move content first. If interrupted, the remaining manifest can
+            # still identify the generic image and be quarantined next run.
+            if content_path.exists():
+                content_path.replace(quarantined_content)
+            metadata_path.replace(quarantined_metadata)
         except (OSError, json.JSONDecodeError) as error:
             raise BatchSyncError("scraper_image_outbox_invalid") from error
-        uploaded += 1
+        else:
+            uploaded += 1
     return uploaded
 
 
@@ -107,6 +129,8 @@ async def download_and_upload_product_image(
     image_url = str(product.get("imagem_url") or "").strip()
     if not image_url:
         return None
+    if is_generic_image_url(image_url):
+        return {"skipped": "generic_asset"}
     product_url = str(product.get("link") or "").strip()
     pharmacy_name = "Araujo" if source == "araujo" else "Pacheco"
     if offer_image_delivery_rejection_reason(image_url, product_url, pharmacy_name):

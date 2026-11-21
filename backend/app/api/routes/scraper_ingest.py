@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import urlsplit
@@ -16,14 +18,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.utils import validar_ean13
+from app.models import CatalogoBase, Farmacia, OfertaFarmacia
 from app.models.scraper_import_batch import ScraperImportBatch
 from app.schemas.oferta import ProdutoExtraidoSchema
-from app.services.imagens import offer_image_delivery_rejection_reason
+from app.services.imagens import (
+    is_generic_image_url,
+    offer_image_delivery_rejection_reason,
+)
 from app.services.scraper_hmac import (
     HMACSecretConfigurationError,
     get_scraper_hmac_secret,
@@ -33,6 +40,7 @@ router = APIRouter(prefix="/internal", tags=["internal-scraper-ingest"])
 _SIGNATURE_RE = re.compile(r"^sha256=([0-9a-f]{64})$")
 _MAX_CLOCK_SKEW_SECONDS = 300
 _PROCESSING_RECOVERY_SECONDS = 900
+logger = logging.getLogger(__name__)
 
 
 class ScraperBatchIn(BaseModel):
@@ -77,7 +85,9 @@ class ScraperBatchIn(BaseModel):
             product.fonte_observado_em = source_time.astimezone(UTC)
             if product.imagem_url:
                 pharmacy_name = "Araujo" if self.source == "araujo" else "Pacheco"
-                if offer_image_delivery_rejection_reason(
+                if is_generic_image_url(product.imagem_url):
+                    product.imagem_url = None
+                elif offer_image_delivery_rejection_reason(
                     product.imagem_url, product.link, pharmacy_name
                 ):
                     raise ValueError("product image must use an HTTPS URL")
@@ -155,6 +165,70 @@ def _result(record: ScraperImportBatch, *, duplicate: bool = False):
     )
 
 
+def _source_name_matches(name: str, source: str) -> bool:
+    normalized = (
+        unicodedata.normalize("NFKD", name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .casefold()
+    )
+    return source in normalized
+
+
+def _find_product_identity_conflict(
+    db: Session, batch: ScraperBatchIn
+) -> tuple[str, str] | None:
+    """Reject ambiguous source identities before any catalog, offer or history write.
+
+    Exact source URL and pharmacy SKU must continue to point at the same offer.
+    When that offer already has a different (or unknown) catalog EAN, a new EAN
+    cannot silently create a second catalog row while the existing offer keeps
+    its old catalog link.
+    """
+    urls = {product.link for product in batch.products}
+    skus = {product.sku_interno for product in batch.products}
+    if not urls or not skus:
+        return None
+
+    existing = (
+        db.query(OfertaFarmacia, Farmacia, CatalogoBase)
+        .join(Farmacia, Farmacia.id == OfertaFarmacia.farmacia_id)
+        .join(CatalogoBase, CatalogoBase.id == OfertaFarmacia.catalogo_id)
+        .filter(
+            or_(
+                OfertaFarmacia.url_origem.in_(urls),
+                OfertaFarmacia.sku_interno.in_(skus),
+            )
+        )
+        .with_for_update()
+        .all()
+    )
+    by_url: dict[str, list[tuple[OfertaFarmacia, CatalogoBase]]] = {}
+    by_sku: dict[str, list[tuple[OfertaFarmacia, CatalogoBase]]] = {}
+    for offer, pharmacy, catalog in existing:
+        if not _source_name_matches(pharmacy.nome_fantasia, batch.source):
+            continue
+        by_url.setdefault(offer.url_origem, []).append((offer, catalog))
+        by_sku.setdefault(offer.sku_interno, []).append((offer, catalog))
+
+    for product in batch.products:
+        url_matches = by_url.get(product.link, [])
+        sku_matches = by_sku.get(product.sku_interno, [])
+        if url_matches:
+            if any(
+                offer.sku_interno != product.sku_interno
+                for offer, _ in url_matches
+            ):
+                return product.sku_interno, "sku_url_mismatch"
+            if product.ean and any(
+                catalog.codigo_barras != product.ean for _, catalog in url_matches
+            ):
+                return product.sku_interno, "ean_catalog_mismatch"
+        elif sku_matches:
+            return product.sku_interno, "sku_url_mismatch"
+    return None
+
+
 @router.post(
     "/scraper-batches",
     response_model=ScraperBatchResult,
@@ -221,6 +295,19 @@ async def ingest_scraper_batch(
             > now - timedelta(seconds=_PROCESSING_RECOVERY_SECONDS)
         ):
             raise HTTPException(status_code=409, detail="batch_is_processing")
+
+    conflict = _find_product_identity_conflict(db, batch)
+    if conflict is not None:
+        sku, reason = conflict
+        logger.warning(
+            "scraper_product_identity_conflict",
+            extra={"source": batch.source, "sku": sku, "reason": reason},
+        )
+        raise HTTPException(
+            status_code=409, detail="scraper_product_identity_conflict"
+        )
+
+    if record is not None:
         record.status = "PROCESSING"
         record.attempt_count += 1
         record.started_at = now
