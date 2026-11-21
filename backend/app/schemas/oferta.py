@@ -97,6 +97,7 @@ class OfertaOut(OfertaBaseSchema):
     criado_em: datetime
     atualizado_em: datetime | None = None
     observado_em: datetime | None = None
+    imagem_ref: str | None = None
 
     @computed_field(return_type=bool)
     @property
@@ -111,6 +112,8 @@ class OfertaOut(OfertaBaseSchema):
     @computed_field(return_type=bool)
     @property
     def imagem_generica(self) -> bool:
+        if self.imagem_ref:
+            return True
         return bool(
             self.imagem_url
             and not image_delivery_rejection_reason(self.imagem_url)

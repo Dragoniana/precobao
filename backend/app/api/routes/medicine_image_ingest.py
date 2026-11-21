@@ -27,7 +27,7 @@ from app.models.medicine_image import (
     MedicineImageUpload,
 )
 from app.services.imagens import (
-    image_rejection_reason,
+    is_generic_image_url,
     offer_image_delivery_rejection_reason,
 )
 from app.services.medicine_images import (
@@ -51,6 +51,7 @@ class MedicineImageUploadMetadata(BaseModel):
     source_image_url: str = Field(min_length=1, max_length=1000)
     content_type: Literal["image/jpeg", "image/webp"]
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    is_generic_fallback: bool = False
 
 
 def _source_enabled(source: str) -> bool:
@@ -69,10 +70,14 @@ def _pharmacy_matches_source(name: str, source: str) -> bool:
 
 
 def _upload_response(
-    *, blob: MedicineImageBlob, link: MedicineImageLink, duplicate: bool
+    *,
+    blob: MedicineImageBlob,
+    link: MedicineImageLink,
+    duplicate: bool,
+    status: str = "STORED",
 ):
     return {
-        "status": "STORED",
+        "status": status,
         "duplicate": duplicate,
         "sha256": blob.sha256,
         "size_bytes": blob.size_bytes,
@@ -80,6 +85,7 @@ def _upload_response(
         "catalog_id": link.catalog_id,
         "offer_id": link.offer_id,
         "primary": link.is_primary,
+        "is_generic": link.is_generic,
     }
 
 
@@ -140,6 +146,10 @@ async def ingest_medicine_image(
     prefix = "ARJ" if metadata.source == "araujo" else "PCH"
     if not re.fullmatch(rf"{prefix}\d+", metadata.sku):
         raise HTTPException(status_code=422, detail="image_sku_source_mismatch")
+    recognized_generic = is_generic_image_url(metadata.source_image_url)
+    if metadata.is_generic_fallback and not recognized_generic:
+        raise HTTPException(status_code=422, detail="generic_image_not_recognized")
+    generic_fallback = recognized_generic
     offers = db.execute(
         select(OfertaFarmacia, Farmacia, CatalogoBase)
         .join(Farmacia, Farmacia.id == OfertaFarmacia.farmacia_id)
@@ -149,25 +159,34 @@ async def ingest_medicine_image(
             OfertaFarmacia.url_origem == metadata.product_url,
         )
     ).all()
-    match = next(
-        (
-            row
-            for row in offers
-            if _pharmacy_matches_source(row[1].nome_fantasia, metadata.source)
-        ),
-        None,
-    )
+    source_offers = [
+        row
+        for row in offers
+        if _pharmacy_matches_source(row[1].nome_fantasia, metadata.source)
+    ]
+    if len(source_offers) > 1 and metadata.ean:
+        identity_matches = [
+            row for row in source_offers if row[2].codigo_barras == metadata.ean
+        ]
+        if len(identity_matches) == 1:
+            source_offers = identity_matches
+    if len(source_offers) > 1:
+        raise HTTPException(status_code=409, detail="image_offer_ambiguous")
+    match = source_offers[0] if source_offers else None
     if match is None:
         raise HTTPException(status_code=409, detail="image_offer_not_ingested")
     offer, pharmacy, catalog = match
-    if metadata.ean and catalog.codigo_barras and metadata.ean != catalog.codigo_barras:
+    if (
+        not generic_fallback
+        and metadata.ean
+        and catalog.codigo_barras
+        and metadata.ean != catalog.codigo_barras
+    ):
         raise HTTPException(status_code=409, detail="image_ean_catalog_mismatch")
-    rejection = image_rejection_reason(metadata.source_image_url) or (
-        offer_image_delivery_rejection_reason(
-            metadata.source_image_url,
-            metadata.product_url,
-            "Araujo" if metadata.source == "araujo" else "Pacheco",
-        )
+    rejection = offer_image_delivery_rejection_reason(
+        metadata.source_image_url,
+        metadata.product_url,
+        "Araujo" if metadata.source == "araujo" else "Pacheco",
     )
     if rejection:
         raise HTTPException(status_code=422, detail="invalid_image_source")
@@ -189,7 +208,17 @@ async def ingest_medicine_image(
             raise HTTPException(
                 status_code=503, detail="image_upload_record_incomplete"
             )
-        return _upload_response(blob=blob, link=link, duplicate=True)
+        result_status = (
+            "STORED"
+            if not generic_fallback or link.is_generic
+            else "SKIPPED_SPECIFIC_EXISTS"
+        )
+        return _upload_response(
+            blob=blob,
+            link=link,
+            duplicate=True,
+            status=result_status,
+        )
 
     dialect = db.get_bind().dialect.name
     insert = pg_insert if dialect == "postgresql" else sqlite_insert
@@ -213,38 +242,66 @@ async def ingest_medicine_image(
             )
         ).scalar_one()
         link = db.execute(
-            select(MedicineImageLink).where(MedicineImageLink.offer_id == offer.id)
+            select(MedicineImageLink).where(
+                MedicineImageLink.offer_id == offer.id,
+                MedicineImageLink.is_generic.is_(generic_fallback),
+            )
         ).scalar_one_or_none()
         if link is None:
-            has_primary = db.execute(
-                select(MedicineImageLink.id)
-                .where(
-                    MedicineImageLink.catalog_id == catalog.id,
-                    MedicineImageLink.is_primary.is_(True),
-                )
-                .limit(1)
-            ).scalar_one_or_none()
+            has_primary = None
+            if not generic_fallback:
+                has_primary = db.execute(
+                    select(MedicineImageLink.id)
+                    .where(
+                        MedicineImageLink.catalog_id == catalog.id,
+                        MedicineImageLink.is_primary.is_(True),
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
             link = MedicineImageLink(
                 blob_id=blob.id,
-                catalog_id=catalog.id,
+                catalog_id=None if generic_fallback else catalog.id,
                 pharmacy_id=pharmacy.id,
                 offer_id=offer.id,
                 sku=metadata.sku,
-                ean=metadata.ean or catalog.codigo_barras,
+                ean=(
+                    metadata.ean
+                    if generic_fallback
+                    else metadata.ean or catalog.codigo_barras
+                ),
                 source=metadata.source,
                 source_image_url=metadata.source_image_url,
-                is_primary=has_primary is None,
+                is_primary=not generic_fallback and has_primary is None,
+                is_generic=generic_fallback,
             )
             db.add(link)
             db.flush()
         else:
             link.blob_id = blob.id
-            link.catalog_id = catalog.id
+            link.catalog_id = None if generic_fallback else catalog.id
             link.pharmacy_id = pharmacy.id
             link.sku = metadata.sku
-            link.ean = metadata.ean or catalog.codigo_barras
+            link.ean = (
+                metadata.ean
+                if generic_fallback
+                else metadata.ean or catalog.codigo_barras
+            )
             link.source = metadata.source
             link.source_image_url = metadata.source_image_url
+            link.is_generic = generic_fallback
+            if generic_fallback:
+                link.is_primary = False
+            elif not link.is_primary:
+                has_primary = db.execute(
+                    select(MedicineImageLink.id)
+                    .where(
+                        MedicineImageLink.catalog_id == catalog.id,
+                        MedicineImageLink.is_primary.is_(True),
+                        MedicineImageLink.id != link.id,
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                link.is_primary = has_primary is None
         db.add(
             MedicineImageUpload(
                 request_id=request_id,

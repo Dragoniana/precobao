@@ -23,7 +23,10 @@ def _available_offer_options(farmacia_id: int | None = None):
     if farmacia_id is not None:
         criteria.append(OfertaFarmacia.farmacia_id == farmacia_id)
     offers = CatalogoBase.ofertas.and_(*criteria)
-    return selectinload(offers).selectinload(OfertaFarmacia.farmacia)
+    return selectinload(offers).options(
+        selectinload(OfertaFarmacia.farmacia),
+        selectinload(OfertaFarmacia.image_links),
+    )
 
 
 def _available_min_prices(farmacia_id: int | None = None):
@@ -130,6 +133,40 @@ def servir_imagem_catalogo(
 def redirecionar_imagem_catalogo(medicamento_id: int, db: Session):
     """Compatibility entry point for direct callers and legacy tests."""
     return _servir_imagem_catalogo(medicamento_id, db, None)
+
+
+@router.get("/ofertas/{offer_id}/imagem", include_in_schema=False)
+def servir_imagem_fallback_oferta(
+    offer_id: int, request: Request, db: Session = Depends(get_db)
+):
+    stored = db.execute(
+        select(MedicineImageBlob)
+        .join(MedicineImageLink, MedicineImageLink.blob_id == MedicineImageBlob.id)
+        .where(
+            MedicineImageLink.offer_id == offer_id,
+            MedicineImageLink.is_generic.is_(True),
+        )
+        .options(undefer(MedicineImageBlob.image_data))
+        .limit(1)
+    ).scalar_one_or_none()
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Imagem nao encontrada.")
+    etag = f'"{stored.sha256}"'
+    cache_headers = {
+        "ETag": etag,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if any(
+        candidate.strip() == "*" or candidate.strip().removeprefix("W/") == etag
+        for candidate in request.headers.get("if-none-match", "").split(",")
+    ):
+        return Response(status_code=304, headers=cache_headers)
+    return Response(
+        content=stored.image_data,
+        media_type=stored.content_type,
+        headers=cache_headers,
+    )
 
 
 def _servir_imagem_catalogo(medicamento_id: int, db: Session, request: Request | None):

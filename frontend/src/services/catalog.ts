@@ -50,12 +50,28 @@ export function resolveMedicineImages(medicine: Medicamento): string[] {
   const urls = Array.isArray(medicine.imagem_urls) ? medicine.imagem_urls : [];
   const legacyRef = medicine.imagem_ref?.startsWith('/catalogo/medicamentos/')
     ? `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}` : undefined;
+  const offerFallbacks = medicine.ofertas
+    .filter((offer) => offer.imagem_generica && offer.imagem_ref)
+    .map((offer) => offer.imagem_ref!.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${offer.imagem_ref}`
+      : offer.imagem_ref!);
   const ordered = medicine.imagem_armazenada && legacyRef
-    ? [legacyRef, ...urls, medicine.imagem_url]
-    : [...urls, medicine.imagem_url, legacyRef];
+    ? [legacyRef, ...urls, medicine.imagem_url, ...offerFallbacks]
+    : [...urls, medicine.imagem_url, legacyRef, ...offerFallbacks];
   return [...new Set(ordered
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
+}
+
+export function isGenericOfferImage(medicine: Medicamento, url: string | undefined): boolean {
+  if (!url) return false;
+  return medicine.ofertas.some((offer) => {
+    if (!offer.imagem_generica || !offer.imagem_ref) return false;
+    const resolved = offer.imagem_ref.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${offer.imagem_ref}`
+      : offer.imagem_ref;
+    return resolved === url;
+  });
 }
 export function resolveMedicineImage(medicine: Medicamento): string | undefined {
   return resolveMedicineImages(medicine)[0];

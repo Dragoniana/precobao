@@ -47,6 +47,33 @@ it('shows a neutral loading placeholder until a remote image loads', async () =>
   expect(screen.queryByText('Carregando imagem…')).toBeNull();
 });
 
+it('labels a pharmacy generic fallback as illustrative rather than exact packaging', async () => {
+  const medicine = {
+    id: 12,
+    nome: 'Medicamento de teste',
+    codigo_barras: '7891234567895',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: [],
+    ofertas: [{
+      id: 916,
+      farmacia_id: 2,
+      catalogo_id: 12,
+      preco: 8.5,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/916/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/916/imagem?v=def456',
+    }],
+  } as Medicamento;
+
+  const screen = await render(<MedicineImage medicine={medicine} />);
+  expect(screen.getByLabelText('Imagem ilustrativa fornecida pela farmácia para Medicamento de teste')).toBeTruthy();
+});
+
 it('resets the fallback cursor when the persisted image reference changes', async () => {
   const medicine = {
     id: 10,

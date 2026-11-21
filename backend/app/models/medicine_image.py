@@ -14,7 +14,6 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
-    UniqueConstraint,
     func,
     text,
 )
@@ -24,6 +23,7 @@ from .base import Base
 
 if TYPE_CHECKING:
     from .catalogo import CatalogoBase
+    from .oferta_farmacia import OfertaFarmacia
 
 
 class MedicineImageBlob(Base):
@@ -56,13 +56,32 @@ class MedicineImageBlob(Base):
 class MedicineImageLink(Base):
     __tablename__ = "medicine_image_links"
     __table_args__ = (
-        UniqueConstraint("offer_id", name="uq_medicine_image_link_offer"),
         Index(
             "uq_medicine_image_link_primary_catalog",
             "catalog_id",
             unique=True,
             postgresql_where=text("is_primary"),
             sqlite_where=text("is_primary = 1"),
+        ),
+        Index(
+            "uq_medicine_image_link_offer_specific",
+            "offer_id",
+            unique=True,
+            postgresql_where=text("offer_id IS NOT NULL AND is_generic = false"),
+            sqlite_where=text("offer_id IS NOT NULL AND is_generic = 0"),
+        ),
+        Index(
+            "uq_medicine_image_link_offer_generic",
+            "offer_id",
+            unique=True,
+            postgresql_where=text("offer_id IS NOT NULL AND is_generic = true"),
+            sqlite_where=text("offer_id IS NOT NULL AND is_generic = 1"),
+        ),
+        CheckConstraint(
+            "(is_generic = false AND catalog_id IS NOT NULL) OR "
+            "(is_generic = true AND catalog_id IS NULL AND offer_id IS NOT NULL "
+            "AND is_primary = false)",
+            name="ck_medicine_image_link_generic_offer_fallback",
         ),
     )
 
@@ -72,8 +91,8 @@ class MedicineImageLink(Base):
         nullable=False,
         index=True,
     )
-    catalog_id: Mapped[int] = mapped_column(
-        ForeignKey("catalogo_base.id", ondelete="CASCADE"), nullable=False, index=True
+    catalog_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalogo_base.id", ondelete="CASCADE"), nullable=True, index=True
     )
     pharmacy_id: Mapped[int] = mapped_column(
         ForeignKey("farmacias.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -86,6 +105,7 @@ class MedicineImageLink(Base):
     source: Mapped[str] = mapped_column(String(24), nullable=False)
     source_image_url: Mapped[str] = mapped_column(String(1000), nullable=False)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_generic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -96,8 +116,11 @@ class MedicineImageLink(Base):
         nullable=False,
     )
 
-    catalog: Mapped[CatalogoBase] = relationship(
+    catalog: Mapped[CatalogoBase | None] = relationship(
         "CatalogoBase", back_populates="image_links"
+    )
+    offer: Mapped[OfertaFarmacia | None] = relationship(
+        "OfertaFarmacia", back_populates="image_links"
     )
     blob: Mapped[MedicineImageBlob] = relationship(
         "MedicineImageBlob", back_populates="links", lazy="joined"

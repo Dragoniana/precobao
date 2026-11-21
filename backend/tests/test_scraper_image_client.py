@@ -120,7 +120,7 @@ async def test_http_409_keeps_pending_image_for_manual_review(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_generic_source_image_is_skipped_without_download_or_upload(
+async def test_generic_source_image_is_downloaded_and_uploaded_as_fallback(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
@@ -130,12 +130,15 @@ async def test_generic_source_image_is_skipped_without_download_or_upload(
         requests.append(request)
         return httpx.Response(
             200,
-            headers={"content-type": "image/webp"},
+            headers={"content-type": "image/png"},
             content=_png(),
         )
 
-    async def upload(*_args, **_kwargs):
-        raise AssertionError("generic artwork must not be uploaded")
+    uploads = []
+
+    async def upload(_client, metadata, content):
+        uploads.append((metadata, content))
+        return {"status": "STORED", "is_generic": True}
 
     monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
     product = {
@@ -151,9 +154,21 @@ async def test_generic_source_image_is_skipped_without_download_or_upload(
             client, "araujo", product
         )
 
-    assert result == {"skipped": "generic_asset"}
-    assert requests == []
-    assert not (tmp_path / "outbox" / "images" / "araujo").exists()
+    assert result["status"] == "STORED"
+    assert result["is_generic_fallback"] is True
+    assert len(requests) == 1
+    assert len(uploads) == 1
+    assert uploads[0][0]["is_generic_fallback"] is True
+    assert uploads[0][1].startswith(b"RIFF")
+    cached = await scraper_image_client.download_and_upload_product_image(
+        client, "araujo", product
+    )
+    assert cached == {
+        "skipped": "generic_already_stored",
+        "is_generic_fallback": True,
+    }
+    assert len(requests) == len(uploads) == 1
+    assert not list((tmp_path / "outbox" / "images" / "araujo").glob("*.json"))
 
 
 @pytest.mark.asyncio
@@ -187,7 +202,7 @@ async def test_unavailable_source_image_does_not_create_outbox(
 
 
 @pytest.mark.asyncio
-async def test_generic_image_outbox_is_quarantined_and_preserved(
+async def test_generic_pacheco_outbox_replays_and_is_removed_after_confirmation(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
@@ -209,6 +224,13 @@ async def test_generic_image_outbox_is_quarantined_and_preserved(
         encoding="utf-8",
     )
     content.write_bytes(b"preserved image bytes")
+    attempts = []
+
+    async def upload(_client, metadata, image_bytes):
+        attempts.append((metadata, image_bytes))
+        return {"status": "STORED", "is_generic": True}
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
 
     async with httpx.AsyncClient() as client:
         first_run = await scraper_image_client.sync_pending_image_outbox(
@@ -217,10 +239,11 @@ async def test_generic_image_outbox_is_quarantined_and_preserved(
         second_run = await scraper_image_client.sync_pending_image_outbox(
             client, "pacheco"
         )
-        assert first_run == second_run == 0
+        assert first_run == 1
+        assert second_run == 0
 
-    quarantined = outbox / "quarantine"
+    assert attempts[0][0]["upload_id"] == "5ea270b4-3985-432d-a5a5-ada953993ca1"
+    assert attempts[0][0]["ean"] == "7891721027468"
+    assert attempts[0][1] == b"preserved image bytes"
     assert not manifest.exists()
     assert not content.exists()
-    assert (quarantined / manifest.name).exists()
-    assert (quarantined / content.name).read_bytes() == b"preserved image bytes"

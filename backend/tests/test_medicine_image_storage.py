@@ -127,6 +127,11 @@ def _request_body(
     upload_id: str | None = None,
     source_image_url: str = "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
     content_type: str | None = None,
+    source: str = "araujo",
+    sku: str = "ARJ101392",
+    ean: str | None = "7897705203095",
+    product_url: str = "https://www.araujo.com.br/produto/101392.html",
+    is_generic_fallback: bool = False,
 ) -> bytes:
     if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         detected = "image/webp"
@@ -136,11 +141,12 @@ def _request_body(
         detected = "image/jpeg"
     metadata = {
         "upload_id": upload_id or str(uuid4()),
-        "source": "araujo",
-        "sku": "ARJ101392",
-        "ean": "7897705203095",
-        "product_url": "https://www.araujo.com.br/produto/101392.html",
+        "source": source,
+        "sku": sku,
+        "ean": ean,
+        "product_url": product_url,
         "source_image_url": source_image_url,
+        "is_generic_fallback": is_generic_fallback,
         "content_type": content_type or detected,
         "content_sha256": hashlib.sha256(content).hexdigest(),
     }
@@ -371,24 +377,149 @@ def test_image_upload_rejects_bad_hmac_and_non_image_content(image_client):
         assert db.query(MedicineImageBlob).count() == 0
 
 
-def test_image_upload_rejects_known_generic_pharmacy_art(image_client):
+def test_generic_image_with_divergent_ean_is_offer_scoped_and_served_as_fallback(
+    image_client,
+):
     client, sessions, _catalog_id = image_client
     content = _image_bytes()
+    specific_body = _request_body(content)
+    specific = client.post(
+        IMAGE_UPLOAD_ENDPOINT,
+        content=specific_body,
+        headers=_headers(specific_body),
+    )
+    assert specific.status_code == 200
+    assert specific.json()["is_generic"] is False
+    source_url = (
+        "https://i3-imagens-prd.araujo.com.br/128666_7896026306751_1.webp"
+    )
     body = _request_body(
         content,
-        source_image_url=(
-            "https://i3-imagens-prd.araujo.com.br/128666_7896026306751_1.webp"
-        ),
+        source_image_url=source_url,
+        is_generic_fallback=True,
     )
 
     response = client.post(
         IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body)
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == "invalid_image_source"
+    assert response.status_code == 200
+    assert response.json()["is_generic"] is True
+    assert response.json()["catalog_id"] is None
+    assert response.json()["primary"] is False
     with sessions() as db:
-        assert db.query(MedicineImageBlob).count() == 0
+        link = db.execute(
+            select(MedicineImageLink).where(MedicineImageLink.is_generic.is_(True))
+        ).scalar_one()
+        assert link.ean == "7897705203095"
+        assert link.source_image_url == source_url
+        assert link.catalog_id is None
+        assert link.offer_id is not None
+        assert link.is_primary is False
+        specific_link = db.execute(
+            select(MedicineImageLink).where(
+                MedicineImageLink.offer_id == link.offer_id,
+                MedicineImageLink.is_generic.is_(False),
+            )
+        ).scalar_one()
+        assert specific_link.catalog_id == _catalog_id
+        assert specific_link.is_primary is True
+        catalog = client.get(f"/catalogo/medicamentos/{_catalog_id}").json()
+        assert catalog["imagem_armazenada"] is True
+        assert catalog["imagem_ref"].startswith(
+            f"/catalogo/medicamentos/{_catalog_id}/imagem?v="
+        )
+        assert catalog["ofertas"][0]["imagem_ref"].startswith(
+            f"/catalogo/ofertas/{link.offer_id}/imagem?v="
+        )
+        assert catalog["ofertas"][0]["imagem_generica"] is True
+        assert "image_data" not in json.dumps(catalog)
+    image = client.get(catalog["ofertas"][0]["imagem_ref"].split("?", 1)[0])
+    assert image.status_code == 200
+    assert image.content == content
+    assert image.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
+    assert client.get(
+        image.request.url.path,
+        headers={"If-None-Match": image.headers["etag"]},
+    ).status_code == 304
+
+
+def test_pacheco_generic_upload_allows_ean_conflict_without_catalog_association(
+    image_client,
+):
+    client, sessions, _catalog_id = image_client
+    with sessions() as db:
+        pharmacy = Farmacia(
+            cnpj="98765432000198",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Drogarias Pacheco",
+            endereco_completo="Rio de Janeiro - RJ",
+        )
+        catalog = db.execute(
+            select(CatalogoBase).where(CatalogoBase.codigo_barras == "7897705203095")
+        ).scalar_one()
+        offer = OfertaFarmacia(
+            sku_interno="PCH155349",
+            preco=18.00,
+            quantidade_estoque=1,
+            disponivel=True,
+            url_origem="https://www.drogariaspacheco.com.br/produto/155349/p",
+            imagem_url=None,
+            contexto_chave="global",
+            farmacia=pharmacy,
+            catalogo_id=catalog.id,
+        )
+        db.add(offer)
+        db.flush()
+        offer_id = offer.id
+        db.commit()
+    source_url = (
+        "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1138787/"
+        "de-referencia-tarja-vermelha-em-comprimido-pacheco.jpg"
+    )
+    body = _request_body(
+        _image_bytes(),
+        source="pacheco",
+        sku="PCH155349",
+        ean="7891721027468",
+        product_url="https://www.drogariaspacheco.com.br/produto/155349/p",
+        source_image_url=source_url,
+        is_generic_fallback=True,
+    )
+    response = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
+    assert response.status_code == 200
+    assert response.json()["offer_id"] == offer_id
+    assert response.json()["catalog_id"] is None
+    with sessions() as db:
+        link = db.execute(
+            select(MedicineImageLink).where(
+                MedicineImageLink.offer_id == offer_id,
+                MedicineImageLink.is_generic.is_(True),
+            )
+        ).scalar_one()
+        assert link.ean == "7891721027468"
+        assert link.catalog_id is None
+        assert db.query(MedicineImageBlob).count() == 1
+        assert db.query(MedicineImageLink).count() == 1
+
+
+def test_generic_flag_cannot_bypass_identity_for_a_specific_image(image_client):
+    client, sessions, _catalog_id = image_client
+    with sessions() as db:
+        offer = db.execute(select(OfertaFarmacia)).scalar_one()
+        product_url = offer.url_origem
+        sku = offer.sku_interno
+    body = _request_body(
+        _image_bytes(),
+        sku=sku,
+        product_url=product_url,
+        ean="7891721027468",
+        is_generic_fallback=True,
+    )
+    response = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "generic_image_not_recognized"
+    with sessions() as db:
         assert db.query(MedicineImageLink).count() == 0
 
 

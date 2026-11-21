@@ -212,6 +212,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "image_blobs_uploaded": 0,
         "image_download_failures": 0,
         "images_skipped_generic": 0,
+        "generic_fallback_images_uploaded": 0,
     }
     _write_state(source, state)
     timeout = float(os.getenv("SCRAPER_INGEST_TIMEOUT_SECONDS", "30"))
@@ -311,10 +312,15 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                     if image_result is None:
                         state["image_download_failures"] += 1
                         continue
-                    if image_result.get("skipped") == "generic_asset":
+                    if image_result.get("skipped") in {
+                        "generic_asset",
+                        "generic_already_stored",
+                    }:
                         state["images_skipped_generic"] += 1
                         _write_state(source, state)
                         continue
+                    if image_result.get("is_generic_fallback"):
+                        state["generic_fallback_images_uploaded"] += 1
                     state["image_blobs_uploaded"] += 1
                     state["image_bytes_uploaded"] = int(
                         state.get("image_bytes_uploaded", 0)
@@ -504,12 +510,49 @@ async def collect_source(source: str) -> dict[str, Any]:
         return await _collect_and_sync(source)
 
 
+async def sync_source_images(source: str) -> int:
+    """Replay only already-normalized images; never contact a pharmacy source."""
+    if source not in {"araujo", "pacheco"}:
+        raise ValueError("source must be araujo or pacheco")
+    endpoint = os.getenv("SCRAPER_INGEST_URL", "").strip()
+    secret = os.getenv("SCRAPER_INGEST_HMAC_SECRET", "")
+    if not endpoint.startswith("https://"):
+        raise RuntimeError("SCRAPER_INGEST_URL_MUST_BE_HTTPS")
+    if len(secret.encode("utf-8")) < 32:
+        raise RuntimeError("SCRAPER_INGEST_SECRET_NOT_CONFIGURED")
+    lock_path = _state_dir() / "locks" / f"{source}.lock"
+    with _exclusive_lock(lock_path):
+        timeout = float(os.getenv("SCRAPER_INGEST_TIMEOUT_SECONDS", "30"))
+        ca_bundle = os.getenv("SCRAPER_INGEST_CA_BUNDLE", "").strip()
+        async with httpx.AsyncClient(
+            verify=ca_bundle or True,
+            follow_redirects=False,
+            timeout=timeout,
+            trust_env=False,
+        ) as client:
+            uploaded = await sync_pending_image_outbox(client, source)
+    _log("image_outbox_replay_finished", source=source, images_uploaded=uploaded)
+    return uploaded
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Coleta direta e sincronização por lotes"
     )
     parser.add_argument("source", choices=("araujo", "pacheco"))
+    parser.add_argument(
+        "--images-only",
+        action="store_true",
+        help=(
+            "Replay outbox de imagens já coletadas sem acessar fontes "
+            "ou sincronizar ofertas"
+        ),
+    )
     args = parser.parse_args()
+    if args.images_only:
+        uploaded = await sync_source_images(args.source)
+        print(json.dumps({"source": args.source, "images_uploaded": uploaded}))
+        return
     result = await collect_source(args.source)
     if result.get("status") in {"ACCESS_BLOCKED", "SYNC_BLOCKED"}:
         raise SystemExit(2)

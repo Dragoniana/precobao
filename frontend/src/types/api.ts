@@ -22,6 +22,7 @@ export interface Oferta {
   fonte_observado_em?: string | null;
   imagem_rejeitada?: boolean;
   imagem_generica?: boolean;
+  imagem_ref?: string | null;
   criado_em?: string;
   atualizado_em?: string | null;
   observado_em?: string | null;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -22,6 +23,50 @@ from app.services.medicine_images import InvalidMedicineImage, normalize_medicin
 def _image_outbox_dir(source: str) -> Path:
     state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
     return state_dir.resolve() / "outbox" / "images" / source
+
+
+def _generic_image_cache_path() -> Path:
+    state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
+    return state_dir.resolve() / "generic-image-cache.json"
+
+
+def _generic_image_cache_key(metadata: dict[str, Any]) -> str:
+    identity = "\n".join(
+        str(metadata.get(field) or "")
+        for field in ("source", "sku", "product_url", "source_image_url")
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _generic_image_is_cached(metadata: dict[str, Any]) -> bool:
+    try:
+        cache = json.loads(_generic_image_cache_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError):
+        return False
+    return _generic_image_cache_key(metadata) in cache
+
+
+def _remember_generic_image(metadata: dict[str, Any]) -> None:
+    if not is_generic_image_url(str(metadata.get("source_image_url") or "")):
+        return
+    path = _generic_image_cache_path()
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(cache, dict):
+            cache = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        cache = {}
+    cache[_generic_image_cache_key(metadata)] = {
+        "source": metadata.get("source"),
+        "sku": metadata.get("sku"),
+        "source_image_url": metadata.get("source_image_url"),
+    }
+    _atomic_write(
+        path,
+        json.dumps(cache, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -74,13 +119,11 @@ async def _submit_pending_image(
     client: httpx.AsyncClient, metadata_path: Path
 ) -> dict[str, Any]:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    image_url = str(metadata.get("source_image_url") or "")
-    if is_generic_image_url(image_url):
-        raise BatchSyncError("scraper_generic_image_quarantined")
     content_path = metadata_path.with_suffix(".bin")
     if not content_path.is_file():
         raise BatchSyncError("scraper_image_outbox_content_missing")
     result = await post_image_upload(client, metadata, content_path.read_bytes())
+    _remember_generic_image(metadata)
     # The manifest is the outbox commit marker. Remove it first so an
     # interruption can leave only a harmless orphaned binary, never a broken
     # manifest that blocks the next replay.
@@ -101,24 +144,9 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
             destination = orphan_directory / f"{content_path.stem}-{uuid4().hex}.bin"
             content_path.replace(destination)
     uploaded = 0
-    quarantine = directory / "quarantine"
     for metadata_path in sorted(directory.glob("*.json")):
         try:
             await _submit_pending_image(client, metadata_path)
-        except BatchSyncError as error:
-            if str(error) != "scraper_generic_image_quarantined":
-                raise
-            content_path = metadata_path.with_suffix(".bin")
-            quarantine.mkdir(parents=True, exist_ok=True)
-            quarantined_metadata = quarantine / metadata_path.name
-            quarantined_content = quarantine / content_path.name
-            if quarantined_metadata.exists() or quarantined_content.exists():
-                raise BatchSyncError("scraper_generic_image_quarantine_conflict")
-            # Move content first. If interrupted, the remaining manifest can
-            # still identify the generic image and be quarantined next run.
-            if content_path.exists():
-                content_path.replace(quarantined_content)
-            metadata_path.replace(quarantined_metadata)
         except (OSError, json.JSONDecodeError) as error:
             raise BatchSyncError("scraper_image_outbox_invalid") from error
         else:
@@ -132,12 +160,20 @@ async def download_and_upload_product_image(
     image_url = str(product.get("imagem_url") or "").strip()
     if not image_url:
         return None
-    if is_generic_image_url(image_url):
-        return {"skipped": "generic_asset"}
     product_url = str(product.get("link") or "").strip()
     pharmacy_name = "Araujo" if source == "araujo" else "Pacheco"
     if offer_image_delivery_rejection_reason(image_url, product_url, pharmacy_name):
         return None
+    generic = is_generic_image_url(image_url)
+    if generic and _generic_image_is_cached(
+        {
+            "source": source,
+            "sku": str(product.get("sku_interno") or ""),
+            "product_url": product_url,
+            "source_image_url": image_url,
+        }
+    ):
+        return {"skipped": "generic_already_stored", "is_generic_fallback": True}
     try:
         raw, source_content_type = await _download_image(client, image_url)
         normalized = normalize_medicine_image(
@@ -160,6 +196,7 @@ async def download_and_upload_product_image(
         "ean": str(product.get("ean") or "") or None,
         "product_url": product_url,
         "source_image_url": image_url,
+        "is_generic_fallback": generic,
         "content_type": normalized.content_type,
         "content_sha256": normalized.sha256,
     }
@@ -174,6 +211,7 @@ async def download_and_upload_product_image(
     result = await _submit_pending_image(client, metadata_path)
     return {
         **result,
+        "is_generic_fallback": metadata["is_generic_fallback"],
         "source_size_bytes": len(raw),
         "normalized_size_bytes": len(normalized.content),
         "normalized_sha256": normalized.sha256,

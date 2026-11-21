@@ -30,6 +30,10 @@ Não habilite as fontes antes da instalação da API/migration aprovada e da hom
 # Ver status local, log, outbox e checkpoints
 .\deploy\windows-scraper-collector\Status-Collector.ps1
 
+# Reenviar somente imagens que já estão na outbox; não consulta as farmácias
+.\deploy\windows-scraper-collector\Sync-Pending-Images.ps1 -Source pacheco
+.\deploy\windows-scraper-collector\Sync-Pending-Images.ps1 -Source araujo
+
 # Pedir parada segura (termina a página/lote atual) e suspender tarefas
 .\deploy\windows-scraper-collector\Stop-Collector.ps1
 

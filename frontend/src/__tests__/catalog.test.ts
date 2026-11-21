@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { api } from '../services/api';
-import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
+import { fetchCatalogPage, fetchFilterOptions, FilterOption, isGenericOfferImage, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
 
@@ -65,6 +65,31 @@ it('prefers the API-served database image while keeping legacy URLs as fallback'
   expect(images[0]).toContain('/catalogo/medicamentos/42/imagem?v=abc123');
   expect(images).toContain('https://cdn.example.test/legacy-pack.jpg');
   expect(images).toContain('https://shop.example.test/older-pack.jpg');
+});
+
+it('uses a pharmacy-scoped generic image after specific catalog images', () => {
+  const medicine = {
+    ...item,
+    id: 71,
+    nome: 'Medicamento de teste',
+    imagem_urls: ['https://cdn.example.test/specific-pack.webp'],
+    ofertas: [{
+      id: 915,
+      farmacia_id: 2,
+      catalogo_id: 71,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/915/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/915/imagem?v=abc123',
+    }],
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toBe('https://cdn.example.test/specific-pack.webp');
+  expect(images[1]).toContain('/catalogo/ofertas/915/imagem?v=abc123');
+  expect(isGenericOfferImage(medicine, images[1])).toBe(true);
 });
 
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
