@@ -50,17 +50,23 @@ export function resolveMedicineImages(medicine: Medicamento): string[] {
   const urls = Array.isArray(medicine.imagem_urls) ? medicine.imagem_urls : [];
   const legacyRef = medicine.imagem_ref?.startsWith('/catalogo/medicamentos/')
     ? `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}` : undefined;
+  const specificCandidates = medicine.imagem_armazenada && legacyRef
+    ? [legacyRef, ...urls, medicine.imagem_url]
+    : [...urls, medicine.imagem_url, legacyRef];
   const offerFallbacks = medicine.ofertas
     .filter((offer) => offer.imagem_generica && offer.imagem_ref)
     .map((offer) => offer.imagem_ref!.startsWith('/')
       ? `${API_URL.replace(/\/+$/, '')}${offer.imagem_ref}`
       : offer.imagem_ref!);
-  const ordered = medicine.imagem_armazenada && legacyRef
-    ? [legacyRef, ...urls, medicine.imagem_url, ...offerFallbacks]
-    : [...urls, medicine.imagem_url, legacyRef, ...offerFallbacks];
-  return [...new Set(ordered
+  const validHttps = (ordered: (string | null | undefined)[]) => [...new Set(ordered
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
+
+  // Bound failed network attempts while still reserving slots for offer images.
+  // Catalog-specific images always get tried before pharmacy generic fallbacks.
+  const specific = validHttps(specificCandidates).slice(0, 3);
+  const generic = validHttps(offerFallbacks).slice(0, 2);
+  return [...new Set([...specific, ...generic])];
 }
 
 export function isGenericOfferImage(medicine: Medicamento, url: string | undefined): boolean {

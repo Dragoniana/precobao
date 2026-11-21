@@ -7,6 +7,8 @@ import { isGenericOfferImage, resolveMedicineImages } from '../services/catalog'
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 import { Medicamento } from '../types/api';
 
+const IMAGE_REQUEST_TIMEOUT_MS = 12_000;
+
 type MedicineImageProps = {
   medicine: Medicamento;
   style?: StyleProp<ViewStyle>;
@@ -29,6 +31,14 @@ export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem ind
     setFailedIndex(0);
     setImageLoaded(false);
   }, [imageKey]);
+
+  useEffect(() => {
+    if (!visibleUrl || imageLoaded) return undefined;
+    const timeout = setTimeout(() => {
+      setFailedIndex((index) => index + 1);
+    }, IMAGE_REQUEST_TIMEOUT_MS);
+    return () => clearTimeout(timeout);
+  }, [imageLoaded, visibleUrl]);
 
   return (
     <View testID="medicine-image-frame" style={[styles.container, style]}>
