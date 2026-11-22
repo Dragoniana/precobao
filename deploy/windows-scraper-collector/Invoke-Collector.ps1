@@ -30,6 +30,19 @@ if ($MaxProductsPerRun -gt 0) {
 } else {
     Remove-Item Env:SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN -ErrorAction SilentlyContinue
 }
+$medicineLimit = 50
+$medicineShare = 25
+$httpRequestLimit = 50
+$httpPerSourceLimit = 25
+$imageReplayLimit = 5
+if ($settings.PSObject.Properties.Name -contains 'max_medicines_per_window') { $medicineLimit = [int]$settings.max_medicines_per_window }
+if ($settings.PSObject.Properties.Name -contains 'max_medicines_per_source_share') { $medicineShare = [int]$settings.max_medicines_per_source_share }
+if ($settings.PSObject.Properties.Name -contains 'max_http_requests_per_window') { $httpRequestLimit = [int]$settings.max_http_requests_per_window }
+if ($settings.PSObject.Properties.Name -contains 'max_http_requests_per_source_per_window') { $httpPerSourceLimit = [int]$settings.max_http_requests_per_source_per_window }
+if ($settings.PSObject.Properties.Name -contains 'max_image_downloads_per_run') { $imageReplayLimit = [int]$settings.max_image_downloads_per_run }
+if ($medicineLimit -lt 1 -or $medicineLimit -gt 50 -or $medicineShare -lt 1 -or $medicineShare -gt $medicineLimit -or $httpRequestLimit -lt 1 -or $httpRequestLimit -gt 50 -or $httpPerSourceLimit -lt 1 -or $httpPerSourceLimit -gt $httpRequestLimit -or $imageReplayLimit -lt 0) {
+    throw 'Configuração do orçamento de medicamentos/requisições inválida.'
+}
 if ($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) {
     $env:SCRAPER_COLLECTOR_SCHEDULED = 'true'
 } else {
@@ -59,10 +72,16 @@ try {
     $env:SCRAPER_COLLECTION_ENV_AUTHORIZED = [string]$settings.collection_environment_authorized
     $env:SCRAPER_COLLECTOR_STATE_DIR = $stateDir
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED = 'true'
-    $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = '50'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = [string]$httpRequestLimit
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = '900'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_PER_SOURCE_MAX_REQUESTS = [string]$httpPerSourceLimit
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = Join-Path $stateDir 'rate-limit'
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE = if ($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) { 'stop' } else { 'wait' }
+    $env:SCRAPER_MEDICINE_BUDGET_MAX = [string]$medicineLimit
+    $env:SCRAPER_MEDICINE_BUDGET_WINDOW_SECONDS = '900'
+    $env:SCRAPER_MEDICINE_BUDGET_SOURCE_SHARE = [string]$medicineShare
+    $env:SCRAPER_MEDICINE_BUDGET_STATE_DIR = Join-Path $stateDir 'medicine-budget'
+    $env:SCRAPER_IMAGE_REPLAY_MAX_PER_RUN = [string]$imageReplayLimit
     $env:SCRAPER_COLLECTOR_STOP_FILE = $settings.stop_file
     $env:SCRAPER_COLLECTOR_SCHEDULE_TIMES = ($settings.schedule_times -join ',')
     $env:SCRAPER_COLLECTOR_TIMEZONE = $settings.timezone
@@ -180,6 +199,12 @@ try {
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = $null
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_PER_SOURCE_MAX_REQUESTS = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE = $null
+    $env:SCRAPER_MEDICINE_BUDGET_MAX = $null
+    $env:SCRAPER_MEDICINE_BUDGET_WINDOW_SECONDS = $null
+    $env:SCRAPER_MEDICINE_BUDGET_SOURCE_SHARE = $null
+    $env:SCRAPER_MEDICINE_BUDGET_STATE_DIR = $null
+    $env:SCRAPER_IMAGE_REPLAY_MAX_PER_RUN = $null
 }

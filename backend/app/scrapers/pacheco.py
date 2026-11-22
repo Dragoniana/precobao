@@ -105,9 +105,10 @@ class PachecoScraper(BasePharmacyScraper):
         self.items_enqueued = 0
         self._seen_source_ids: set[str] = set()
         self.products_callback: (
-            Callable[[list[dict[str, Any]]], Awaitable[None]] | None
+            Callable[[list[dict[str, Any]]], Awaitable[int | None]] | None
         ) = None
         self.stop_requested_callback: Callable[[], bool] | None = None
+        self.stop_reason_callback: Callable[[], str | None] | None = None
         self.collector_delivery_failed = False
 
     @staticmethod
@@ -262,7 +263,12 @@ class PachecoScraper(BasePharmacyScraper):
                         self.persistence_stats[key]
                         for key in ("persistence_errors", "image_errors")
                     )
-                    if self.stats["complete"] and persistence_ok:
+                    if self.stats.get("stop_reason") in {
+                        "HTTP_BUDGET_EXHAUSTED",
+                        "MEDICINE_BUDGET_EXHAUSTED",
+                    }:
+                        self.stats["status"] = self.stats["stop_reason"]
+                    elif self.stats["complete"] and persistence_ok:
                         self.stats["status"] = "complete"
                     elif self.stats["stop_reason"] == "configured_item_limit":
                         self.stats["status"] = "limited"
@@ -346,7 +352,11 @@ class PachecoScraper(BasePharmacyScraper):
                     initial_offset=max(0, int(cursor.get("offset", 0))),
                     cursor_stage="root",
                 )
-            if self.stats.get("stop_reason") == "safe_stop_requested":
+            if self.stats.get("stop_reason") in {
+                "safe_stop_requested",
+                "HTTP_BUDGET_EXHAUSTED",
+                "MEDICINE_BUDGET_EXHAUSTED",
+            }:
                 return
             if self._limit_reached():
                 return
@@ -381,9 +391,9 @@ class PachecoScraper(BasePharmacyScraper):
                     int(brand.get("Quantity", 0)) for brand in brands
                 )
                 self._write_checkpoint()
-            except ExternalRequestDeferred:
-                self.stats["stop_reason"] = "budget_exhausted"
-                self.stats["status"] = "partial"
+            except ExternalRequestDeferred as deferred:
+                self.stats["stop_reason"] = deferred.reason
+                self.stats["status"] = deferred.reason
                 self._write_checkpoint()
                 raise
             except Exception as error:
@@ -460,7 +470,11 @@ class PachecoScraper(BasePharmacyScraper):
                     cursor_brand_index=brand_index,
                     cursor_brand_path=path,
                 )
-                if self.stats.get("stop_reason") == "safe_stop_requested":
+                if self.stats.get("stop_reason") in {
+                    "safe_stop_requested",
+                    "HTTP_BUDGET_EXHAUSTED",
+                    "MEDICINE_BUDGET_EXHAUSTED",
+                }:
                     break
                 if succeeded:
                     self.stats["brands_processed"] += 1
@@ -523,6 +537,10 @@ class PachecoScraper(BasePharmacyScraper):
     ) -> bool:
         """Read a VTEX partition using its advertised item count when available."""
         offset = initial_offset
+        resume_item_index = max(
+            0,
+            int((self.stats.get("scan_cursor") or {}).get("item_index", 0)),
+        )
         while True:
             if self._limit_reached():
                 return True
@@ -631,15 +649,43 @@ class PachecoScraper(BasePharmacyScraper):
 
                 self.stats["products_seen"] += len(raw_products)
                 page_products = self._queue_source_products(raw_products)
+                parsed_count = len(page_products)
+                page_products = page_products[resume_item_index:]
                 if self.products_callback is not None and page_products:
                     try:
-                        await self.products_callback(page_products)
+                        delivered = await self.products_callback(page_products)
                     except Exception:
                         self.collector_delivery_failed = True
                         raise
+                else:
+                    delivered = len(page_products)
+                delivered = len(page_products) if delivered is None else int(delivered)
+                if delivered < 0 or delivered > len(page_products):
+                    self._page_failed("Invalid delivered medicine count")
+                    return False
+                self.stats["products_enqueued"] = max(
+                    0,
+                    self.stats["products_enqueued"]
+                    - parsed_count
+                    + delivered,
+                )
+                self.items_enqueued = max(
+                    0, self.items_enqueued - parsed_count + delivered
+                )
                 self.stats["pages_succeeded"] += 1
-                self.stats["last_completed_offset"] = offset
-                cursor = {"stage": cursor_stage, "offset": offset + self.ITEMS_PER_PAGE}
+                page_is_partial = delivered < len(page_products)
+                if page_is_partial:
+                    cursor = {
+                        "stage": cursor_stage,
+                        "offset": offset,
+                        "item_index": resume_item_index + delivered,
+                    }
+                else:
+                    self.stats["last_completed_offset"] = offset
+                    cursor = {
+                        "stage": cursor_stage,
+                        "offset": offset + self.ITEMS_PER_PAGE,
+                    }
                 if cursor_stage == "brand":
                     cursor["brand_index"] = cursor_brand_index
                     cursor["brand_path"] = cursor_brand_path
@@ -652,10 +698,24 @@ class PachecoScraper(BasePharmacyScraper):
                 if self.request_delay:
                     await asyncio.sleep(self.request_delay)
 
-                if self.stop_requested_callback and self.stop_requested_callback():
-                    self.stats["stop_reason"] = "safe_stop_requested"
+                stop_reason = (
+                    self.stop_reason_callback()
+                    if self.stop_reason_callback
+                    else None
+                )
+                if stop_reason is None and self.stop_requested_callback:
+                    if self.stop_requested_callback():
+                        stop_reason = "safe_stop_requested"
+                if stop_reason:
+                    self.stats["stop_reason"] = stop_reason
                     self._write_checkpoint()
                     return True
+
+                if page_is_partial:
+                    self.stats["stop_reason"] = "configured_product_budget_exhausted"
+                    self._write_checkpoint()
+                    return True
+                resume_item_index = 0
 
                 if self._limit_reached():
                     return True
@@ -681,9 +741,9 @@ class PachecoScraper(BasePharmacyScraper):
                         self.stats["stop_reason"] = "short_page_end_of_partition"
                     return True
                 offset += self.ITEMS_PER_PAGE
-            except ExternalRequestDeferred:
-                self.stats["stop_reason"] = "budget_exhausted"
-                self.stats["status"] = "partial"
+            except ExternalRequestDeferred as deferred:
+                self.stats["stop_reason"] = deferred.reason
+                self.stats["status"] = deferred.reason
                 self._write_checkpoint()
                 raise
             except Exception as error:

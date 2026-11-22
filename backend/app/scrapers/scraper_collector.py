@@ -19,6 +19,12 @@ os.environ["DATABASE_URL"] = "sqlite://"
 
 import httpx
 
+from app.scrapers.medicine_budget import (
+    mark_source_run,
+    medicine_budget_status,
+    reserve_product,
+    update_product_status,
+)
 from app.scrapers.scraper_batch_client import BatchSyncError, post_batch
 from app.scrapers.scraper_image_client import (
     download_and_upload_product_image,
@@ -31,7 +37,7 @@ from app.scrapers.source_modes import (
     direct_access_ready,
     source_mode,
 )
-from app.scrapers.source_rate_limiter import ExternalRequestDeferred
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred, rate_budget_status
 
 
 def _state_dir() -> Path:
@@ -64,22 +70,39 @@ def _queue_image_fetch(source: str, product: dict[str, Any]) -> None:
         "link": str(product.get("link") or ""),
         "imagem_url": image_url,
         "queued_at": datetime.now(UTC).isoformat(),
+        "attempt_count": 0,
+        "status": "PENDING",
+        "next_retry_at": None,
     }
     key = hashlib.sha256(
-        "\n".join(
-            (source, payload["sku_interno"], payload["link"], image_url)
-        ).encode("utf-8")
+        "\n".join((source, payload["sku_interno"], payload["link"], image_url)).encode(
+            "utf-8"
+        )
     ).hexdigest()
     path = _image_fetch_outbox_dir(source) / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         return
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{key}-", suffix=".tmp", dir=path.parent
-    )
+    fd, temporary = tempfile.mkstemp(prefix=f".{key}-", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _write_image_fetch_manifest(path: Path, product: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(product, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -92,10 +115,17 @@ async def _replay_image_fetch_outbox(
     client: httpx.AsyncClient, source: str, state: dict[str, Any]
 ) -> str | None:
     """Resume deferred source-image downloads, returning a controlled stop code."""
+    max_attempts = int(os.getenv("SCRAPER_IMAGE_REPLAY_MAX_PER_RUN", "5"))
+    max_retries = int(os.getenv("SCRAPER_IMAGE_FETCH_MAX_ATTEMPTS", "3"))
+    if max_attempts < 0 or max_retries < 1:
+        raise ValueError("Invalid image replay limits")
     directory = _image_fetch_outbox_dir(source)
     if not directory.exists():
         return None
+    attempts = 0
     for path in sorted(directory.glob("*.json")):
+        if attempts >= max_attempts:
+            break
         try:
             product = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(product, dict):
@@ -103,9 +133,31 @@ async def _replay_image_fetch_outbox(
         except (OSError, json.JSONDecodeError, ValueError):
             _log("image_fetch_outbox_invalid", source=source)
             continue
+        if product.get("status") == "DEAD_LETTER":
+            continue
+        retry_at_value = product.get("next_retry_at")
+        if retry_at_value:
+            try:
+                retry_at = datetime.fromisoformat(str(retry_at_value))
+            except ValueError:
+                product["status"] = "DEAD_LETTER"
+                product["last_reason"] = "invalid_retry_time"
+                _write_image_fetch_manifest(path, product)
+                continue
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            if datetime.now(UTC) < retry_at.astimezone(UTC):
+                continue
+        attempts += 1
         try:
             result = await download_and_upload_product_image(client, source, product)
         except ExternalRequestDeferred as deferred:
+            update_product_status(
+                source,
+                str(product.get("sku_interno") or ""),
+                "DEFERRED_IMAGE",
+                reason=deferred.reason.casefold(),
+            )
             return deferred.reason
         except (BatchSyncError, OSError) as error:
             _record_image_failure(
@@ -124,6 +176,56 @@ async def _replay_image_fetch_outbox(
             path.unlink(missing_ok=True)
             continue
         if result.get("image_failure_reason"):
+            reason = str(result["image_failure_reason"])
+            if reason == "image_source_http_429":
+                update_product_status(
+                    source,
+                    str(product.get("sku_interno") or ""),
+                    "DEFERRED_IMAGE",
+                    reason=reason,
+                )
+                return "RATE_LIMITED"
+            retryable = any(
+                token in reason
+                for token in ("timeout", "transport", "http_5", "local_io")
+            )
+            if retryable:
+                attempt_count = int(product.get("attempt_count", 0)) + 1
+                product["attempt_count"] = attempt_count
+                product["last_reason"] = reason
+                if attempt_count >= max_retries:
+                    product["status"] = "DEAD_LETTER"
+                    product["next_retry_at"] = None
+                    update_product_status(
+                        source,
+                        str(product.get("sku_interno") or ""),
+                        "FAILED",
+                        reason=reason,
+                    )
+                else:
+                    delay = min(60 * (2 ** (attempt_count - 1)), 12 * 60 * 60)
+                    product["status"] = "PENDING"
+                    product["next_retry_at"] = (
+                        datetime.now(UTC) + timedelta(seconds=delay)
+                    ).isoformat()
+                    update_product_status(
+                        source,
+                        str(product.get("sku_interno") or ""),
+                        "DEFERRED_IMAGE",
+                        reason=reason,
+                    )
+                _write_image_fetch_manifest(path, product)
+                _record_image_failure(
+                    state,
+                    source,
+                    sku=str(product.get("sku_interno") or ""),
+                    category="download",
+                    reason=reason,
+                )
+                continue
+            update_product_status(
+                source, str(product.get("sku_interno") or ""), "FAILED", reason=reason
+            )
             if result["image_failure_reason"] == "image_source_http_429":
                 return "RATE_LIMITED"
             _record_image_failure(
@@ -133,13 +235,31 @@ async def _replay_image_fetch_outbox(
                 category="download",
                 reason=str(result["image_failure_reason"]),
             )
+            product["status"] = "DEAD_LETTER"
+            product["last_reason"] = str(result["image_failure_reason"])
+            product["next_retry_at"] = None
+            _write_image_fetch_manifest(path, product)
+            _write_state(source, state)
+            continue
         elif result.get("skipped") in {"generic_asset", "generic_already_stored"}:
             state["images_skipped_generic"] += 1
+            update_product_status(
+                source,
+                str(product.get("sku_interno") or ""),
+                "COMPLETE_WITH_GENERIC_IMAGE",
+            )
         else:
             state["image_blobs_uploaded"] += 1
             state["image_bytes_uploaded"] = int(
                 state.get("image_bytes_uploaded", 0)
             ) + int(result.get("normalized_size_bytes", 0))
+            update_product_status(
+                source,
+                str(product.get("sku_interno") or ""),
+                "COMPLETE_WITH_GENERIC_IMAGE"
+                if result.get("is_generic_fallback")
+                else "COMPLETE_WITH_IMAGE",
+            )
         path.unlink(missing_ok=True)
         _write_state(source, state)
     return None
@@ -194,6 +314,8 @@ def _exit_code_for_status(status: str) -> int:
         "DISABLED": 8,
         "ALREADY_RUNNING": 9,
         "BUDGET_EXHAUSTED": 12,
+        "HTTP_BUDGET_EXHAUSTED": 12,
+        "MEDICINE_BUDGET_EXHAUSTED": 14,
         "CONFIGURED_PRODUCT_LIMIT": 13,
     }.get(status.upper(), 7)
 
@@ -521,6 +643,11 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         "image_sync_status": "OK",
         "images_skipped_generic": 0,
         "generic_fallback_images_uploaded": 0,
+        "medicines_processed": 0,
+        "medicines_with_real_image": 0,
+        "medicines_with_generic_image": 0,
+        "medicines_without_image": 0,
+        "medicines_image_deferred": 0,
     }
     if stale_run:
         state["previous_run_started_at"] = previous.get("started_at")
@@ -549,6 +676,24 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             response = await post_batch(client, payload)
             rejected_items = response.get("rejected_items") or []
             _persist_rejected_products(source, payload, rejected_items)
+            rejected_skus = {
+                str(item.get("sku_interno") or "") for item in rejected_items
+            }
+            for product in payload.get("products", []):
+                sku = str(product.get("sku_interno") or "").strip()
+                if not sku:
+                    continue
+                if sku in rejected_skus:
+                    update_product_status(source, sku, "IDENTITY_CONFLICT")
+                elif product.get("imagem_url"):
+                    update_product_status(source, sku, "DEFERRED_IMAGE")
+                else:
+                    update_product_status(
+                        source,
+                        sku,
+                        "COMPLETE_WITHOUT_IMAGE",
+                        reason="image_url_missing",
+                    )
             already_confirmed = state.get("last_batch_id") == payload["batch_id"]
             accepted_count = int(
                 response.get(
@@ -628,15 +773,35 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
         async def send_page(products: list[dict[str, Any]]) -> int:
             nonlocal products_selected, product_limit_reached, scheduled_stop_reason
             nonlocal current_operation
-            if max_products_per_run is not None:
-                products = _select_page_products(
-                    products, products_selected, max_products_per_run
-                )
-                if not products:
+            page_consumed = 0
+            selected_products: list[dict[str, Any]] = []
+            for product in products:
+                if (
+                    max_products_per_run is not None
+                    and products_selected >= max_products_per_run
+                ):
                     product_limit_reached = True
-                    return 0
-                products_selected += len(products)
-                product_limit_reached = products_selected >= max_products_per_run
+                    break
+                sku = str(product.get("sku_interno") or "").strip()
+                reservation = reserve_product(source, sku)
+                if reservation == "DUPLICATE":
+                    page_consumed += 1
+                    continue
+                if reservation == "IDENTITY_MISSING":
+                    page_consumed += 1
+                    state["products_rejected"] += 1
+                    _log("medicine_identity_missing", source=source)
+                    continue
+                if reservation == "EXHAUSTED":
+                    scheduled_stop_reason = "MEDICINE_BUDGET_EXHAUSTED"
+                    break
+                selected_products.append(product)
+                products_selected += 1
+                page_consumed += 1
+                state["medicines_processed"] += 1
+            if not selected_products:
+                return page_consumed
+            products = selected_products
             observed_at = datetime.now(UTC)
             normalized = []
             for product in products:
@@ -665,10 +830,17 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 str(item.get("sku_interno") or "")
                 for item in response.get("rejected_items", [])
             }
-            for image_index, product in enumerate(normalized):
-                if str(product.get("sku_interno") or "") in rejected_skus:
+            for product in normalized:
+                sku = str(product.get("sku_interno") or "").strip()
+                if sku in rejected_skus:
+                    update_product_status(source, sku, "IDENTITY_CONFLICT")
                     continue
-                if not product.get("imagem_url"):
+                if product.get("imagem_url"):
+                    current_operation = "persist_image_fetch_work"
+                    _queue_image_fetch(source, product)
+                    state["medicines_image_deferred"] += 1
+                    update_product_status(source, sku, "DEFERRED_IMAGE")
+                else:
                     _record_image_failure(
                         state,
                         source,
@@ -676,117 +848,17 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                         category="download",
                         reason="source_image_url_missing",
                     )
-                    continue
-                try:
-                    current_operation = "download_upload_image"
-                    image_result = await download_and_upload_product_image(
-                        client, source, product
-                    )
-                except ExternalRequestDeferred as deferred:
-                    scheduled_stop_reason = deferred.reason
-                    for pending_product in normalized[image_index:]:
-                        if (
-                            str(pending_product.get("sku_interno") or "")
-                            in rejected_skus
-                        ):
-                            continue
-                        current_operation = "persist_deferred_image_work"
-                        _queue_image_fetch(source, pending_product)
-                    pending_images = sum(
-                        1 for _ in _image_fetch_outbox_dir(source).glob("*.json")
-                    )
-                    state["image_downloads_pending"] = pending_images
-                    _write_state(source, state)
-                    _log(
-                        "image_fetch_outbox_saved",
-                        source=source,
-                        pending=pending_images,
-                    )
-                    _log(
-                        "budget_exhausted"
-                        if deferred.reason == "BUDGET_EXHAUSTED"
-                        else "source_cooldown_deferred",
-                        source=source,
-                        reason=deferred.reason,
-                        pending_image_downloads=pending_images,
-                        wait_seconds=round(deferred.wait_seconds, 2),
-                    )
-                    break
-                except (BatchSyncError, OSError) as error:
-                    _record_image_failure(
-                        state,
+                    update_product_status(
                         source,
-                        sku=str(product.get("sku_interno") or ""),
-                        category="upload",
-                        reason=(
-                            str(error)
-                            if isinstance(error, BatchSyncError)
-                            else "image_outbox_local_io_error"
-                        ),
+                        str(product.get("sku_interno") or ""),
+                        "COMPLETE_WITHOUT_IMAGE",
+                        reason="image_url_missing",
                     )
-                    continue
-                if image_result and image_result.get("image_failure_reason"):
-                    reason = str(image_result["image_failure_reason"])
-                    _record_image_failure(
-                        state,
-                        source,
-                        sku=str(product.get("sku_interno") or ""),
-                        category="download",
-                        reason=reason,
-                    )
-                    if reason == "image_source_http_429":
-                        scheduled_stop_reason = "RATE_LIMITED"
-                        for pending_product in normalized[image_index:]:
-                            if (
-                                str(pending_product.get("sku_interno") or "")
-                                in rejected_skus
-                            ):
-                                continue
-                            current_operation = "persist_deferred_image_work"
-                            _queue_image_fetch(source, pending_product)
-                        pending_images = sum(
-                            1
-                            for _ in _image_fetch_outbox_dir(source).glob("*.json")
-                        )
-                        state["image_downloads_pending"] = pending_images
-                        _write_state(source, state)
-                        _log(
-                            "image_fetch_outbox_saved",
-                            source=source,
-                            pending=pending_images,
-                            reason="http_429",
-                        )
-                        _log(
-                            "source_cooldown_deferred",
-                            source=source,
-                            reason="RATE_LIMITED",
-                            operation="download_upload_image",
-                        )
-                        break
-                    continue
-                if image_result is None:
-                    _record_image_failure(
-                        state,
-                        source,
-                        sku=str(product.get("sku_interno") or ""),
-                        category="download",
-                        reason="image_result_missing",
-                    )
-                    continue
-                if image_result.get("skipped") in {
-                    "generic_asset",
-                    "generic_already_stored",
-                }:
-                    state["images_skipped_generic"] += 1
-                    _write_state(source, state)
-                    continue
-                if image_result.get("is_generic_fallback"):
-                    state["generic_fallback_images_uploaded"] += 1
-                state["image_blobs_uploaded"] += 1
-                state["image_bytes_uploaded"] = int(
-                    state.get("image_bytes_uploaded", 0)
-                ) + int(image_result["normalized_size_bytes"])
-                _write_state(source, state)
+                    state["medicines_without_image"] += 1
+            state["image_downloads_pending"] = sum(
+                1 for _ in _image_fetch_outbox_dir(source).glob("*.json")
+            )
+            _write_state(source, state)
             _log(
                 "page_synced",
                 source=source,
@@ -795,7 +867,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 rejected=int(response.get("rejected_count", 0)),
                 status=response.get("status"),
             )
-            return len(normalized)
+            return page_consumed
 
         def stop_source_collection_reason() -> str | None:
             if scheduled_stop_reason:
@@ -818,21 +890,25 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 1 for _ in _image_fetch_outbox_dir(source).glob("*.json")
             )
             if deferred_image_stop:
-                state["status"] = deferred_image_stop
-                state["stop_reason"] = deferred_image_stop.casefold()
-                state["finished_at"] = datetime.now(UTC).isoformat()
-                _write_state(source, state)
+                if deferred_image_stop == "HTTP_BUDGET_EXHAUSTED":
+                    scheduled_stop_reason = deferred_image_stop
+                else:
+                    state["status"] = deferred_image_stop
+                    state["stop_reason"] = deferred_image_stop.casefold()
+                    state["finished_at"] = datetime.now(UTC).isoformat()
+                    _write_state(source, state)
                 _log(
-                    "budget_exhausted"
-                    if deferred_image_stop == "BUDGET_EXHAUSTED"
+                    "http_budget_exhausted"
+                    if deferred_image_stop == "HTTP_BUDGET_EXHAUSTED"
                     else "source_cooldown_deferred",
                     source=source,
                     reason=deferred_image_stop,
                     operation="replay_deferred_image_downloads",
                     pending_image_downloads=state["image_downloads_pending"],
                 )
-                _log("run_finished", source=source, status=state["status"])
-                return state
+                if deferred_image_stop != "HTTP_BUDGET_EXHAUSTED":
+                    _log("run_finished", source=source, status=state["status"])
+                    return state
             if source == "araujo":
                 from app.scrapers.araujo import AraujoScraper
 
@@ -885,6 +961,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 )
                 scraper.products_callback = send_page
                 scraper.stop_requested_callback = stop_source_collection
+                scraper.stop_reason_callback = stop_source_collection_reason
                 current_operation = "collect_catalog"
                 with scraper._run_lock():
                     scraper._start_run()
@@ -897,6 +974,11 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                             scraper.stats["status"] = "blocked"
                         elif http_status == 429:
                             scraper.stats["status"] = "rate_limited"
+                        elif scraper.stats.get("stop_reason") in {
+                            "HTTP_BUDGET_EXHAUSTED",
+                            "MEDICINE_BUDGET_EXHAUSTED",
+                        }:
+                            scraper.stats["status"] = scraper.stats["stop_reason"]
                         elif scraper.collector_delivery_failed:
                             scraper.stats["status"] = "incomplete"
                         elif scraper.stats.get("complete"):
@@ -944,9 +1026,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             checkpoint_name = (
                 "source-checkpoint.json" if source == "araujo" else "checkpoint.json"
             )
-            checkpoint_path = (
-                _state_dir() / "sources" / source / checkpoint_name
-            )
+            checkpoint_path = _state_dir() / "sources" / source / checkpoint_name
             try:
                 checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
                 checkpoint_position = (
@@ -1003,7 +1083,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             _write_state(source, state)
             _log(
                 "budget_exhausted"
-                if deferred.reason == "BUDGET_EXHAUSTED"
+                if deferred.reason == "HTTP_BUDGET_EXHAUSTED"
                 else "source_cooldown_deferred",
                 source=source,
                 reason=deferred.reason,
@@ -1087,7 +1167,12 @@ async def collect_source(source: str) -> dict[str, Any]:
             }
             _write_state(source, state)
             return state
-        return await _collect_and_sync(source)
+        mark_source_run(source)
+        result = await _collect_and_sync(source)
+        result["medicine_budget"] = medicine_budget_status()
+        result["http_budget"] = rate_budget_status()
+        _write_state(source, result)
+        return result
 
 
 async def sync_source_images(source: str) -> int:

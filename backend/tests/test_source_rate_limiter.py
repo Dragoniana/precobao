@@ -56,6 +56,30 @@ def test_concurrent_sources_cannot_reserve_the_51st_request(monkeypatch, tmp_pat
     assert sum(value is not None for value in results) == 50
 
 
+def test_http_budget_reserves_25_calls_per_source_with_shared_ceiling(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    now = datetime(2026, 11, 22, 12, tzinfo=UTC)
+    for index in range(25):
+        assert (
+            limiter._try_reserve_request("araujo", "shop.example", now=now)
+            is None
+        )
+    wait = limiter._try_reserve_request("araujo", "shop.example", now=now)
+    assert wait == pytest.approx(900)
+    for index in range(25):
+        assert (
+            limiter._try_reserve_request("pacheco", "shop.example", now=now)
+            is None
+        )
+    assert limiter.rate_budget_status(now=now)["total"] == 50
+    assert limiter.rate_budget_status(now=now)["by_source"] == {
+        "araujo": 25,
+        "pacheco": 25,
+    }
+
+
 def test_state_replace_retries_transient_windows_sharing_violation(
     monkeypatch, tmp_path
 ):
@@ -180,7 +204,7 @@ async def test_scheduled_budget_exhaustion_returns_immediately(monkeypatch, tmp_
     with pytest.raises(limiter.ExternalRequestDeferred) as error:
         await limiter.acquire_external_request("araujo", "https://shop.example/page")
 
-    assert error.value.reason == "BUDGET_EXHAUSTED"
+    assert error.value.reason == "HTTP_BUDGET_EXHAUSTED"
     assert limiter.rate_budget_status(now=now)["total"] == 50
 
 

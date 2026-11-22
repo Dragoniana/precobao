@@ -55,6 +55,20 @@ def _window_seconds() -> int:
     return value
 
 
+def _per_source_limit() -> int:
+    total = _limit()
+    value = int(
+        os.getenv("SCRAPER_EXTERNAL_RATE_LIMIT_PER_SOURCE_MAX_REQUESTS", "")
+        or max(1, total // 2)
+    )
+    if value < 1 or value > total:
+        raise ValueError(
+            "SCRAPER_EXTERNAL_RATE_LIMIT_PER_SOURCE_MAX_REQUESTS must be in "
+            "1..MAX_REQUESTS"
+        )
+    return value
+
+
 def _state_path() -> Path:
     configured = os.getenv("SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR", "").strip()
     if configured:
@@ -115,6 +129,7 @@ def _read_state(path: Path) -> dict:
             "blocked_sources_until": {},
             "limit": _limit(),
             "window_seconds": _window_seconds(),
+            "per_source_limit": _per_source_limit(),
         }
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED") from error
@@ -171,12 +186,14 @@ def _try_reserve_request(
     now = now.astimezone(UTC)
     limit = _limit()
     window = _window_seconds()
+    per_source_limit = _per_source_limit()
     path = _state_path()
     with _exclusive_file_lock(_lock_path()):
         state = _read_state(path)
         if (
             state.get("limit", limit) != limit
             or state.get("window_seconds", window) != window
+            or state.get("per_source_limit", per_source_limit) != per_source_limit
         ):
             raise RuntimeError("SOURCE_RATE_LIMIT_CONFIGURATION_CHANGED_FAIL_CLOSED")
         events = state["events"]
@@ -245,6 +262,24 @@ def _try_reserve_request(
                 _write_state(path, state)
             return max(0.05, window - (now - oldest).total_seconds())
 
+        source_events = [
+            event for event in retained if event.get("source") == source.casefold()
+        ]
+        if len(source_events) >= per_source_limit:
+            try:
+                oldest_source = min(_parse_time(event["at"]) for event in source_events)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED"
+                ) from error
+            state["events"] = retained
+            state["blocked_until"] = blocked_until
+            _write_state(path, state)
+            return max(
+                0.05,
+                window - (now - oldest_source).total_seconds(),
+            )
+
         retained.append(
             {
                 "at": now.isoformat(),
@@ -302,7 +337,7 @@ def _scheduled_defer_reason(source: str, host: str) -> str:
                 return "RATE_LIMITED"
         except (TypeError, ValueError) as error:
             raise RuntimeError("SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED") from error
-    return "BUDGET_EXHAUSTED"
+    return "HTTP_BUDGET_EXHAUSTED"
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -376,6 +411,7 @@ def rate_budget_status(*, now: datetime | None = None) -> dict:
     return {
         "enabled": _enabled(),
         "limit": state.get("limit", _limit()),
+        "per_source_limit": state.get("per_source_limit", _per_source_limit()),
         "window_seconds": state.get("window_seconds", window),
         "total": len(active),
         "by_source": {

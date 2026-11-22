@@ -666,6 +666,68 @@ async def test_pacheco_persists_and_resumes_next_offset_after_product_limit(
     assert restarted.stats["resume_strategy"] == "durable_partition_and_offset_cursor"
 
 
+@pytest.mark.asyncio
+async def test_pacheco_resumes_inside_page_after_shared_medicine_budget(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    offsets = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, offset):
+            self.offset = offset
+
+        def json(self):
+            if self.offset >= 50:
+                return []
+            return [{"productId": f"product-{index}"} for index in range(50)]
+
+    class Session:
+        async def get(self, url, timeout):
+            offset = int(parse_qs(urlsplit(url).query)["_from"][0])
+            offsets.append(offset)
+            return Response(offset)
+
+    def queue(rows):
+        return [{"sku_interno": row["productId"]} for row in rows]
+
+    async def deliver_25(products):
+        assert len(products) == 50 if len(offsets) == 1 else 25
+        return 25
+
+    first = PachecoScraper(request_delay=0)
+    first._queue_source_products = queue
+    first.products_callback = deliver_25
+    assert await first._scan_partition(
+        Session(),
+        "https://www.drogariaspacheco.com.br/api/search",
+        partition="medicamentos",
+        initial_offset=0,
+    )
+    assert first.stats["scan_cursor"] == {
+        "stage": "root",
+        "offset": 0,
+        "item_index": 25,
+    }
+
+    restarted = PachecoScraper(request_delay=0)
+    restarted._start_run()
+    restarted._queue_source_products = queue
+    restarted.products_callback = deliver_25
+    assert await restarted._scan_partition(
+        Session(),
+        "https://www.drogariaspacheco.com.br/api/search",
+        partition="medicamentos",
+        initial_offset=0,
+    )
+    assert restarted.stats["scan_cursor"] == {"stage": "root", "offset": 50}
+    assert restarted.stats["last_completed_offset"] == 0
+    assert offsets == [0, 0, 50]
+
+
 def test_scheduler_uses_durable_daily_interval(monkeypatch):
     from datetime import UTC, datetime
 

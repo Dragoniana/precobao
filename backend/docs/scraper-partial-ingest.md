@@ -36,3 +36,35 @@ and move permanent HTTP 4xx failures or exhausted retries to `DEAD_LETTER`
 without deleting the files. Source image URLs returning 403 or 404 are recorded
 by URL hash and not fetched again automatically. This image path remains
 independent of price and offer persistence.
+
+## Independent rolling budgets
+
+`SCRAPER_MEDICINE_BUDGET_MAX` defaults to 50 distinct `(source, SKU)` medicines
+in a shared rolling 900-second window. Its atomic ledger is stored separately
+under the collector state directory and survives Windows or process restarts.
+Each pharmacy starts with a configurable share of 25; unused capacity becomes
+borrowable only after the other pharmacy has had its scheduled slot in the
+current quarter. Replaying an already reserved medicine or its HMAC outbox does
+not reserve another unit. Failed or unresolved work stays counted until it
+leaves the rolling window, preventing infinite retries from freeing capacity.
+Statuses distinguish reservations, image completion, deferred images, identity
+conflicts, and failures.
+
+External pharmacy HTTP calls have a separate rolling limiter:
+`SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS=50` total and
+`SCRAPER_EXTERNAL_RATE_LIMIT_PER_SOURCE_MAX_REQUESTS=25` per source per 900
+seconds by default. This is a conservative implementation ceiling, not a
+published or inferred allowance from either pharmacy. Catalog/detail requests,
+image downloads, and retries all consume HTTP units; Azure HMAC uploads do not.
+The scheduled PowerShell runner stops at the configured ceiling rather than
+waiting for the window to roll over. HTTP 403/429, `Retry-After`, cooldown, and
+TLS protections remain independent and active.
+
+Image-fetch work is replayed separately from catalog collection, at most five
+queue items per source run by default. It does not reserve another medicine
+unit, but its external downloads still consume the source's HTTP allowance.
+Successful price/offers can therefore sync while an image remains deferred.
+The status script reports medicine units, HTTP requests, image-fetch and image
+upload queues separately. To change limits, set the corresponding optional
+keys in the local `settings.json`; HMAC/DPAPI material is unrelated and must not
+be regenerated.

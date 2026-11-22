@@ -246,9 +246,30 @@ class AraujoScraper(BasePharmacyScraper):
                     )
                     self._write_direct_checkpoint(state)
                     if delivered < len(products):
+                        stop_reason = (
+                            self.stop_reason_callback()
+                            if self.stop_reason_callback
+                            else None
+                        )
+                        if stop_reason is None and self.stop_requested_callback:
+                            if self.stop_requested_callback():
+                                stop_reason = "safe_stop_requested"
+                        is_safe_stop = stop_reason == "safe_stop_requested"
                         state.update(
-                            status="PARTIAL",
-                            stop_reason="configured_product_limit_within_page",
+                            status=(
+                                "STOPPED"
+                                if is_safe_stop
+                                else stop_reason
+                                if stop_reason
+                                else "PARTIAL"
+                            ),
+                            stop_reason=(
+                                stop_reason
+                                if is_safe_stop
+                                else stop_reason.casefold()
+                                if stop_reason
+                                else "configured_product_limit_within_page"
+                            ),
                             finished_at=datetime.now(UTC).isoformat(),
                         )
                         self._write_direct_checkpoint(state)
@@ -317,10 +338,10 @@ class AraujoScraper(BasePharmacyScraper):
             )
             self._write_direct_checkpoint(state)
             raise
-        except ExternalRequestDeferred:
+        except ExternalRequestDeferred as deferred:
             state.update(
-                status="PARTIAL",
-                stop_reason="budget_exhausted",
+                status=deferred.reason,
+                stop_reason=deferred.reason.casefold(),
                 finished_at=datetime.now(UTC).isoformat(),
             )
             self._write_direct_checkpoint(state)
