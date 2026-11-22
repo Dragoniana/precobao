@@ -60,6 +60,38 @@ async def test_valid_blob_and_identity_conflict_do_not_trigger_source_requests(
     assert conflicted["status"] == "IDENTITY_CONFLICT"
 
 
+@pytest.mark.asyncio
+async def test_known_reference_phase_never_fetches_product_pages(monkeypatch):
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("Known-reference phase must not fetch product pages")
+
+    monkeypatch.setattr(image_backfill, "_fetch_source_image_url", unexpected)
+    result = await image_backfill._process_entry(
+        httpx.AsyncClient(),
+        {
+            "catalog_id": 77,
+            "ean": "7897705203095",
+            "status": "NO_KNOWN_IMAGE_URL",
+            "sources": [
+                {
+                    "source": "pacheco",
+                    "offers": [
+                        {
+                            "sku": "PCH155349",
+                            "product_url": "https://www.drogariaspacheco.com.br/produto/155349",
+                            "image_urls": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        source_filter="pacheco",
+        include_generic=False,
+        phase="known_references",
+    )
+    assert result["status"] == "NO_VALID_IMAGE"
+
+
 def test_execute_guard_rejects_disabled_source_tls(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR", str(tmp_path))

@@ -342,9 +342,19 @@ async def _process_entry(
             )
             source_results.append({"source": source, "status": reason})
             if result:
+                returned_catalog_id = result.get("catalog_id")
+                if returned_catalog_id is not None and int(returned_catalog_id) != int(
+                    item["catalog_id"]
+                ):
+                    return {
+                        "status": "UPLOAD_CATALOG_ID_MISMATCH",
+                        "source_results": source_results
+                        + [{"source": source, "status": "UPLOAD_CATALOG_ID_MISMATCH"}],
+                    }
                 return {
                     "status": reason,
                     "source": source,
+                    "catalog_id": int(item["catalog_id"]),
                     "sha256": result.get("normalized_sha256") or result.get("sha256"),
                     "size_bytes": result.get("normalized_size_bytes")
                     or result.get("size_bytes"),
@@ -481,6 +491,7 @@ async def _run(args: argparse.Namespace) -> int:
                 "retry_pending": 0,
                 "blocked_sources": 0,
                 "stored_by_source": {"araujo": 0, "pacheco": 0},
+                "stored_items": [],
                 "reason_counts": {},
                 "rate_limited": False,
             }
@@ -630,13 +641,21 @@ def _count_outcome(report: dict[str, Any], outcome: dict[str, Any]) -> None:
         source = outcome.get("source")
         if source in report["stored_by_source"]:
             report["stored_by_source"][source] += 1
+        report["stored_items"].append(
+            {
+                "catalog_id": outcome.get("catalog_id"),
+                "source": source,
+                "sha256": outcome.get("sha256"),
+                "size_bytes": outcome.get("size_bytes"),
+            }
+        )
     elif status == "ALREADY_STORED":
         report["already_stored"] += 1
     elif status in {"BYTEA_REAL_VALID", "BYTEA_GENERIC_VALID"}:
         report["existing_valid"] += 1
     elif status == "GENERIC_ONLY":
         report["generic_skipped"] += 1
-    elif status == "IDENTITY_CONFLICT":
+    elif status in {"IDENTITY_CONFLICT", "UPLOAD_CATALOG_ID_MISMATCH"}:
         report["identity_conflicts"] += 1
     elif status in {"SOURCE_HTTP_403_COOLDOWN", "SOURCE_COOLDOWN"}:
         report["blocked_sources"] += 1
