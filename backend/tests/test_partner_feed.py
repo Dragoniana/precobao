@@ -232,6 +232,19 @@ async def test_araujo_resumes_inside_page_after_50_product_limit(tmp_path, monke
     assert second["next_item_index"] == 0
 
 
+@pytest.mark.asyncio
+async def test_araujo_does_not_overwrite_corrupt_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARAUJO_STATE_DIR", str(tmp_path))
+    checkpoint = tmp_path / "source-checkpoint.json"
+    checkpoint.write_text("{invalid", encoding="utf-8")
+    scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
+
+    with pytest.raises(RuntimeError, match="ARAUJO_SOURCE_CHECKPOINT_INVALID"):
+        await scraper._extract_direct_catalog()
+
+    assert checkpoint.read_text(encoding="utf-8") == "{invalid"
+
+
 def test_source_modes_are_explicit_and_default_disabled(monkeypatch):
     from app.scrapers.source_modes import SourceMode, source_mode
 

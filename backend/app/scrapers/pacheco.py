@@ -183,8 +183,10 @@ class PachecoScraper(BasePharmacyScraper):
     def _read_checkpoint(self) -> dict[str, Any]:
         try:
             return json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("PACHECO_CHECKPOINT_INVALID") from error
 
     def _write_checkpoint(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)

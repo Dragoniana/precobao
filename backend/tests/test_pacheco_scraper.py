@@ -53,6 +53,18 @@ def test_pacheco_starts_new_refresh_cycle_after_completed_legacy_run():
     assert state["scan_cursor"] == {"stage": "root", "offset": 0}
 
 
+def test_pacheco_does_not_overwrite_corrupt_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    path = tmp_path / "checkpoint.json"
+    path.write_text("{invalid", encoding="utf-8")
+    scraper = PachecoScraper(request_delay=0)
+
+    with pytest.raises(RuntimeError, match="PACHECO_CHECKPOINT_INVALID"):
+        scraper._start_run()
+
+    assert path.read_text(encoding="utf-8") == "{invalid"
+
+
 def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
     tmp_path, monkeypatch
 ):

@@ -167,8 +167,10 @@ class AraujoScraper(BasePharmacyScraper):
             previous = json.loads(
                 self.source_checkpoint_path.read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             previous = {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("ARAUJO_SOURCE_CHECKPOINT_INVALID") from error
         if isinstance(previous, dict):
             previous_status = str(previous.get("status", "")).upper()
             if previous_status != "COMPLETE":
