@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import httpx
 
+from app.core.utils import validar_ean13
 from app.scrapers.scraper_batch_client import BatchSyncError, post_image_upload
 from app.services.imagens import (
     is_generic_image_url,
@@ -208,6 +209,12 @@ async def _submit_pending_image(
         upload_metadata = {
             key: value for key, value in metadata.items() if key not in internal_fields
         }
+        # A malformed source EAN is evidence that must stay in the local manifest,
+        # but it must not prevent the image from being associated by its exact
+        # source SKU and product URL. Never replace it with a guessed catalog EAN.
+        ean = upload_metadata.get("ean")
+        if ean and not validar_ean13(str(ean)):
+            upload_metadata["ean"] = None
         result = await post_image_upload(
             client, upload_metadata, content_path.read_bytes()
         )

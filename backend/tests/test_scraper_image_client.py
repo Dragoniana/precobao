@@ -181,6 +181,50 @@ async def test_transient_image_upload_uses_backoff_and_preserves_manifest(
 
 
 @pytest.mark.asyncio
+async def test_invalid_ean_is_omitted_from_upload_without_changing_manifest(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "araujo"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "pending.json"
+    content = outbox / "pending.bin"
+    original_ean = "07899547531213"
+    metadata = {
+        "upload_id": "b0f2e3e8-5ab6-4ee4-9382-e2c110d56627",
+        "source": "araujo",
+        "sku": "ARJ16484",
+        "ean": original_ean,
+        "product_url": "https://www.araujo.com.br/produto/16484.html",
+        "source_image_url": "https://i3-imagens-prd.araujo.com.br/16484/item.webp",
+        "content_type": "image/webp",
+        "content_sha256": "a" * 64,
+    }
+    manifest.write_text(json.dumps(metadata), encoding="utf-8")
+    content.write_bytes(b"normalized image bytes")
+    attempts = []
+
+    async def unavailable(_client, sent_metadata, sent_content):
+        attempts.append((sent_metadata, sent_content))
+        raise BatchSyncError("temporary network failure")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", unavailable)
+    async with httpx.AsyncClient() as client:
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "araujo")
+            == 0
+        )
+
+    assert len(attempts) == 1
+    assert attempts[0][0]["ean"] is None
+    stored = json.loads(manifest.read_text(encoding="utf-8"))
+    assert stored["ean"] == original_ean
+    assert stored["status"] == "PENDING"
+    assert stored["attempt_count"] == 1
+    assert content.read_bytes() == b"normalized image bytes"
+
+
+@pytest.mark.asyncio
 async def test_image_source_403_is_recorded_and_not_retried(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
     requests = []
