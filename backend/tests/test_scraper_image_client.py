@@ -211,8 +211,7 @@ async def test_invalid_ean_is_omitted_from_upload_without_changing_manifest(
     monkeypatch.setattr(scraper_image_client, "post_image_upload", unavailable)
     async with httpx.AsyncClient() as client:
         assert (
-            await scraper_image_client.sync_pending_image_outbox(client, "araujo")
-            == 0
+            await scraper_image_client.sync_pending_image_outbox(client, "araujo") == 0
         )
 
     assert len(attempts) == 1
@@ -227,6 +226,10 @@ async def test_invalid_ean_is_omitted_from_upload_without_changing_manifest(
 @pytest.mark.asyncio
 async def test_image_source_403_is_recorded_and_not_retried(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv(
+        "SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR", str(tmp_path / "rate-limit")
+    )
     requests = []
 
     async def blocked(request):
@@ -248,7 +251,7 @@ async def test_image_source_403_is_recorded_and_not_retried(monkeypatch, tmp_pat
         )
 
     assert first["image_failure_reason"] == "image_source_http_403"
-    assert second["image_failure_reason"] == "image_source_previously_blocked"
+    assert second["image_failure_reason"] == "source_http_403_cooldown"
     assert len(requests) == 1
     stored = json.loads((tmp_path / "blocked-source-images.json").read_text())
     assert len(stored) == 1

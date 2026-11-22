@@ -2,6 +2,10 @@
     [ValidateSet('araujo', 'pacheco', 'both')]
     [string]$Source = 'both',
     [string]$ScheduledSlot = '',
+    [ValidateRange(0, 59)]
+    [int]$ScheduledOffsetMinutes = 0,
+    [ValidateRange(0, 60)]
+    [int]$ScheduledIntervalMinutes = 0,
     [ValidateRange(0, 50)]
     [int]$MaxProductsPerRun = 0
 )
@@ -15,18 +19,18 @@ $settings = Read-CollectorJson -Path $settingsPath
 if (-not $settings.api_ready -or -not $settings.collector_enabled) {
     throw 'API/coletor não habilitados na configuração local.'
 }
-if ($ScheduledSlot -and $MaxProductsPerRun -lt 1) {
-    throw 'Agendamento exige limite explícito de 1 a 50 produtos por execução.'
-}
-if ($ScheduledSlot -and $Source -eq 'both') {
+if (($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) -and $Source -eq 'both') {
     throw 'Uma tarefa agendada deve executar uma única farmácia.'
+}
+if ($ScheduledIntervalMinutes -gt 0 -and $ScheduledOffsetMinutes -ge $ScheduledIntervalMinutes) {
+    throw 'O deslocamento do agendamento deve ser menor que o intervalo.'
 }
 if ($MaxProductsPerRun -gt 0) {
     $env:SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN = [string]$MaxProductsPerRun
 } else {
     Remove-Item Env:SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN -ErrorAction SilentlyContinue
 }
-if ($ScheduledSlot) {
+if ($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) {
     $env:SCRAPER_COLLECTOR_SCHEDULED = 'true'
 } else {
     Remove-Item Env:SCRAPER_COLLECTOR_SCHEDULED -ErrorAction SilentlyContinue
@@ -46,13 +50,6 @@ $lockDirectory = Join-Path $stateDir 'locks'
 New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stateDir 'sources\araujo') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stateDir 'sources\pacheco') | Out-Null
-$lockPath = Join-Path $lockDirectory 'collector.running.lock'
-try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
-catch {
-    Write-CollectorLog -Path $settings.log_file -Event 'SKIPPED_LOCKED already_running'
-    Write-Host 'Coleta já em execução; esta chamada foi ignorada.'
-    exit 9
-}
 $previousPythonUtf8 = $env:PYTHONUTF8
 $previousPythonIoEncoding = $env:PYTHONIOENCODING
 try {
@@ -61,6 +58,10 @@ try {
     $env:SCRAPER_COLLECTOR_ENABLED = 'true'
     $env:SCRAPER_COLLECTION_ENV_AUTHORIZED = [string]$settings.collection_environment_authorized
     $env:SCRAPER_COLLECTOR_STATE_DIR = $stateDir
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED = 'true'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = '50'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = '900'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = Join-Path $stateDir 'rate-limit'
     $env:SCRAPER_COLLECTOR_STOP_FILE = $settings.stop_file
     $env:SCRAPER_COLLECTOR_SCHEDULE_TIMES = ($settings.schedule_times -join ',')
     $env:SCRAPER_COLLECTOR_TIMEZONE = $settings.timezone
@@ -93,24 +94,37 @@ try {
     $python = Join-Path $settings.repository_root 'backend\.venv\Scripts\python.exe'
     if (-not (Test-Path $python)) { throw 'Ambiente Python não encontrado. Reexecute Install-Collector.ps1.' }
     $slotKey = ''
-    if ($ScheduledSlot) {
-        $slotParts = $ScheduledSlot.Split(':')
-        $slotTime = [DateTime]::Today.AddHours([int]$slotParts[0]).AddMinutes([int]$slotParts[1])
-        if ($slotTime -gt (Get-Date)) { $slotTime = $slotTime.AddDays(-1) }
+    $slotLabel = 'manual'
+    if ($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) {
+        $currentTime = Get-Date
+        if ($ScheduledIntervalMinutes -gt 0) {
+            $baseTime = $currentTime.Date.AddMinutes($ScheduledOffsetMinutes)
+            if ($baseTime -gt $currentTime) { $baseTime = $baseTime.AddDays(-1) }
+            $elapsedMinutes = ($currentTime - $baseTime).TotalMinutes
+            $slotIndex = [math]::Floor($elapsedMinutes / $ScheduledIntervalMinutes)
+            $slotTime = $baseTime.AddMinutes($slotIndex * $ScheduledIntervalMinutes)
+            $slotLabel = "every-$($ScheduledIntervalMinutes)m-offset-$($ScheduledOffsetMinutes)m"
+        } else {
+            $slotParts = $ScheduledSlot.Split(':')
+            $slotTime = [DateTime]::Today.AddHours([int]$slotParts[0]).AddMinutes([int]$slotParts[1])
+            if ($slotTime -gt $currentTime) { $slotTime = $slotTime.AddDays(-1) }
+            $slotLabel = $ScheduledSlot
+        }
         $slotKey = $slotTime.ToString('yyyy-MM-ddTHH:mm')
         $slotStatePath = Join-Path $StateRoot "last-scheduled-slot-$Source.txt"
         if ((Test-Path $slotStatePath) -and (Read-CollectorUtf8 -Path $slotStatePath).Trim() -eq $slotKey) {
             Write-CollectorLog -Path $settings.log_file -Event "SKIPPED duplicate_slot=$slotKey"
             exit 11
         }
-        $delayMinutes = [math]::Floor(((Get-Date) - $slotTime).TotalMinutes)
-        if ($delayMinutes -gt [int]$settings.missed_run_grace_minutes) {
+        $delayMinutes = [math]::Floor(($currentTime - $slotTime).TotalMinutes)
+        $missedGrace = if ($ScheduledIntervalMinutes -gt 0) { 5 } else { [int]$settings.missed_run_grace_minutes }
+        if ($delayMinutes -gt $missedGrace) {
             [IO.File]::WriteAllText($slotStatePath, $slotKey, [Text.Encoding]::ASCII)
             Write-CollectorLog -Path $settings.log_file -Event "MISSED slot=$slotKey delay_minutes=$delayMinutes recovery=skipped"
             Write-Host "Horário perdido há $delayMinutes min; recuperação fora da janela permitida."
             exit 10
         }
-        if ($delayMinutes -gt 5) {
+        if ($delayMinutes -gt 0) {
             Write-CollectorLog -Path $settings.log_file -Event "MISSED slot=$slotKey delay_minutes=$delayMinutes recovery=single_run"
         }
         [IO.File]::WriteAllText($slotStatePath, $slotKey, [Text.Encoding]::ASCII)
@@ -123,7 +137,7 @@ try {
             if ($runExitCode -eq 0) { $runExitCode = 3 }
             continue
         }
-        Write-CollectorLog -Path $settings.log_file -Event "START source=$item slot=$ScheduledSlot"
+        Write-CollectorLog -Path $settings.log_file -Event "START source=$item slot=$slotLabel"
         $backendDirectory = Join-Path $settings.repository_root 'backend'
         $outputPrefix = Join-Path (Join-Path $stateDir 'logs') ('.collector-' + [guid]::NewGuid().ToString('N'))
         $stdoutPath = "$outputPrefix.stdout"
@@ -162,5 +176,8 @@ try {
     $env:ARAUJO_STATE_DIR = $null
     $env:PACHECO_STATE_DIR = $null
     $env:SCRAPER_COLLECTOR_STATE_DIR = $null
-    $lock.Dispose()
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED = $null
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = $null
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = $null
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = $null
 }

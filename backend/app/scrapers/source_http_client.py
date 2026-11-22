@@ -10,7 +10,42 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from app.scrapers.source_rate_limiter import (
+    acquire_external_request,
+    note_source_response,
+)
+
 logger = logging.getLogger(__name__)
+
+
+class RateLimitedSourceClient:
+    """Count attempts to pharmacy hosts while leaving Azure/API calls untouched."""
+
+    def __init__(self, client: Any, source: str):
+        self._client = client
+        self._source = source
+
+    async def request(self, method: str, url: str, *args, **kwargs):
+        await acquire_external_request(self._source, str(url))
+        response = await self._client.request(method, url, *args, **kwargs)
+        note_source_response(self._source, str(url), response)
+        return response
+
+    async def get(self, url: str, *args, **kwargs):
+        await acquire_external_request(self._source, str(url))
+        response = await self._client.get(url, *args, **kwargs)
+        note_source_response(self._source, str(url), response)
+        return response
+
+    @asynccontextmanager
+    async def stream(self, method: str, url: str, *args, **kwargs):
+        await acquire_external_request(self._source, str(url))
+        async with self._client.stream(method, url, *args, **kwargs) as response:
+            note_source_response(self._source, str(url), response)
+            yield response
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -77,7 +112,7 @@ async def open_source_http_client(
             timeout=config.timeout,
             trust_env=False,
         ) as client:
-            yield client
+            yield RateLimitedSourceClient(client, config.pharmacy)
         return
 
     from curl_cffi import requests
@@ -90,4 +125,4 @@ async def open_source_http_client(
         allow_redirects=False,
         trust_env=False,
     ) as client:
-        yield client
+        yield RateLimitedSourceClient(client, config.pharmacy)

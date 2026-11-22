@@ -3,10 +3,21 @@
 $settingsPath = Join-Path $StateRoot 'settings.json'
 if (-not (Test-Path $settingsPath)) { throw 'Coletor ainda não instalado.' }
 $settings = Read-CollectorJson -Path $settingsPath
-Write-Host "Ativo: $($settings.collector_enabled); API pronta: $($settings.api_ready); fuso: $($settings.timezone); limite: $($settings.max_products_per_run) produtos/execução"
+Write-Host "Ativo: $($settings.collector_enabled); API pronta: $($settings.api_ready); fuso: $($settings.timezone); limite manual=$($settings.max_products_per_run) produtos; tarefas usam orçamento de requisições"
+$rateStatePath = Join-Path $settings.state_dir 'rate-limit\external-requests.json'
+if (Test-Path -LiteralPath $rateStatePath) {
+    $rateState = Read-CollectorJson -Path $rateStatePath
+    $windowStart = [DateTimeOffset]::UtcNow.AddSeconds(-[int]$rateState.window_seconds)
+    $activeRequests = @($rateState.events | Where-Object {
+        [DateTimeOffset]::Parse([string]$_.at).ToUniversalTime() -gt $windowStart
+    })
+    $araujoRequests = @($activeRequests | Where-Object { $_.source -eq 'araujo' }).Count
+    $pachecoRequests = @($activeRequests | Where-Object { $_.source -eq 'pacheco' }).Count
+    Write-Host "Orçamento externo móvel ($([int]($rateState.window_seconds / 60)) min): total=$($activeRequests.Count)/$($rateState.limit) Araújo=$araujoRequests Pacheco=$pachecoRequests"
+} else {
+    Write-Host 'Orçamento externo móvel (15 min): total=0/50 Araújo=0 Pacheco=0'
+}
 foreach ($source in @('araujo', 'pacheco')) {
-    $configuredTimes = @($settings.source_schedule_times.$source) -join ', '
-    Write-Host "$source agendamento configurado: $configuredTimes"
     $path = Join-Path $settings.state_dir "$source.json"
     if (Test-Path $path) {
         $state = Read-CollectorJson -Path $path
@@ -54,13 +65,22 @@ $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
         [pscustomobject]@{ TaskName = $_.TaskName; State = $_.State; LastRunTime = $info.LastRunTime; NextRunTime = $info.NextRunTime; LastTaskResult = $info.LastTaskResult; Schedule = $triggerSummary; Arguments = (@($_.Actions | ForEach-Object { $_.Arguments }) -join '; ') }
     }
 $tasks | Format-Table -AutoSize
-$lockPath = Join-Path $settings.state_dir 'locks\collector.running.lock'
-if (Test-Path -LiteralPath $lockPath) {
-    try {
-        $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
-        $lock.Dispose()
-        Write-Host 'Lock global: livre'
-    } catch { Write-Host 'Lock global: ocupado' }
-} else { Write-Host 'Lock global: ainda não criado' }
+$lockDirectory = Join-Path $settings.state_dir 'locks'
+foreach ($source in @('araujo', 'pacheco')) {
+    $sourceLock = Join-Path $lockDirectory "$source.lock"
+    if (Test-Path -LiteralPath $sourceLock) {
+        $probe = $null
+        try {
+            $probe = [IO.File]::Open($sourceLock, 'Open', 'ReadWrite', 'ReadWrite')
+            $probe.Lock(0, 1)
+            $probe.Unlock(0, 1)
+            Write-Host "$source lock Python: livre"
+        } catch {
+            Write-Host "$source lock Python: ocupado"
+        } finally {
+            if ($probe) { $probe.Dispose() }
+        }
+    } else { Write-Host "$source lock Python: livre" }
+}
 Write-Host 'Códigos de saída: 0 concluída; 2 acesso negado; 3 parcial; 4 parada segura; 5 limite da origem; 6 falha API/HMAC; 7 erro; 8 desativada; 9 lock ocupado; 10 horário perdido; 11 repetição do slot.'
 Write-Host "Log: $($settings.log_file)"

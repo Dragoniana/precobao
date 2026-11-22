@@ -95,7 +95,11 @@ def _configured_product_limit() -> int | None:
     }
     if not raw_limit:
         if scheduled:
-            raise RuntimeError("SCHEDULED_PRODUCT_LIMIT_REQUIRED")
+            rate_limited = os.getenv(
+                "SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "false"
+            ).strip().casefold() in {"1", "true", "yes", "on"}
+            if not rate_limited:
+                raise RuntimeError("SCHEDULED_SOURCE_RATE_LIMIT_REQUIRED")
         return None
     try:
         limit = int(raw_limit)
@@ -364,6 +368,12 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
     previous = _read_state(source)
     state: dict[str, Any] = {
         "source": source,
+        "execution_trigger": (
+            "scheduled"
+            if os.getenv("SCRAPER_COLLECTOR_SCHEDULED", "false").strip().casefold()
+            in {"1", "true", "yes", "on"}
+            else "manual"
+        ),
         "status": "RUNNING",
         "started_at": datetime.now(UTC).isoformat(),
         "attempt": int(previous.get("attempt", 0)) + 1,

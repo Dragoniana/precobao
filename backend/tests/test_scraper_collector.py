@@ -29,10 +29,11 @@ def test_pilot_item_cap_limits_batches_across_source_pages():
 @pytest.mark.parametrize(
     ("scheduled", "limit", "expected", "message"),
     [
-        ("true", "", None, "SCHEDULED_PRODUCT_LIMIT_REQUIRED"),
+        ("true", "", None, None),
         ("true", "0", None, "MAX_PRODUCTS_PER_RUN_INVALID"),
         ("true", "51", None, "MAX_PRODUCTS_PER_RUN_INVALID"),
         ("true", "50", 50, None),
+        ("", "", None, None),
         ("", "50", 50, None),
     ],
 )
@@ -41,11 +42,20 @@ def test_scheduled_product_limit_fails_closed(
 ):
     monkeypatch.setenv("SCRAPER_COLLECTOR_SCHEDULED", scheduled)
     monkeypatch.setenv("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", limit)
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "true")
     if message:
         with pytest.raises(RuntimeError, match=message):
             scraper_collector._configured_product_limit()
     else:
         assert scraper_collector._configured_product_limit() == expected
+
+
+def test_scheduled_collector_requires_request_budget_not_product_cap(monkeypatch):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_SCHEDULED", "true")
+    monkeypatch.delenv("SCRAPER_COLLECTOR_MAX_PRODUCTS_PER_RUN", raising=False)
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "false")
+    with pytest.raises(RuntimeError, match="SCHEDULED_SOURCE_RATE_LIMIT_REQUIRED"):
+        scraper_collector._configured_product_limit()
 
 
 @pytest.mark.parametrize(

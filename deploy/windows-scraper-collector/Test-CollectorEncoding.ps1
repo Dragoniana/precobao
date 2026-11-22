@@ -1,5 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Collector-IO.ps1')
+. (Join-Path $PSScriptRoot 'Collector-Schedule.ps1')
 
 $scripts = Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File
 foreach ($scriptFile in $scripts) {
@@ -12,6 +13,26 @@ foreach ($scriptFile in $scripts) {
     )
     if ($parseErrors.Count -gt 0) {
         throw "Falha de sintaxe em $($scriptFile.Name): $($parseErrors -join '; ')"
+    }
+}
+
+$sampleNow = [DateTime]::new(2026, 11, 22, 1, 3, 0)
+$araujoNext = Get-NextCollectorSlot -Now $sampleNow -OffsetMinutes 0
+$pachecoNext = Get-NextCollectorSlot -Now $sampleNow -OffsetMinutes 7
+if ($araujoNext.ToString('HH:mm') -ne '01:15' -or $pachecoNext.ToString('HH:mm') -ne '01:07') {
+    throw 'A progressão dos horários de 15 minutos ou os deslocamentos não estão corretos.'
+}
+foreach ($offset in @(0, 7)) {
+    $start = [DateTime]::new(2026, 11, 22, 0, $offset, 0)
+    $trigger = New-CollectorRepeatingTrigger -OffsetMinutes $offset -StartAt $start
+    if ($trigger.Repetition.Interval -ne 'PT15M' -or $trigger.Repetition.Duration -ne 'P1D') {
+        throw 'O trigger diário de 15 minutos está incorreto ou tem duração limitada.'
+    }
+    for ($index = 0; $index -lt 96; $index++) {
+        $slot = $start.AddMinutes($index * 15)
+        if ((($slot.Minute - $offset) % 15) -ne 0) {
+            throw "Slot desalinhado no offset ${offset}: $slot"
+        }
     }
 }
 

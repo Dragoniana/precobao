@@ -6,7 +6,7 @@ Este pacote executa os coletores existentes no Windows e envia somente os lotes 
 
 1. Clone/atualize o repositório no computador autorizado e abra PowerShell no repositório.
 2. Execute `Set-ExecutionPolicy -Scope Process Bypass` e depois `.\deploy\windows-scraper-collector\Install-Collector.ps1`.
-3. Configure a API já implantada em `%LOCALAPPDATA%\PrecoBaoCollector\settings.json`: `api_ready=true`, `collector_enabled=true`, URL HTTPS da rota e fontes em `DIRECT` com `access_confirmed=true`. Mantenha `timezone=America/Sao_Paulo` e os horários `08:00,20:00`.
+3. Configure a API já implantada em `%LOCALAPPDATA%\PrecoBaoCollector\settings.json`: `api_ready=true`, `collector_enabled=true`, URL HTTPS da rota e fontes em `DIRECT` com `access_confirmed=true`. Mantenha o fuso do Windows em `America/Sao_Paulo` (UTC-03:00).
 4. Guarde o mesmo segredo HMAC exclusivo do coletor/API com `.\deploy\windows-scraper-collector\Set-CollectorSecret.ps1`. O arquivo fica cifrado via DPAPI para o usuário atual e ACL da pasta restrita; o segredo não entra no Git nem nos logs.
 5. Antes de cada atualização do repositório, pare o agendamento, atualize a branch e reinstale dependências com `Install-Collector.ps1`.
 
@@ -40,17 +40,20 @@ Não habilite as fontes antes da instalação da API/migration aprovada e da hom
 .\deploy\windows-scraper-collector\Stop-Collector.ps1
 
 # Instalar/remover agendamento após prontidão e aprovação
-.\deploy\windows-scraper-collector\Register-Schedule.ps1 -Enable
+.\deploy\windows-scraper-collector\Register-Schedule.ps1 -Enable -Source araujo
+.\deploy\windows-scraper-collector\Register-Schedule.ps1 -Enable -Source pacheco
 .\deploy\windows-scraper-collector\Unregister-Schedule.ps1
 ```
 
 ## Execução e recuperação
 
-O agendamento permanece desativado após a instalação. Para registrá-lo, a configuração exige limite entre 1 e 50 produtos por tarefa; valor ausente ou inválido impede o registro e a execução. Cada farmácia tem tarefas separadas: Araújo às 08:00/20:00 e Pacheco às 10:00/22:00 no fuso `America/Sao_Paulo`, com intervalo para evitar concorrência. Só fontes marcadas `DIRECT` e com acesso confirmado recebem tarefas. `StartWhenAvailable` permite uma única recuperação após retorno do computador; execuções atrasadas até 120 minutos são anotadas e coalescidas numa só execução. Atrasos maiores são anotados como perdidos e ignorados. IDs de slot persistidos impedem disparo duplicado; a trava global impede sobreposição. Checkpoints, outboxes e a fila persistente de conflitos ficam sob `%LOCALAPPDATA%\PrecoBaoCollector\state`. Se a API falhar após coleta, o outbox permanece para reenvio no próximo ciclo.
+O agendamento permanece desativado após a instalação. O teto global é de 50 tentativas HTTP externas em qualquer janela móvel de 900 segundos, compartilhado por Araújo e Pacheco. Catálogo, páginas, detalhes, imagens e tentativas repetidas contam; POSTs HMAC à API Preço Bão não contam nesse orçamento. O rate limiter grava cada reserva no disco, usa trava entre processos e aguarda espaço sem zerar no reinício. 403 suspende a origem por pelo menos uma hora; 429 respeita `Retry-After`. Não há equivalência entre requisições e quantidade de produtos.
+
+Cada origem tem uma tarefa separada no fuso local `America/Sao_Paulo`: Araújo nos minutos 00, 15, 30 e 45; Pacheco nos minutos 07, 22, 37 e 52. Registre Araújo primeiro e habilite Pacheco somente depois de confirmar uma execução agendada da Araújo com lote aceito pela API. `StartWhenAvailable` e a validação persistente dos slots evitam acumular execuções atrasadas; atraso superior a cinco minutos é ignorado. O Agendador ignora uma nova execução da mesma origem enquanto a anterior estiver ativa; as duas origens compartilham o rate limiter. Checkpoints, outboxes, conflitos e orçamento ficam sob `%LOCALAPPDATA%\PrecoBaoCollector\state`. Se a API falhar após coleta, o outbox permanece para reenvio no próximo ciclo.
 
 `Stop-Collector.ps1` cria um marcador local. A coleta em andamento termina a sincronização da página atual, para antes de buscar a próxima e mantém qualquer outbox pendente; tarefas agendadas ficam suspensas. Uma execução manual/agendada posterior remove o marcador ao iniciar. Logs não registram corpo, HMAC ou credenciais.
 
-As tarefas usam logon interativo para que o mesmo usuário Windows possa descriptografar o segredo DPAPI. Elas podem executar com a estação bloqueada enquanto a sessão do usuário continuar conectada. Após sair da conta, não executam; após reinicialização, aguardam o próximo logon e a política `StartWhenAvailable` pode iniciar uma única execução recuperada dentro da janela configurada. Não funcionam sem login, em `SYSTEM`, nem sob outra conta. Os slots são registrados em arquivos separados por farmácia. A trava global evita sobreposição entre execução manual e agendada. `Status-Collector.ps1` mostra o resultado mais recente e o código de saída da tarefa: 0 concluída, 2 acesso negado, 3 parcial, 4 parada segura, 5 limite da origem, 6 falha de API/HMAC, 7 erro, 8 origem desativada, 9 lock ocupado, 10 slot perdido e 11 slot duplicado. O limite inválido, ausente ou acima de 50 impede a execução agendada.
+As tarefas usam logon interativo para que o mesmo usuário Windows possa descriptografar o segredo DPAPI. Elas podem executar com a estação bloqueada enquanto a sessão do usuário continuar conectada. Após sair da conta, não executam; após reinicialização, aguardam o próximo logon e a política `StartWhenAvailable` pode iniciar uma única execução recuperada dentro da janela configurada. Não funcionam sem login, em `SYSTEM`, nem sob outra conta. Cada origem tem trava própria contra sobreposição; o rate limiter mantém a trava compartilhada do orçamento. `Status-Collector.ps1` mostra o resultado mais recente e o código de saída da tarefa: 0 concluída, 2 acesso negado, 3 parcial, 4 parada segura, 5 limite da origem, 6 falha de API/HMAC, 7 erro, 8 origem desativada, 9 lock ocupado, 10 slot perdido e 11 slot duplicado. O limite de requisições é persistido separadamente e mostrado no `Status-Collector.ps1`. Use `Restore-Schedule.ps1` com a pasta de backup salva ao suspender os agendamentos anteriores para reverter a ativação.
 
 ## Segredo e rotação
 

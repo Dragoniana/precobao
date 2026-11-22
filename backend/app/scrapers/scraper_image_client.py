@@ -17,6 +17,11 @@ import httpx
 
 from app.core.utils import validar_ean13
 from app.scrapers.scraper_batch_client import BatchSyncError, post_image_upload
+from app.scrapers.source_rate_limiter import (
+    acquire_external_request,
+    note_source_response,
+    source_cooldown_active,
+)
 from app.services.imagens import (
     is_generic_image_url,
     offer_image_delivery_rejection_reason,
@@ -137,15 +142,17 @@ def _atomic_write(path: Path, content: bytes) -> None:
 
 
 async def _download_image(
-    client: httpx.AsyncClient, image_url: str
+    client: httpx.AsyncClient, image_url: str, source: str
 ) -> tuple[bytes, str | None]:
     limit = int(os.getenv("SCRAPER_IMAGE_DOWNLOAD_MAX_BYTES", str(8 * 1024 * 1024)))
+    await acquire_external_request(source, image_url)
     async with client.stream(
         "GET",
         image_url,
         headers={"Accept": "image/webp,image/jpeg,image/png"},
         follow_redirects=False,
     ) as response:
+        note_source_response(source, image_url, response)
         if response.status_code != 200:
             raise InvalidMedicineImage(f"image_source_http_{response.status_code}")
         declared_length = response.headers.get("content-length")
@@ -340,6 +347,8 @@ async def download_and_upload_product_image(
     image_url = str(product.get("imagem_url") or "").strip()
     if not image_url:
         return {"image_failure_reason": "source_image_url_missing"}
+    if source_cooldown_active(source):
+        return {"image_failure_reason": "source_http_403_cooldown"}
     product_url = str(product.get("link") or "").strip()
     pharmacy_name = "Araujo" if source == "araujo" else "Pacheco"
     rejection = offer_image_delivery_rejection_reason(
@@ -362,7 +371,7 @@ async def download_and_upload_product_image(
     ):
         return {"skipped": "generic_already_stored", "is_generic_fallback": True}
     try:
-        raw, source_content_type = await _download_image(client, image_url)
+        raw, source_content_type = await _download_image(client, image_url, source)
         normalized = normalize_medicine_image(
             raw,
             declared_content_type=(
