@@ -6,23 +6,43 @@ $settings = Read-CollectorJson -Path $settingsPath
 Write-Host "Ativo: $($settings.collector_enabled); API pronta: $($settings.api_ready); fuso: $($settings.timezone); limite manual=$($settings.max_products_per_run) produtos; tarefas usam orçamento de requisições"
 $rateStatePath = Join-Path $settings.state_dir 'rate-limit\external-requests.json'
 if (Test-Path -LiteralPath $rateStatePath) {
-    $rateState = Read-CollectorJson -Path $rateStatePath
-    $windowStart = [DateTimeOffset]::UtcNow.AddSeconds(-[int]$rateState.window_seconds)
-    $activeRequests = @($rateState.events | Where-Object {
-        $eventTime = if ($_.at -is [datetime]) {
-            [DateTimeOffset]$_.at
-        } else {
-            [DateTimeOffset]::Parse(
-                [string]$_.at,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::RoundtripKind
-            )
+    $rateLockPath = [IO.Path]::ChangeExtension($rateStatePath, '.lock')
+    $rateLock = [IO.File]::Open($rateLockPath, 'Open', 'ReadWrite', 'ReadWrite')
+    $lockAcquired = $false
+    try {
+        for ($attempt = 0; $attempt -lt 40 -and -not $lockAcquired; $attempt++) {
+            try {
+                $rateLock.Lock(0, 1)
+                $lockAcquired = $true
+            } catch [IO.IOException] {
+                Start-Sleep -Milliseconds 25
+            }
         }
-        $eventTime.ToUniversalTime() -gt $windowStart
-    })
-    $araujoRequests = @($activeRequests | Where-Object { $_.source -eq 'araujo' }).Count
-    $pachecoRequests = @($activeRequests | Where-Object { $_.source -eq 'pacheco' }).Count
-    Write-Host "Orçamento externo móvel ($([int]($rateState.window_seconds / 60)) min): total=$($activeRequests.Count)/$($rateState.limit) Araújo=$araujoRequests Pacheco=$pachecoRequests"
+        if (-not $lockAcquired) {
+            Write-Host 'Orçamento externo móvel: leitura adiada porque o estado está sendo atualizado.'
+        } else {
+            $rateState = Read-CollectorJson -Path $rateStatePath
+            $windowStart = [DateTimeOffset]::UtcNow.AddSeconds(-[int]$rateState.window_seconds)
+            $activeRequests = @($rateState.events | Where-Object {
+                $eventTime = if ($_.at -is [datetime]) {
+                    [DateTimeOffset]$_.at
+                } else {
+                    [DateTimeOffset]::Parse(
+                        [string]$_.at,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                }
+                $eventTime.ToUniversalTime() -gt $windowStart
+            })
+            $araujoRequests = @($activeRequests | Where-Object { $_.source -eq 'araujo' }).Count
+            $pachecoRequests = @($activeRequests | Where-Object { $_.source -eq 'pacheco' }).Count
+            Write-Host "Orçamento externo móvel ($([int]($rateState.window_seconds / 60)) min): total=$($activeRequests.Count)/$($rateState.limit) Araújo=$araujoRequests Pacheco=$pachecoRequests"
+        }
+    } finally {
+        if ($lockAcquired) { $rateLock.Unlock(0, 1) }
+        $rateLock.Dispose()
+    }
 } else {
     Write-Host 'Orçamento externo móvel (15 min): total=0/50 Araújo=0 Pacheco=0'
 }
@@ -74,22 +94,5 @@ $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
         [pscustomobject]@{ TaskName = $_.TaskName; State = $_.State; LastRunTime = $info.LastRunTime; NextRunTime = $info.NextRunTime; LastTaskResult = $info.LastTaskResult; Schedule = $triggerSummary; Arguments = (@($_.Actions | ForEach-Object { $_.Arguments }) -join '; ') }
     }
 $tasks | Format-Table -AutoSize
-$lockDirectory = Join-Path $settings.state_dir 'locks'
-foreach ($source in @('araujo', 'pacheco')) {
-    $sourceLock = Join-Path $lockDirectory "$source.lock"
-    if (Test-Path -LiteralPath $sourceLock) {
-        $probe = $null
-        try {
-            $probe = [IO.File]::Open($sourceLock, 'Open', 'ReadWrite', 'ReadWrite')
-            $probe.Lock(0, 1)
-            $probe.Unlock(0, 1)
-            Write-Host "$source lock Python: livre"
-        } catch {
-            Write-Host "$source lock Python: ocupado"
-        } finally {
-            if ($probe) { $probe.Dispose() }
-        }
-    } else { Write-Host "$source lock Python: livre" }
-}
 Write-Host 'Códigos de saída: 0 concluída; 2 acesso negado; 3 parcial; 4 parada segura; 5 limite da origem; 6 falha API/HMAC; 7 erro; 8 desativada; 9 lock ocupado; 10 horário perdido; 11 repetição do slot.'
 Write-Host "Log: $($settings.log_file)"

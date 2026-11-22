@@ -9,6 +9,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -129,7 +130,14 @@ def _write_state(path: Path, state: dict) -> None:
             json.dump(state, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 7:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

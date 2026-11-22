@@ -56,6 +56,26 @@ def test_concurrent_sources_cannot_reserve_the_51st_request(monkeypatch, tmp_pat
     assert sum(value is not None for value in results) == 50
 
 
+def test_state_replace_retries_transient_windows_sharing_violation(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    real_replace = limiter.os.replace
+    attempts = 0
+
+    def transient_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("temporary file sharing conflict")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(limiter.os, "replace", transient_replace)
+    assert limiter._try_reserve_request("araujo", "shop.example") is None
+    assert attempts == 3
+    assert limiter.rate_budget_status()["total"] == 1
+
+
 def test_429_retry_after_blocks_only_the_source_host(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     response = SimpleNamespace(status_code=429, headers={"Retry-After": "60"})
