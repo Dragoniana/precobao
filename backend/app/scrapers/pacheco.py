@@ -111,6 +111,18 @@ class PachecoScraper(BasePharmacyScraper):
 
     @staticmethod
     def _new_stats(previous: dict[str, Any]) -> dict[str, Any]:
+        cursor = previous.get("scan_cursor")
+        if not isinstance(cursor, dict):
+            legacy_offset = previous.get("last_completed_offset")
+            legacy_status = str(previous.get("status", "")).casefold()
+            if (
+                legacy_offset is not None
+                and legacy_status in {"limited", "partial", "running"}
+                and not previous.get("brands_processed")
+            ):
+                cursor = {"stage": "root", "offset": int(legacy_offset) + 50}
+            else:
+                cursor = {"stage": "root", "offset": 0}
         return {
             "run_id": datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ"),
             "started_at": datetime.now(UTC).isoformat(),
@@ -119,7 +131,8 @@ class PachecoScraper(BasePharmacyScraper):
             "complete": False,
             "resumed_after_interruption": previous.get("status") == "running",
             "previous_run_id": previous.get("run_id"),
-            "resume_strategy": "replay_from_first_page",
+            "resume_strategy": "durable_partition_and_offset_cursor",
+            "scan_cursor": cursor,
             "last_completed_offset": None,
             "pages_requested": 0,
             "pages_succeeded": 0,
@@ -319,12 +332,17 @@ class PachecoScraper(BasePharmacyScraper):
         }
 
         async with open_source_http_client("pacheco", headers=headers) as session:
-            root_complete = await self._scan_partition(
-                session,
-                self.API_BASE,
-                partition="medicamentos",
-                max_offset=self.MAX_BROAD_SEARCH_OFFSET,
-            )
+            cursor = self.stats.get("scan_cursor") or {"stage": "root", "offset": 0}
+            root_complete = True
+            if cursor.get("stage", "root") == "root":
+                root_complete = await self._scan_partition(
+                    session,
+                    self.API_BASE,
+                    partition="medicamentos",
+                    max_offset=self.MAX_BROAD_SEARCH_OFFSET,
+                    initial_offset=max(0, int(cursor.get("offset", 0))),
+                    cursor_stage="root",
+                )
             if self.stats.get("stop_reason") == "safe_stop_requested":
                 return
             if self._limit_reached():
@@ -371,7 +389,33 @@ class PachecoScraper(BasePharmacyScraper):
                 return
 
             seen_brand_paths: set[str] = set()
-            for brand in brands:
+            cursor = self.stats.get("scan_cursor") or {
+                "stage": "brand",
+                "brand_index": 0,
+            }
+            if cursor.get("stage") == "root":
+                cursor = {"stage": "brand", "brand_index": 0, "offset": 0}
+                self.stats["scan_cursor"] = cursor
+                self._write_checkpoint()
+            start_brand_index = max(0, int(cursor.get("brand_index", 0)))
+            saved_path = cursor.get("brand_path")
+            if saved_path:
+                matching_index = next(
+                    (
+                        index
+                        for index, item in enumerate(brands)
+                        if urlsplit(item.get("Link") or "").path == saved_path
+                    ),
+                    None,
+                )
+                if matching_index is not None:
+                    start_brand_index = matching_index
+                else:
+                    cursor = {"stage": "brand", "brand_index": 0, "offset": 0}
+                    self.stats["scan_cursor"] = cursor
+                    start_brand_index = 0
+                    self._write_checkpoint()
+            for brand_index, brand in enumerate(brands):
                 if self._limit_reached():
                     break
                 link = brand.get("Link") or ""
@@ -381,6 +425,8 @@ class PachecoScraper(BasePharmacyScraper):
                     self.stats["duplicate_brand_facets_skipped"] += 1
                     continue
                 seen_brand_paths.add(path)
+                if brand_index < start_brand_index:
+                    continue
                 if not path.startswith("/medicamentos/") or quantity <= 0:
                     self._page_failed(
                         f"Invalid brand partition link or quantity: {brand.get('Name')}"
@@ -396,11 +442,26 @@ class PachecoScraper(BasePharmacyScraper):
                     expected_count=quantity,
                     max_offset=self.MAX_BROAD_SEARCH_OFFSET,
                     query_map="c,b",
+                    initial_offset=(
+                        max(0, int(cursor.get("offset", 0)))
+                        if brand_index == start_brand_index
+                        and cursor.get("stage") == "brand"
+                        else 0
+                    ),
+                    cursor_stage="brand",
+                    cursor_brand_index=brand_index,
+                    cursor_brand_path=path,
                 )
                 if self.stats.get("stop_reason") == "safe_stop_requested":
                     break
                 if succeeded:
                     self.stats["brands_processed"] += 1
+                    if not self._limit_reached():
+                        self.stats["scan_cursor"] = {
+                            "stage": "brand",
+                            "brand_index": brand_index + 1,
+                            "offset": 0,
+                        }
                 else:
                     self.stats["partition_errors"].append(str(brand.get("Name")))
                     if (
@@ -413,6 +474,10 @@ class PachecoScraper(BasePharmacyScraper):
             if self._limit_reached():
                 return
             self.stats["brands_unique_partitions"] = len(seen_brand_paths)
+            if start_brand_index >= len(brands) or (
+                self.stats.get("scan_cursor", {}).get("brand_index", 0) >= len(brands)
+            ):
+                self.stats["scan_cursor"] = {"stage": "root", "offset": 0}
 
             expected_total = self.stats["facet_reported_total"]
             found_total = self.stats["unique_source_products"]
@@ -443,9 +508,13 @@ class PachecoScraper(BasePharmacyScraper):
         expected_count: int | None = None,
         max_offset: int | None = None,
         query_map: str = "c",
+        initial_offset: int = 0,
+        cursor_stage: str = "root",
+        cursor_brand_index: int | None = None,
+        cursor_brand_path: str | None = None,
     ) -> bool:
         """Read a VTEX partition using its advertised item count when available."""
-        offset = 0
+        offset = initial_offset
         while True:
             if self._limit_reached():
                 return True
@@ -566,6 +635,11 @@ class PachecoScraper(BasePharmacyScraper):
                     return True
                 self.stats["pages_succeeded"] += 1
                 self.stats["last_completed_offset"] = offset
+                cursor = {"stage": cursor_stage, "offset": offset + self.ITEMS_PER_PAGE}
+                if cursor_stage == "brand":
+                    cursor["brand_index"] = cursor_brand_index
+                    cursor["brand_path"] = cursor_brand_path
+                self.stats["scan_cursor"] = cursor
                 self._write_checkpoint()
                 print(
                     f"Pacheco {partition}: {len(raw_products)} source rows; "

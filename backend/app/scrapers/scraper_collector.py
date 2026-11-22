@@ -456,7 +456,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 ),
             )
 
-        async def send_page(products: list[dict[str, Any]]) -> None:
+        async def send_page(products: list[dict[str, Any]]) -> int:
             nonlocal products_selected, product_limit_reached
             if max_products_per_run is not None:
                 products = _select_page_products(
@@ -464,7 +464,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 )
                 if not products:
                     product_limit_reached = True
-                    return
+                    return 0
                 products_selected += len(products)
                 product_limit_reached = products_selected >= max_products_per_run
             observed_at = datetime.now(UTC)
@@ -564,6 +564,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                 rejected=int(response.get("rejected_count", 0)),
                 status=response.get("status"),
             )
+            return len(normalized)
 
         def stop_source_collection() -> bool:
             return product_limit_reached or _stop_requested()
@@ -792,9 +793,29 @@ async def main() -> None:
         uploaded = await sync_source_images(args.source)
         print(json.dumps({"source": args.source, "images_uploaded": uploaded}))
         return
-    result = await collect_source(args.source)
-    if result.get("status") in {"ACCESS_BLOCKED", "SYNC_BLOCKED"}:
-        raise SystemExit(2)
+    try:
+        result = await collect_source(args.source)
+    except RuntimeError as error:
+        if str(error) == "SCRAPER_COLLECTOR_ALREADY_RUNNING":
+            raise SystemExit(9) from None
+        raise SystemExit(7) from None
+    exit_codes = {
+        "COMPLETE": 0,
+        "ACCESS_BLOCKED": 2,
+        "PARTIAL": 3,
+        "STOPPED": 4,
+        "RATE_LIMITED": 5,
+        "SYNC_BLOCKED": 6,
+        "SYNC_AUTH_FAILED": 6,
+        "SYNC_CONFLICT": 6,
+        "SYNC_INVALID": 6,
+        "SYNC_UNAVAILABLE": 6,
+        "SYNC_FAILED": 6,
+        "FAILED": 7,
+        "ACCESS_DENIED": 2,
+        "DISABLED": 8,
+    }
+    raise SystemExit(exit_codes.get(str(result.get("status", "FAILED")).upper(), 7))
 
 
 if __name__ == "__main__":

@@ -71,6 +71,28 @@ foreach ($source in $sourcesToSchedule) {
 
 # Validate all definitions before touching Task Scheduler.
 foreach ($definition in $definitions) {
-    Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $definition.Settings -Principal $definition.Principal -Force | Out-Null
+    $existing = Get-ScheduledTask -TaskName $definition.Name -ErrorAction SilentlyContinue
+    if ($existing) {
+        $existingAction = @($existing.Actions)[0]
+        $expectedTime = $definition.Trigger.StartBoundary.ToString('HH:mm')
+        $existingTimes = @($existing.Triggers | ForEach-Object {
+            ([DateTime]$_.StartBoundary).ToString('HH:mm')
+        })
+        if (
+            $existingAction.Execute -ne $definition.Action.Execute -or
+            $existingAction.Arguments -ne $definition.Action.Arguments -or
+            $existing.Principal.LogonType -ne 'Interactive' -or
+            $expectedTime -notin $existingTimes
+        ) {
+            throw "A tarefa existente $($definition.Name) difere da configuração aprovada; nenhuma tarefa foi sobrescrita."
+        }
+    }
+}
+foreach ($definition in $definitions) {
+    if (Get-ScheduledTask -TaskName $definition.Name -ErrorAction SilentlyContinue) {
+        Write-Host "Tarefa existente preservada: $($definition.Name)"
+        continue
+    }
+    Register-ScheduledTask -TaskName $definition.Name -Action $definition.Action -Trigger $definition.Trigger -Settings $definition.Settings -Principal $definition.Principal | Out-Null
 }
 Write-Host "Tarefas separadas instaladas; limite de $limit produtos por farmácia e execução. Araújo: $($schedule.araujo -join ', '); Pacheco: $($schedule.pacheco -join ', ')."

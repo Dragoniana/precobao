@@ -157,10 +157,34 @@ class AraujoScraper(BasePharmacyScraper):
             "mode": SourceMode.DIRECT.value,
             "status": "RUNNING",
             "started_at": datetime.now(UTC).isoformat(),
-            "resume_strategy": "replay_from_first_page",
+            "resume_strategy": "durable_page_and_item_cursor",
             "last_completed_page": 0,
+            "next_page": 1,
+            "next_item_index": 0,
             "products_queued": 0,
         }
+        try:
+            previous = json.loads(
+                self.source_checkpoint_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        if isinstance(previous, dict):
+            previous_status = str(previous.get("status", "")).upper()
+            if previous_status != "COMPLETE":
+                legacy_page = previous.get("last_completed_page", 0)
+                fallback_page = int(legacy_page) if legacy_page else 1
+                state["next_page"] = max(
+                    1, int(previous.get("next_page", fallback_page))
+                )
+                state["next_item_index"] = max(
+                    0, int(previous.get("next_item_index", 0))
+                )
+        if state["next_page"] > self.max_pages:
+            state["next_page"] = 1
+            state["next_item_index"] = 0
+        start_page = state["next_page"]
+        start_item_index = state["next_item_index"]
         self._write_direct_checkpoint(state)
         headers = {
             "Accept": "text/html,application/xhtml+xml",
@@ -169,7 +193,7 @@ class AraujoScraper(BasePharmacyScraper):
         }
         try:
             async with open_source_http_client("araujo", headers=headers) as client:
-                for page in range(1, self.max_pages + 1):
+                for page in range(start_page, self.max_pages + 1):
                     response = await self.executar_com_backoff(
                         client.get,
                         self.CATALOG_URL,
@@ -185,18 +209,45 @@ class AraujoScraper(BasePharmacyScraper):
                     products = self.adaptar_parser_araujo_html(response.text)
                     if not products:
                         raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
+                    page_item_start = start_item_index if page == start_page else 0
+                    if page_item_start >= len(products):
+                        raise RuntimeError("ARAUJO_CHECKPOINT_ITEM_CURSOR_INVALID")
+                    products = products[page_item_start:]
+                    if not products:
+                        raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
                     if self.products_callback is not None:
-                        await self.products_callback(products)
+                        delivered = await self.products_callback(products)
+                        delivered = (
+                            len(products) if delivered is None else int(delivered)
+                        )
                     else:
                         for product in products:
                             await self.fila.put(product)
-                    self.products_queued += len(products)
+                        delivered = len(products)
+                    if delivered < 0 or delivered > len(products):
+                        raise RuntimeError("ARAUJO_INVALID_DELIVERED_PRODUCT_COUNT")
+                    self.products_queued += delivered
+                    next_page = page + 1
+                    next_item_index = 0
+                    if delivered < len(products):
+                        next_page = page
+                        next_item_index = page_item_start + delivered
                     state.update(
                         last_completed_page=page,
+                        next_page=next_page,
+                        next_item_index=next_item_index,
                         products_queued=self.products_queued,
                         updated_at=datetime.now(UTC).isoformat(),
                     )
                     self._write_direct_checkpoint(state)
+                    if delivered < len(products):
+                        state.update(
+                            status="PARTIAL",
+                            stop_reason="configured_product_limit_within_page",
+                            finished_at=datetime.now(UTC).isoformat(),
+                        )
+                        self._write_direct_checkpoint(state)
+                        return
                     if self.stop_requested_callback and self.stop_requested_callback():
                         state.update(
                             status="STOPPED",
@@ -206,6 +257,7 @@ class AraujoScraper(BasePharmacyScraper):
                         self._write_direct_checkpoint(state)
                         return
                     if source_cards < self.PAGE_SIZE:
+                        state.update(next_page=1, next_item_index=0)
                         break
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
@@ -215,6 +267,8 @@ class AraujoScraper(BasePharmacyScraper):
                     state.update(
                         status="PARTIAL",
                         stop_reason="configured_page_limit",
+                        next_page=1,
+                        next_item_index=0,
                         finished_at=datetime.now(UTC).isoformat(),
                     )
                     self._write_direct_checkpoint(state)
@@ -222,7 +276,8 @@ class AraujoScraper(BasePharmacyScraper):
             state.update(
                 status="COMPLETE",
                 finished_at=datetime.now(UTC).isoformat(),
-                next_run_replays_from_page=1,
+                next_page=1,
+                next_item_index=0,
             )
             self._write_direct_checkpoint(state)
             print(

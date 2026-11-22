@@ -39,6 +39,20 @@ def test_pacheco_restart_preserves_403_schedule_and_checkpoint(tmp_path, monkeyp
     }
 
 
+def test_pacheco_legacy_limited_checkpoint_advances_past_completed_page():
+    state = PachecoScraper._new_stats(
+        {"status": "limited", "last_completed_offset": 0, "brands_processed": 0}
+    )
+    assert state["scan_cursor"] == {"stage": "root", "offset": 50}
+
+
+def test_pacheco_starts_new_refresh_cycle_after_completed_legacy_run():
+    state = PachecoScraper._new_stats(
+        {"status": "complete", "last_completed_offset": 500, "brands_processed": 4}
+    )
+    assert state["scan_cursor"] == {"stage": "root", "offset": 0}
+
+
 def test_pacheco_extracts_confirmed_unavailable_state_and_quantity(
     tmp_path, monkeypatch
 ):
@@ -550,6 +564,63 @@ async def test_pacheco_rejects_incomplete_206_page_without_total_metadata(
     assert scraper.stats["last_completed_offset"] is None
     assert scraper.stats["failure_category"] == "parser_or_source_data_error"
     assert "HTTP 206 short page has no advertised total" in scraper.stats["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_pacheco_persists_and_resumes_next_offset_after_product_limit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    offsets = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, offset):
+            self.offset = offset
+
+        def json(self):
+            return [
+                {"productId": f"product-{self.offset + index}"} for index in range(50)
+            ]
+
+    class Session:
+        async def get(self, url, timeout):
+            offset = int(parse_qs(urlsplit(url).query)["_from"][0])
+            offsets.append(offset)
+            return Response(offset)
+
+    async def run_one_page(scraper, expected_offset):
+        scraper._start_run()
+
+        def queue(rows):
+            scraper.stats["products_enqueued"] += len(rows)
+            return [{"sku_interno": row["productId"]} for row in rows]
+
+        scraper._queue_source_products = queue
+        scraper.products_callback = _deliver
+        cursor = scraper.stats["scan_cursor"]
+        result = await scraper._scan_partition(
+            Session(),
+            "https://www.drogariaspacheco.com.br/api/search",
+            partition="medicamentos",
+            initial_offset=cursor["offset"],
+            cursor_stage="root",
+        )
+        assert result is True
+        assert scraper.stats["scan_cursor"]["offset"] == expected_offset + 50
+
+    async def _deliver(_products):
+        return None
+
+    first = PachecoScraper(max_items=50, request_delay=0)
+    await run_one_page(first, 0)
+    restarted = PachecoScraper(max_items=50, request_delay=0)
+    await run_one_page(restarted, 50)
+
+    assert offsets == [0, 50]
+    assert restarted.stats["resume_strategy"] == "durable_partition_and_offset_cursor"
 
 
 def test_scheduler_uses_durable_daily_interval(monkeypatch):

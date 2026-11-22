@@ -50,7 +50,7 @@ try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
 catch {
     Add-Content $settings.log_file "$(Get-Date -Format o) SKIPPED already_running"
     Write-Host 'Coleta já em execução; esta chamada foi ignorada.'
-    exit 0
+    exit 9
 }
 try {
     Remove-Item -LiteralPath $settings.stop_file -Force -ErrorAction SilentlyContinue
@@ -79,6 +79,14 @@ try {
         }
     }
     $sources = if ($Source -eq 'both') { @('araujo', 'pacheco') } else { @($Source) }
+    $configuredSources = @($sources | Where-Object {
+        $entry = $settings.sources.PSObject.Properties[$_].Value
+        $entry.mode -eq 'DIRECT' -and $entry.access_confirmed
+    })
+    if ($configuredSources.Count -eq 0) {
+        Add-Content $settings.log_file "$(Get-Date -Format o) FAILED source_disabled_or_unconfirmed"
+        exit 8
+    }
     $python = Join-Path $settings.repository_root 'backend\.venv\Scripts\python.exe'
     if (-not (Test-Path $python)) { throw 'Ambiente Python não encontrado. Reexecute Install-Collector.ps1.' }
     $slotKey = ''
@@ -87,36 +95,41 @@ try {
         $slotTime = [DateTime]::Today.AddHours([int]$slotParts[0]).AddMinutes([int]$slotParts[1])
         if ($slotTime -gt (Get-Date)) { $slotTime = $slotTime.AddDays(-1) }
         $slotKey = $slotTime.ToString('yyyy-MM-ddTHH:mm')
-        $slotStatePath = Join-Path $StateRoot 'last-scheduled-slot.txt'
+        $slotStatePath = Join-Path $StateRoot "last-scheduled-slot-$Source.txt"
         if ((Test-Path $slotStatePath) -and (Get-Content -Raw $slotStatePath).Trim() -eq $slotKey) {
             Add-Content $settings.log_file "$(Get-Date -Format o) SKIPPED duplicate_slot=$slotKey"
-            exit 0
+            exit 11
         }
         $delayMinutes = [math]::Floor(((Get-Date) - $slotTime).TotalMinutes)
         if ($delayMinutes -gt [int]$settings.missed_run_grace_minutes) {
             Set-Content $slotStatePath $slotKey -Encoding ascii
             Add-Content $settings.log_file "$(Get-Date -Format o) MISSED slot=$slotKey delay_minutes=$delayMinutes recovery=skipped"
             Write-Host "Horário perdido há $delayMinutes min; recuperação fora da janela permitida."
-            exit 0
+            exit 10
         }
         if ($delayMinutes -gt 5) {
             Add-Content $settings.log_file "$(Get-Date -Format o) MISSED slot=$slotKey delay_minutes=$delayMinutes recovery=single_run"
         }
         Set-Content $slotStatePath $slotKey -Encoding ascii
     }
+    $runExitCode = 0
     foreach ($item in $sources) {
         if ($settings.sources.$item.mode -ne 'DIRECT' -or -not $settings.sources.$item.access_confirmed) {
             Add-Content $settings.log_file "$(Get-Date -Format o) SKIPPED source=$item mode_disabled_or_unconfirmed"
             Write-Host "$item ignorada: modo DIRECT e confirmação de acesso não configurados."
+            if ($runExitCode -eq 0) { $runExitCode = 3 }
             continue
         }
         Add-Content $settings.log_file "$(Get-Date -Format o) START source=$item slot=$ScheduledSlot"
         Push-Location (Join-Path $settings.repository_root 'backend')
         try { & $python -m app.scrapers.scraper_collector $item *>> $settings.log_file }
         finally { Pop-Location }
-        Add-Content $settings.log_file "$(Get-Date -Format o) FINISH source=$item exit=$LASTEXITCODE"
+        $pythonExitCode = $LASTEXITCODE
+        Add-Content $settings.log_file "$(Get-Date -Format o) FINISH source=$item exit=$pythonExitCode"
+        if ($pythonExitCode -ne 0 -and $runExitCode -eq 0) { $runExitCode = $pythonExitCode }
         if (Test-Path $settings.stop_file) { break }
     }
+    exit $runExitCode
 } finally {
     $env:SCRAPER_INGEST_HMAC_SECRET = $null
     $env:ARAUJO_STATE_DIR = $null

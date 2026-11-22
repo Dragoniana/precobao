@@ -130,7 +130,8 @@ async def test_araujo_direct_mode_works_without_feed_and_persists_page_checkpoin
     assert scraper.fila.get_nowait()["sku_interno"] == "ARJ1"
     checkpoint = json.loads(scraper.source_checkpoint_path.read_text())
     assert checkpoint["status"] == "COMPLETE"
-    assert checkpoint["resume_strategy"] == "replay_from_first_page"
+    assert checkpoint["resume_strategy"] == "durable_page_and_item_cursor"
+    assert checkpoint["next_page"] == 1
 
 
 @pytest.mark.asyncio
@@ -169,6 +170,66 @@ async def test_araujo_direct_403_stops_without_advancing_checkpoint(
     assert error.value.status_code == 403
     assert checkpoint["status"] == "ACCESS_BLOCKED"
     assert checkpoint["last_completed_page"] == 0
+
+
+@pytest.mark.asyncio
+async def test_araujo_resumes_inside_page_after_50_product_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("ARAUJO_STATE_DIR", str(tmp_path))
+    requests = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+        text = '<div class="productTile" data-pid="1"></div>'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **kwargs):
+            requests.append(kwargs["params"]["page"])
+            return Response()
+
+    monkeypatch.setattr("app.scrapers.source_http_client.httpx.AsyncClient", Client)
+    products = [{"sku_interno": f"ARJ{i}"} for i in range(3)]
+    delivered_batches = []
+    scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
+    monkeypatch.setattr(scraper, "adaptar_parser_araujo_html", lambda _html: products)
+
+    async def deliver_first_two(batch):
+        delivered_batches.append([product["sku_interno"] for product in batch[:2]])
+        return 2
+
+    scraper.products_callback = deliver_first_two
+    await scraper._extract_direct_catalog()
+    first = json.loads(scraper.source_checkpoint_path.read_text())
+    assert first["status"] == "PARTIAL"
+    assert first["next_page"] == 1
+    assert first["next_item_index"] == 2
+
+    scraper = AraujoScraper(source_mode="DIRECT", request_delay=0)
+    monkeypatch.setattr(scraper, "adaptar_parser_araujo_html", lambda _html: products)
+
+    async def deliver_remainder(batch):
+        delivered_batches.append([product["sku_interno"] for product in batch])
+        return len(batch)
+
+    scraper.products_callback = deliver_remainder
+    await scraper._extract_direct_catalog()
+    second = json.loads(scraper.source_checkpoint_path.read_text())
+    assert requests == [1, 1]
+    assert delivered_batches == [["ARJ0", "ARJ1"], ["ARJ2"]]
+    assert second["status"] == "COMPLETE"
+    assert second["next_page"] == 1
+    assert second["next_item_index"] == 0
 
 
 def test_source_modes_are_explicit_and_default_disabled(monkeypatch):
