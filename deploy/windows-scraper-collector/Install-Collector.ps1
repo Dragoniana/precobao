@@ -1,8 +1,9 @@
-param(
+﻿param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Collector-IO.ps1')
 $RepositoryRoot = (Resolve-Path $RepositoryRoot).Path
 $Backend = Join-Path $RepositoryRoot 'backend'
 $StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
@@ -10,7 +11,7 @@ $StateDir = Join-Path $StateRoot 'state'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 $settingsPath = Join-Path $StateRoot 'settings.json'
 if (Test-Path -LiteralPath $settingsPath) {
-    $existingSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    $existingSettings = Read-CollectorJson -Path $settingsPath
     if ($existingSettings.repository_root) {
         $existingRoot = [IO.Path]::GetFullPath([string]$existingSettings.repository_root).TrimEnd('\', '/')
         $requestedRoot = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
@@ -61,7 +62,7 @@ if (-not (Test-Path $settingsPath)) {
             pacheco = @{ mode = 'DISABLED'; access_confirmed = $false }
         }
     }
-    $settings | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $settingsPath
+    Write-CollectorJson -Path $settingsPath -Value $settings -Depth 8
 }
 
 & (Join-Path $PSScriptRoot 'Migrate-CollectorState.ps1') -RepositoryRoot $RepositoryRoot

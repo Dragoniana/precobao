@@ -1,8 +1,9 @@
-param(
+﻿param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Collector-IO.ps1')
 $RepositoryRoot = [IO.Path]::GetFullPath((Resolve-Path $RepositoryRoot).Path)
 $CollectorRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'))
 $TargetState = [IO.Path]::GetFullPath((Join-Path $CollectorRoot 'state'))
@@ -107,7 +108,7 @@ $archiveOnlyTrees = [System.Collections.Generic.List[object]]::new()
 $legacyFiles = [System.Collections.Generic.List[object]]::new()
 
 if (Test-Path -LiteralPath $SettingsPath) {
-    $settings = Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
+    $settings = Read-CollectorJson -Path $SettingsPath
     if ($settings.repository_root) {
         $configuredRepository = [IO.Path]::GetFullPath([string]$settings.repository_root).TrimEnd('\', '/')
         $requestedRepository = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
@@ -221,12 +222,12 @@ foreach ($file in $legacyFiles) {
 }
 
 if (Test-Path -LiteralPath $SettingsPath) {
-    $settings = Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
+    $settings = Read-CollectorJson -Path $SettingsPath
     $settings.repository_root = $RepositoryRoot
     $settings.state_dir = $TargetState
     $settings.stop_file = $configuredStop
     $settings.log_file = $configuredLog
-    $settings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $SettingsPath -Encoding utf8
+    Write-CollectorJson -Path $SettingsPath -Value $settings -Depth 8
 }
 
 Write-Host "Collector state uses $TargetState"

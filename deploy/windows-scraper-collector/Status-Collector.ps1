@@ -1,17 +1,20 @@
-$StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
+﻿$StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
+. (Join-Path $PSScriptRoot 'Collector-IO.ps1')
 $settingsPath = Join-Path $StateRoot 'settings.json'
 if (-not (Test-Path $settingsPath)) { throw 'Coletor ainda não instalado.' }
-$settings = Get-Content -Raw $settingsPath | ConvertFrom-Json
-Write-Host "Ativo: $($settings.collector_enabled); API pronta: $($settings.api_ready); fuso: $($settings.timezone)"
+$settings = Read-CollectorJson -Path $settingsPath
+Write-Host "Ativo: $($settings.collector_enabled); API pronta: $($settings.api_ready); fuso: $($settings.timezone); limite: $($settings.max_products_per_run) produtos/execução"
 foreach ($source in @('araujo', 'pacheco')) {
+    $configuredTimes = @($settings.source_schedule_times.$source) -join ', '
+    Write-Host "$source agendamento configurado: $configuredTimes"
     $path = Join-Path $settings.state_dir "$source.json"
     if (Test-Path $path) {
-        $state = Get-Content -Raw $path | ConvertFrom-Json
-        Write-Host "$source`: $($state.status) recebidos=$($state.products_sent + $state.products_rejected) aceitos=$($state.products_sent) rejeitados=$($state.products_rejected) ofertas_novas=$($state.offers_created) ofertas_atualizadas=$($state.offers_updated) mudancas_preco=$($state.price_changes) imagens=$($state.image_blobs_uploaded) atualizado=$($state.finished_at) motivo=$($state.stop_reason)"
+        $state = Read-CollectorJson -Path $path
+        Write-Host "$source`: $($state.status) recebidos=$($state.products_sent + $state.products_rejected) aceitos=$($state.products_sent) rejeitados=$($state.products_rejected) ofertas_novas=$($state.offers_created) ofertas_atualizadas=$($state.offers_updated) mudancas_preco=$($state.price_changes) imagens_enviadas=$($state.image_blobs_uploaded) falhas_imagem=$($state.image_failures) sincronizado=$($state.finished_at) batch=$($state.last_batch_id) motivo=$($state.stop_reason)"
     } else { Write-Host "$source`: sem execução" }
     $checkpointPath = Join-Path (Join-Path $settings.state_dir "sources\$source") $(if ($source -eq 'araujo') { 'source-checkpoint.json' } else { 'checkpoint.json' })
     if (Test-Path -LiteralPath $checkpointPath) {
-        $checkpoint = Get-Content -Raw $checkpointPath | ConvertFrom-Json
+        $checkpoint = Read-CollectorJson -Path $checkpointPath
         if ($source -eq 'araujo') {
             Write-Host "$source checkpoint: pagina_concluida=$($checkpoint.last_completed_page) proxima_pagina=$($checkpoint.next_page) item_inicial=$($checkpoint.next_item_index)"
         } else {
@@ -20,9 +23,12 @@ foreach ($source in @('araujo', 'pacheco')) {
     }
     $rejectedPath = Join-Path $settings.state_dir "rejected\$source.json"
     if (Test-Path $rejectedPath) {
-        $rejected = @(Get-Content -Raw $rejectedPath | ConvertFrom-Json)
+        $rejected = @(Read-CollectorJson -Path $rejectedPath)
         Write-Host "$source`: conflitos persistidos=$($rejected.Count)"
     }
+    $batchOutboxPath = Join-Path $settings.state_dir "outbox\$source.pending.json"
+    $batchPending = Test-Path -LiteralPath $batchOutboxPath
+    Write-Host "$source`: lote pendente na outbox=$batchPending"
     $imageOutbox = Join-Path $settings.state_dir "outbox\images\$source"
     $imageCount = if (Test-Path $imageOutbox) {
         @(Get-ChildItem -LiteralPath $imageOutbox -File -Filter '*.json').Count
@@ -30,14 +36,21 @@ foreach ($source in @('araujo', 'pacheco')) {
     Write-Host "$source`: imagens pendentes=$imageCount"
     $lastSlotPath = Join-Path $StateRoot "last-scheduled-slot-$source.txt"
     if (Test-Path -LiteralPath $lastSlotPath) {
-        Write-Host "$source ultimo_slot=$(Get-Content -Raw $lastSlotPath).Trim()"
+        $lastSlot = (Read-CollectorUtf8 -Path $lastSlotPath).Trim()
+        Write-Host "$source ultimo_slot=$lastSlot"
     }
 }
 $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
     Where-Object { $_.TaskName -like 'PrecoBaoCollector-*' } |
     ForEach-Object {
         $info = Get-ScheduledTaskInfo -TaskName $_.TaskName -ErrorAction SilentlyContinue
-        [pscustomobject]@{ TaskName = $_.TaskName; State = $_.State; LastRunTime = $info.LastRunTime; LastTaskResult = $info.LastTaskResult; Arguments = (@($_.Actions | ForEach-Object { $_.Arguments }) -join '; ') }
+        $triggerSummary = @($_.Triggers | ForEach-Object {
+            $start = ([DateTime]$_.StartBoundary).ToString('HH:mm')
+            if ($_.Repetition.Interval) {
+                "a cada $($_.Repetition.Interval), início $start, duração $($_.Repetition.Duration)"
+            } else { "diária às $start" }
+        }) -join '; '
+        [pscustomobject]@{ TaskName = $_.TaskName; State = $_.State; LastRunTime = $info.LastRunTime; NextRunTime = $info.NextRunTime; LastTaskResult = $info.LastTaskResult; Schedule = $triggerSummary; Arguments = (@($_.Actions | ForEach-Object { $_.Arguments }) -join '; ') }
     }
 $tasks | Format-Table -AutoSize
 $lockPath = Join-Path $settings.state_dir 'locks\collector.running.lock'

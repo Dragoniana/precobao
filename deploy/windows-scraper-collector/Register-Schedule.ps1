@@ -1,9 +1,10 @@
-param([switch]$Enable)
+﻿param([switch]$Enable)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Collector-IO.ps1')
 $StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
 $settingsPath = Join-Path $StateRoot 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath)) { throw 'Coletor ainda não instalado.' }
-$settings = Get-Content -Raw $settingsPath | ConvertFrom-Json
+$settings = Read-CollectorJson -Path $settingsPath
 if (-not $Enable) { throw 'Agendamento inativo por padrão. Passe -Enable somente após API e testes finais.' }
 if (-not $settings.api_ready -or -not $settings.collector_enabled) {
     throw 'Marque api_ready e collector_enabled após deploy aprovado e testes finais.'

@@ -1,18 +1,19 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('araujo', 'pacheco')]
     [string]$Source
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Collector-IO.ps1')
 $StateRoot = Join-Path $env:LOCALAPPDATA 'PrecoBaoCollector'
 $settingsPath = Join-Path $StateRoot 'settings.json'
 if (-not (Test-Path $settingsPath)) { throw 'Execute Install-Collector.ps1 primeiro.' }
-$settings = Get-Content -Raw $settingsPath | ConvertFrom-Json
+$settings = Read-CollectorJson -Path $settingsPath
 if (-not $settings.api_ready) { throw 'A API ainda não está marcada como pronta.' }
 $secretPath = Join-Path $StateRoot 'hmac-secret.dpapi'
 if (-not (Test-Path $secretPath)) { throw 'Configure o segredo com Set-CollectorSecret.ps1.' }
-$secure = Get-Content -Raw $secretPath | ConvertTo-SecureString
+$secure = [IO.File]::ReadAllText($secretPath, [Text.Encoding]::ASCII) | ConvertTo-SecureString
 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
 try { $env:SCRAPER_INGEST_HMAC_SECRET = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
 finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
