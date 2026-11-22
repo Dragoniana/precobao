@@ -135,7 +135,7 @@ def _write_state(path: Path, state: dict) -> None:
                 os.replace(temporary, path)
                 break
             except PermissionError:
-                if os.name != "nt" or attempt == 7:
+                if attempt == 7:
                     raise
                 time.sleep(0.025 * (attempt + 1))
     finally:
