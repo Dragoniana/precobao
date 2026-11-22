@@ -3,6 +3,8 @@ param(
     [string]$Mode = 'DryRun',
     [ValidateSet('araujo', 'pacheco')]
     [string]$Source,
+    [ValidateSet('known_references', 'source_lookup')]
+    [string]$Phase = 'known_references',
     [ValidateRange(1, 10)]
     [int]$Limit = 3,
     [switch]$BackupVerified,
@@ -56,8 +58,8 @@ $python = Join-Path $settings.repository_root 'backend\.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw 'Ambiente Python do coletor não encontrado.' }
 $arguments = @('-m', 'scripts.image_backfill')
 if ($Mode -eq 'Inventory') { $arguments += '--inventory' }
-if ($Mode -eq 'DryRun') { $arguments += @('--source', $Source, '--limit', [string]$Limit) }
-if ($Mode -eq 'Execute') { $arguments += @('--execute', '--source', $Source, '--limit', [string]$Limit) }
+if ($Mode -eq 'DryRun') { $arguments += @('--source', $Source, '--phase', $Phase, '--limit', [string]$Limit) }
+if ($Mode -eq 'Execute') { $arguments += @('--execute', '--source', $Source, '--phase', $Phase, '--limit', [string]$Limit) }
 if ($Mode -eq 'Execute' -and $IncludeGenericFallback) { $arguments += '--include-generic-fallback' }
 
 $previousEnvironment = @{}

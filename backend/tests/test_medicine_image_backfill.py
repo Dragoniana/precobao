@@ -212,3 +212,26 @@ def test_inventory_reports_bytea_and_url_candidate_categories(backfill_client):
         "araujo": {"EXTERNAL_URL_CANDIDATE": 1},
         "pacheco": {"EXTERNAL_URL_CANDIDATE": 1},
     }
+
+
+def test_source_lookup_phase_omits_previously_known_image_urls(backfill_client):
+    client, _sessions, missing_id, _stored_id = backfill_client
+    body = json.dumps(
+        {
+            "after_catalog_id": 0,
+            "limit": 10,
+            "phase": "source_lookup",
+        },
+        separators=(",", ":"),
+    ).encode()
+    response = client.post(QUEUE, content=body, headers=_headers(body))
+    assert response.status_code == 200
+    item = next(
+        item for item in response.json()["items"] if item["catalog_id"] == missing_id
+    )
+    assert {source["source"] for source in item["sources"]} == {"araujo", "pacheco"}
+    assert all(
+        not offer["image_urls"]
+        for source in item["sources"]
+        for offer in source["offers"]
+    )

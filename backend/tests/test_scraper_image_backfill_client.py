@@ -46,6 +46,7 @@ async def test_backfill_requests_use_hmac_and_resolve_internal_api_paths(monkeyp
         "after_catalog_id": 1200,
         "limit": 25,
         "source": "pacheco",
+        "phase": "known_references",
     }
 
 

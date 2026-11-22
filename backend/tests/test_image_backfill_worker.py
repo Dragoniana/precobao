@@ -47,12 +47,14 @@ async def test_valid_blob_and_identity_conflict_do_not_trigger_source_requests(
         {"catalog_id": 42, "status": "BYTEA_REAL_VALID", "sources": []},
         source_filter="pacheco",
         include_generic=False,
+        phase="known_references",
     )
     conflicted = await image_backfill._process_entry(
         httpx.AsyncClient(),
         {"catalog_id": 43, "status": "IDENTITY_CONFLICT", "sources": []},
         source_filter="pacheco",
         include_generic=False,
+        phase="known_references",
     )
     assert valid["status"] == "BYTEA_REAL_VALID"
     assert conflicted["status"] == "IDENTITY_CONFLICT"

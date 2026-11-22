@@ -62,9 +62,9 @@ def _state_dir() -> Path:
     return root.resolve() / "image-backfill"
 
 
-def _checkpoint_path(source: str | None) -> Path:
+def _checkpoint_path(source: str | None, phase: str) -> Path:
     key = source or "all"
-    return _state_dir() / f"progress-{key}.json"
+    return _state_dir() / f"progress-{key}-{phase}.json"
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -202,6 +202,7 @@ async def _try_source_offer(
     offer: dict[str, Any],
     *,
     include_generic: bool,
+    allow_source_lookup: bool,
 ) -> tuple[dict[str, Any] | None, str]:
     attempted: set[str] = set()
     candidate_urls = list(offer.get("image_urls") or [])
@@ -253,7 +254,11 @@ async def _try_source_offer(
         if source_was_blocked:
             break
 
-    if not source_was_blocked and not source_cooldown_active(source):
+    if (
+        allow_source_lookup
+        and not source_was_blocked
+        and not source_cooldown_active(source)
+    ):
         with external_request_purpose("image_backfill"):
             candidate_url, lookup_status = await _fetch_source_image_url(
                 source,
@@ -302,6 +307,7 @@ async def _process_entry(
     *,
     source_filter: str | None,
     include_generic: bool,
+    phase: str,
 ) -> dict[str, Any]:
     status = str(item.get("status") or "UNKNOWN")
     if status in {"BYTEA_REAL_VALID", "BYTEA_GENERIC_VALID"}:
@@ -332,6 +338,7 @@ async def _process_entry(
                 str(item.get("ean") or ""),
                 offer,
                 include_generic=include_generic,
+                allow_source_lookup=phase == "source_lookup",
             )
             source_results.append({"source": source, "status": reason})
             if result:
@@ -434,10 +441,12 @@ async def _run(args: argparse.Namespace) -> int:
                 after_catalog_id=args.after_catalog_id,
                 limit=args.limit,
                 source=args.source,
+                phase=args.phase,
             )
             _emit(
                 {
                     "operation": "dry_run",
+                    "phase": args.phase,
                     "page_size": result.get("page_size"),
                     "has_more": result.get("has_more"),
                     "status_counts": result.get("status_counts"),
@@ -452,7 +461,7 @@ async def _run(args: argparse.Namespace) -> int:
             return 0
 
         budget_before = _check_execution_budget()
-        state_path = _checkpoint_path(args.source)
+        state_path = _checkpoint_path(args.source, args.phase)
         lock_path = _state_dir() / "image-backfill.running.lock"
         with _exclusive_file_lock(lock_path):
             state = _load_state(state_path)
@@ -517,6 +526,7 @@ async def _run(args: argparse.Namespace) -> int:
                             item,
                             source_filter=args.source,
                             include_generic=args.include_generic_fallback,
+                            phase=args.phase,
                         )
                     except ExternalRequestDeferred:
                         report["rate_limited"] = True
@@ -537,6 +547,7 @@ async def _run(args: argparse.Namespace) -> int:
                             after_catalog_id=int(state["after_catalog_id"]),
                             limit=min(100, max_items - report["processed"]),
                             source=args.source,
+                            phase=args.phase,
                         )
                         items = page.get("items", [])
                         if not items:
@@ -552,6 +563,7 @@ async def _run(args: argparse.Namespace) -> int:
                                     item,
                                     source_filter=args.source,
                                     include_generic=args.include_generic_fallback,
+                                    phase=args.phase,
                                 )
                             except ExternalRequestDeferred:
                                 report["rate_limited"] = True
@@ -660,6 +672,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--source", choices=("araujo", "pacheco"), help="Limit work to one pharmacy"
+    )
+    parser.add_argument(
+        "--phase",
+        choices=("known_references", "source_lookup"),
+        default="known_references",
+        help="Use known image URLs first, then use source product lookups",
     )
     parser.add_argument(
         "--after-catalog-id",

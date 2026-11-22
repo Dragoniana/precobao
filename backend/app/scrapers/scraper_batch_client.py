@@ -248,14 +248,18 @@ async def fetch_image_backfill_page(
     after_catalog_id: int,
     limit: int = 50,
     source: str | None = None,
+    phase: str = "known_references",
 ) -> dict[str, Any]:
     if after_catalog_id < 0 or limit < 1 or limit > 100:
         raise BatchSyncError("scraper_image_backfill_page_invalid")
     if source not in {None, "araujo", "pacheco"}:
         raise BatchSyncError("scraper_image_backfill_source_invalid")
+    if phase not in {"known_references", "source_lookup"}:
+        raise BatchSyncError("scraper_image_backfill_phase_invalid")
     payload: dict[str, Any] = {"after_catalog_id": after_catalog_id, "limit": limit}
     if source:
         payload["source"] = source
+    payload["phase"] = phase
     body = json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")

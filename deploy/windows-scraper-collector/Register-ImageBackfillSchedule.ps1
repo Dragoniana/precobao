@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('araujo', 'pacheco')]
     [string]$Source,
+    [ValidateSet('known_references', 'source_lookup')]
+    [string]$Phase = 'known_references',
     [switch]$BackupVerified
 )
 
@@ -34,8 +36,15 @@ if (Test-Path -LiteralPath $rateStatePath) {
         throw 'O limite compartilhado salvo não é 50 requisições em 900 segundos.'
     }
 }
-$progress = Join-Path $StateRoot "state\image-backfill\progress-$Source.json"
-if (-not (Test-Path -LiteralPath $progress)) { throw 'Execute e valide primeiro um piloto manual desta origem.' }
+$progress = Join-Path $StateRoot "state\image-backfill\progress-$Source-$Phase.json"
+$knownProgress = Join-Path $StateRoot "state\image-backfill\progress-$Source-known_references.json"
+if ($Phase -eq 'source_lookup' -and -not (Test-Path -LiteralPath $knownProgress)) {
+    throw 'A fase de referências conhecidas precisa terminar antes de buscar imagens nas páginas das fontes.'
+}
+if ($Phase -eq 'source_lookup' -and (Read-CollectorJson -Path $knownProgress).status -ne 'COMPLETE') {
+    throw 'A fase de referências conhecidas ainda não terminou.'
+}
+if (-not (Test-Path -LiteralPath $progress)) { throw 'Execute e valide primeiro um piloto manual desta origem/fase.' }
 $pilot = Read-CollectorJson -Path $progress
 if ([int]$pilot.last_run.stored -lt 1) { throw 'O piloto não confirmou nenhuma imagem armazenada.' }
 $outbox = Join-Path ([IO.Path]::GetFullPath([string]$settings.state_dir)) "outbox\images\image-backfill\$Source"
@@ -50,7 +59,7 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 $offset = if ($Source -eq 'araujo') { 0 } else { 7 }
 $nextSlot = Get-NextCollectorSlot -Now (Get-Date) -OffsetMinutes $offset
 $trigger = New-CollectorRepeatingTrigger -OffsetMinutes $offset -StartAt $nextSlot
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -Mode Execute -Source $Source -Limit 10 -BackupVerified"
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -Mode Execute -Source $Source -Phase $Phase -Limit 10 -BackupVerified"
 $settingsTask = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 12)
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive
 if ($trigger.Repetition.Interval -ne 'PT15M' -or $trigger.Repetition.Duration -ne 'P1D') { throw 'Trigger de 15 minutos inválido.' }

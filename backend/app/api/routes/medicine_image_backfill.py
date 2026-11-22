@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,6 +47,7 @@ class BackfillPageRequest(BaseModel):
     after_catalog_id: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=100)
     source: str | None = Field(default=None, pattern=r"^(araujo|pacheco)$")
+    phase: Literal["known_references", "source_lookup"] = "known_references"
 
 
 def _source_for_pharmacy(name: str) -> str | None:
@@ -448,6 +450,34 @@ async def backfill_queue(request: Request, db: Session = Depends(get_db)):
                     item
                     for item in entry["sources"]
                     if item["source"] == payload.source
+                ]
+            if payload.phase == "known_references":
+                entry["sources"] = [
+                    {
+                        **source_entry,
+                        "offers": [
+                            offer
+                            for offer in source_entry["offers"]
+                            if offer["image_urls"]
+                        ],
+                    }
+                    for source_entry in entry["sources"]
+                ]
+                entry["sources"] = [
+                    source_entry
+                    for source_entry in entry["sources"]
+                    if source_entry["offers"]
+                ]
+            else:
+                entry["sources"] = [
+                    {
+                        **source_entry,
+                        "offers": [
+                            {**offer, "image_urls": []}
+                            for offer in source_entry["offers"]
+                        ],
+                    }
+                    for source_entry in entry["sources"]
                 ]
             if entry["eligible_for_backfill"] and entry["sources"]:
                 entries.append(entry)

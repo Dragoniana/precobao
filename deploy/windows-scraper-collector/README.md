@@ -112,6 +112,14 @@ removidos somente depois da confirmação do servidor.
 .\deploy\windows-scraper-collector\Invoke-ImageBackfill.ps1 -Mode Execute -Source pacheco -Limit 3 -BackupVerified
 ```
 
+O modo padrão é `known_references`: percorre e tenta primeiro apenas URLs de
+imagem já cadastradas para produtos ainda sem BYTEA válido, sem consultar novas
+páginas de produto. Depois que a fila dessa origem estiver marcada `COMPLETE`,
+`-Phase source_lookup` inicia uma segunda fila independente e procura imagem
+atual na página oficial, sem repetir as URLs já auditadas. Os checkpoints são
+separados por origem e fase. Use a segunda fase somente depois de concluir a
+primeira.
+
 Para escrita, a configuração requer API pronta, origem em `DIRECT` com acesso
 confirmado e HMAC DPAPI do mesmo usuário. O script confere saúde HTTPS e força
 `ARAUJO_TLS_VERIFY=true` e `PACHECO_TLS_VERIFY=true`; não habilita redirects nem
@@ -129,3 +137,13 @@ etapa posterior e não são executados automaticamente. O registro requer
 são Araújo em 00/15/30/45 e Pacheco em 07/22/37/52, com `IgnoreNew`. Remova
 somente essas tarefas com `Unregister-ImageBackfillSchedule.ps1`; os
 agendamentos normais permanecem separados.
+
+```powershell
+# Registre a fase de URLs já conhecidas depois de validar o piloto
+.\deploy\windows-scraper-collector\Register-ImageBackfillSchedule.ps1 -Enable -Source araujo -BackupVerified
+
+# Para trocar à busca de imagens atuais, primeiro remova a tarefa acima,
+# conclua known_references para a origem e então registre source_lookup
+.\deploy\windows-scraper-collector\Unregister-ImageBackfillSchedule.ps1
+.\deploy\windows-scraper-collector\Register-ImageBackfillSchedule.ps1 -Enable -Source araujo -Phase source_lookup -BackupVerified
+```
