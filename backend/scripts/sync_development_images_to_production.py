@@ -331,6 +331,21 @@ async def _check_candidates(
     return results
 
 
+def _status_counts_by_source(
+    candidates: list[Candidate], results: list[dict[str, Any]]
+) -> dict[str, dict[str, int]]:
+    if len(candidates) != len(results):
+        raise RuntimeError("migration_check_response_mismatch")
+    grouped: dict[str, Counter[str]] = {}
+    for candidate, result in zip(candidates, results, strict=True):
+        source_counts = grouped.setdefault(candidate.source, Counter())
+        source_counts[str(result.get("status", "UNKNOWN"))] += 1
+    return {
+        source: dict(sorted(source_counts.items()))
+        for source, source_counts in sorted(grouped.items())
+    }
+
+
 async def _run(args: argparse.Namespace) -> int:
     source_url = os.getenv("PRECOBAO_DEVELOPMENT_DATABASE_URL", "").strip()
     if not source_url:
@@ -380,6 +395,9 @@ async def _run(args: argparse.Namespace) -> int:
                         checked = await _check_candidates(client, candidates, secret)
                         states = Counter(str(item.get("status")) for item in checked)
                         report["production_check_counts"] = dict(states)
+                        report["production_check_counts_by_source"] = (
+                            _status_counts_by_source(candidates, checked)
+                        )
                         report["identity_safe_candidates"] = sum(
                             item.get("status") == "ELIGIBLE" for item in checked
                         )

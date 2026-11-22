@@ -54,9 +54,9 @@ try {
     Push-Location (Join-Path $settings.repository_root 'backend')
     try {
         if ($Execute) {
-            & $python 'scripts\sync_development_images_to_production.py' --execute
+            & $python -m 'scripts.sync_development_images_to_production' --execute
         } else {
-            & $python 'scripts\sync_development_images_to_production.py' --dry-run
+            & $python -m 'scripts.sync_development_images_to_production' --dry-run
         }
         if ($LASTEXITCODE -ne 0) {
             throw "Migração interrompida com código $LASTEXITCODE; consulte apenas o relatório local sanitizado."

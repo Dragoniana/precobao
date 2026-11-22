@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from io import BytesIO
+from types import SimpleNamespace
 
 from PIL import Image
 from sqlalchemy import create_engine
@@ -11,7 +12,10 @@ import scripts.sync_development_images_to_production as image_sync
 from app.models import Base, CatalogoBase, Farmacia, OfertaFarmacia
 from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.services.medicine_images import normalize_medicine_image
-from scripts.sync_development_images_to_production import _load_descriptors
+from scripts.sync_development_images_to_production import (
+    _load_descriptors,
+    _status_counts_by_source,
+)
 
 
 def _normalized_image() -> tuple[bytes, str]:
@@ -21,6 +25,24 @@ def _normalized_image() -> tuple[bytes, str]:
         stream.getvalue(), declared_content_type="image/png"
     )
     return image.content, image.content_type
+
+
+def test_migration_status_report_is_grouped_by_source():
+    candidates = [
+        SimpleNamespace(source="araujo"),
+        SimpleNamespace(source="pacheco"),
+        SimpleNamespace(source="pacheco"),
+    ]
+    results = [
+        {"status": "ELIGIBLE"},
+        {"status": "IMAGE_ALREADY_EXISTS"},
+        {"status": "SOURCE_NOT_ENABLED"},
+    ]
+
+    assert _status_counts_by_source(candidates, results) == {
+        "araujo": {"ELIGIBLE": 1},
+        "pacheco": {"IMAGE_ALREADY_EXISTS": 1, "SOURCE_NOT_ENABLED": 1},
+    }
 
 
 def test_candidate_uses_development_ean_and_real_image_priority(monkeypatch):
