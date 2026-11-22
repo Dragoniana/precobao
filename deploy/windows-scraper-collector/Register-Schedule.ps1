@@ -74,7 +74,7 @@ foreach ($definition in $definitions) {
     $existing = Get-ScheduledTask -TaskName $definition.Name -ErrorAction SilentlyContinue
     if ($existing) {
         $existingAction = @($existing.Actions)[0]
-        $expectedTime = $definition.Trigger.StartBoundary.ToString('HH:mm')
+        $expectedTime = ([DateTime]$definition.Trigger.StartBoundary).ToString('HH:mm')
         $existingTimes = @($existing.Triggers | ForEach-Object {
             ([DateTime]$_.StartBoundary).ToString('HH:mm')
         })
