@@ -287,7 +287,9 @@ def note_source_response(source: str, url: str, response) -> None:
     host = (urlsplit(url).hostname or "").casefold()
     if status_code == 403:
         delay = max(3600.0, delay or 0.0)
-    elif delay is None or delay <= 0:
+    elif delay is None:
+        delay = 60.0
+    elif delay <= 0:
         return
     if not host and status_code == 429:
         return

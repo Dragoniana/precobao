@@ -66,6 +66,15 @@ def test_429_retry_after_blocks_only_the_source_host(monkeypatch, tmp_path):
     assert limiter._try_reserve_request("pacheco", "other.example") is None
 
 
+def test_429_without_retry_after_uses_a_conservative_cooldown(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    response = SimpleNamespace(status_code=429, headers={})
+    limiter.note_source_response("araujo", "https://shop.example/search", response)
+
+    wait = limiter._try_reserve_request("pacheco", "shop.example")
+    assert wait is not None and 0 < wait <= 60
+
+
 def test_403_applies_persistent_source_cooldown(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     response = SimpleNamespace(status_code=403, headers={})
@@ -90,15 +99,19 @@ async def test_each_source_client_attempt_is_counted_but_api_client_is_not(
         async def post(self, *_args, **_kwargs):
             return SimpleNamespace(status_code=200, headers={})
 
+        async def head(self, url, **_kwargs):
+            return SimpleNamespace(status_code=200, headers={})
+
     source_client = RateLimitedSourceClient(FakeClient(), "araujo")
     await source_client.get("https://shop.example/catalog")
     await source_client.get("https://shop.example/catalog")
+    await source_client.head("https://shop.example/catalog")
     # API ingestion uses its separate plain HTTP client, outside the pharmacy budget.
     await FakeClient().post("https://precobao.app/backend/ingest")
 
     state = limiter.rate_budget_status()
-    assert state["total"] == 2
-    assert state["by_source"] == {"araujo": 2, "pacheco": 0}
+    assert state["total"] == 3
+    assert state["by_source"] == {"araujo": 3, "pacheco": 0}
 
 
 @pytest.mark.asyncio

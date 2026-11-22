@@ -25,6 +25,12 @@ class RateLimitedSourceClient:
         self._client = client
         self._source = source
 
+    async def _request(self, method: str, url: str, *args, **kwargs):
+        await acquire_external_request(self._source, str(url))
+        response = await getattr(self._client, method.casefold())(url, *args, **kwargs)
+        note_source_response(self._source, str(url), response)
+        return response
+
     async def request(self, method: str, url: str, *args, **kwargs):
         await acquire_external_request(self._source, str(url))
         response = await self._client.request(method, url, *args, **kwargs)
@@ -32,10 +38,25 @@ class RateLimitedSourceClient:
         return response
 
     async def get(self, url: str, *args, **kwargs):
-        await acquire_external_request(self._source, str(url))
-        response = await self._client.get(url, *args, **kwargs)
-        note_source_response(self._source, str(url), response)
-        return response
+        return await self._request("get", url, *args, **kwargs)
+
+    async def post(self, url: str, *args, **kwargs):
+        return await self._request("post", url, *args, **kwargs)
+
+    async def put(self, url: str, *args, **kwargs):
+        return await self._request("put", url, *args, **kwargs)
+
+    async def patch(self, url: str, *args, **kwargs):
+        return await self._request("patch", url, *args, **kwargs)
+
+    async def delete(self, url: str, *args, **kwargs):
+        return await self._request("delete", url, *args, **kwargs)
+
+    async def head(self, url: str, *args, **kwargs):
+        return await self._request("head", url, *args, **kwargs)
+
+    async def options(self, url: str, *args, **kwargs):
+        return await self._request("options", url, *args, **kwargs)
 
     @asynccontextmanager
     async def stream(self, method: str, url: str, *args, **kwargs):
