@@ -185,12 +185,11 @@ def test_backfill_queue_is_hmac_paged_and_groups_sources(backfill_client):
     assert response.status_code == 200
     entries = response.json()["items"]
     missing = next(item for item in entries if item["catalog_id"] == missing_id)
-    stored = next(item for item in entries if item["catalog_id"] == stored_id)
     assert missing["status"] == "EXTERNAL_URL_CANDIDATE"
     assert missing["eligible_for_backfill"] is True
     assert {item["source"] for item in missing["sources"]} == {"araujo", "pacheco"}
-    assert stored["status"] == "BYTEA_REAL_VALID"
-    assert stored["eligible_for_backfill"] is False
+    assert [item["catalog_id"] for item in entries] == [missing_id]
+    assert stored_id not in [item["catalog_id"] for item in entries]
 
 
 def test_backfill_endpoints_reject_invalid_hmac(backfill_client):
@@ -209,3 +208,7 @@ def test_inventory_reports_bytea_and_url_candidate_categories(backfill_client):
     assert result["catalog_total"] == 2
     assert result["status_counts"]["EXTERNAL_URL_CANDIDATE"] == 1
     assert result["status_counts"]["BYTEA_REAL_VALID"] == 1
+    assert result["source_counts"] == {
+        "araujo": {"EXTERNAL_URL_CANDIDATE": 1},
+        "pacheco": {"EXTERNAL_URL_CANDIDATE": 1},
+    }

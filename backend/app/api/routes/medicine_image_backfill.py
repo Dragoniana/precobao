@@ -345,7 +345,7 @@ def _entry(
         "status": status,
         "identity_conflicts": conflicts + int(identity_conflict),
         "eligible_for_backfill": status
-        in {"EXTERNAL_URL_CANDIDATE", "NO_KNOWN_IMAGE_URL"},
+        in {"EXTERNAL_URL_CANDIDATE", "GENERIC_ONLY", "NO_KNOWN_IMAGE_URL"},
         "sources": [
             {"source": source, "offers": by_source[source]}
             for source in _SOURCES
@@ -394,16 +394,24 @@ async def backfill_inventory(request: Request, db: Session = Depends(get_db)):
             entry = _entry(catalog, registry_urls)
             counts[str(entry["status"])] += 1
             total += 1
-            for source_entry in entry["sources"]:
-                source = str(source_entry["source"])
-                has_real = any(
-                    any(not url["generic"] for url in offer["image_urls"])
-                    for offer in source_entry["offers"]
-                )
-                if has_real:
-                    by_source[source]["EXTERNAL_URL_CANDIDATE"] += 1
-                elif source_entry["offers"]:
-                    by_source[source]["NO_KNOWN_REAL_URL"] += 1
+            if entry["eligible_for_backfill"]:
+                for source_entry in entry["sources"]:
+                    source = str(source_entry["source"])
+                    offers = source_entry["offers"]
+                    has_real = any(
+                        any(not url["generic"] for url in offer["image_urls"])
+                        for offer in offers
+                    )
+                    has_generic = any(
+                        any(url["generic"] for url in offer["image_urls"])
+                        for offer in offers
+                    )
+                    if has_real:
+                        by_source[source]["EXTERNAL_URL_CANDIDATE"] += 1
+                    elif has_generic:
+                        by_source[source]["GENERIC_ONLY"] += 1
+                    elif offers:
+                        by_source[source]["NO_KNOWN_IMAGE_URL"] += 1
         after = catalogs[-1].id
         if len(catalogs) < page_size:
             break
@@ -422,31 +430,39 @@ async def backfill_queue(request: Request, db: Session = Depends(get_db)):
         payload = BackfillPageRequest.model_validate_json(body)
     except (ValidationError, ValueError) as error:
         raise HTTPException(status_code=422, detail="invalid_backfill_page") from error
-    catalogs = _load_catalogs(
-        db, after_id=payload.after_catalog_id, limit=payload.limit + 1
-    )
-    has_more = len(catalogs) > payload.limit
-    catalogs = catalogs[: payload.limit]
-    registry_urls = _registry_images_by_offer(
-        [offer for catalog in catalogs for offer in catalog.ofertas]
-    )
-    entries = [_entry(catalog, registry_urls) for catalog in catalogs]
-    if payload.source:
-        entries = [
-            {
-                **entry,
-                "sources": [
+    scan_after = payload.after_catalog_id
+    entries: list[dict[str, object]] = []
+    has_more = False
+    while len(entries) <= payload.limit:
+        catalogs = _load_catalogs(db, after_id=scan_after, limit=500)
+        if not catalogs:
+            break
+        registry_urls = _registry_images_by_offer(
+            [offer for catalog in catalogs for offer in catalog.ofertas]
+        )
+        for catalog in catalogs:
+            scan_after = catalog.id
+            entry = _entry(catalog, registry_urls)
+            if payload.source:
+                entry["sources"] = [
                     item
                     for item in entry["sources"]
                     if item["source"] == payload.source
-                ],
-            }
-            for entry in entries
-        ]
+                ]
+            if entry["eligible_for_backfill"] and entry["sources"]:
+                entries.append(entry)
+                if len(entries) > payload.limit:
+                    has_more = True
+                    break
+        if has_more or len(catalogs) < 500:
+            break
+    entries = entries[: payload.limit]
     counts = Counter(str(entry["status"]) for entry in entries)
     return {
         "items": entries,
-        "after_catalog_id": catalogs[-1].id if catalogs else payload.after_catalog_id,
+        "after_catalog_id": (
+            entries[-1]["catalog_id"] if entries else payload.after_catalog_id
+        ),
         "has_more": has_more,
         "page_size": len(catalogs),
         "status_counts": dict(counts),
