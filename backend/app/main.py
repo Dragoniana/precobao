@@ -16,6 +16,7 @@ from starlette.responses import Response
 from app.api.routes import (
     catalogo,
     historico,
+    medicine_image_backfill,
     medicine_image_ingest,
     scraper_ingest,
     usuarios,
@@ -42,6 +43,18 @@ _RATE_LIMIT_POLICIES = {
     ("POST", "/api/v1/internal/medicine-images/migration-check"): (
         "scraper-image-migration-check",
         "SCRAPER_IMAGE_MIGRATION_CHECK_RATE_LIMIT_PER_HOUR",
+        600,
+        3600,
+    ),
+    ("POST", "/api/v1/internal/medicine-images/backfill-inventory"): (
+        "scraper-image-backfill-inventory",
+        "SCRAPER_IMAGE_BACKFILL_INVENTORY_RATE_LIMIT_PER_HOUR",
+        6,
+        3600,
+    ),
+    ("POST", "/api/v1/internal/medicine-images/backfill-queue"): (
+        "scraper-image-backfill-queue",
+        "SCRAPER_IMAGE_BACKFILL_QUEUE_RATE_LIMIT_PER_HOUR",
         600,
         3600,
     ),
@@ -240,6 +253,7 @@ def create_app() -> FastAPI:
     application.include_router(historico.router, prefix="/api/v1")
     application.include_router(scraper_ingest.router, prefix="/api/v1")
     application.include_router(medicine_image_ingest.router, prefix="/api/v1")
+    application.include_router(medicine_image_backfill.router, prefix="/api/v1")
 
     @application.get("/health/live", include_in_schema=False)
     def health_live() -> dict[str, str]:

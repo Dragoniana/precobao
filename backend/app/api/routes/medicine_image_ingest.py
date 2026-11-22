@@ -151,19 +151,8 @@ def _catalog_image_state(
         link, blob = generic
         return {"link": link, "blob": blob, "kind": "stored"}
 
-    if str(catalog.imagem_url or "").strip():
-        return {"kind": "legacy_catalog_url"}
-    legacy_offer_image = db.execute(
-        select(OfertaFarmacia.id)
-        .where(
-            OfertaFarmacia.catalogo_id == catalog.id,
-            OfertaFarmacia.imagem_url.is_not(None),
-            OfertaFarmacia.imagem_url != "",
-        )
-        .limit(1)
-    ).scalar_one_or_none()
-    if legacy_offer_image is not None:
-        return {"kind": "legacy_offer_url"}
+    # Legacy URLs are candidates to validate and materialize as BYTEA; they do
+    # not count as an existing stored image for migration or only-if-missing.
     return None
 
 

@@ -391,7 +391,9 @@ def test_upload_never_replaces_existing_catalog_image(image_client):
         assert len(links) == 1
 
 
-def test_hmac_migration_check_is_read_only_when_image_already_exists(image_client):
+def test_migration_check_treats_legacy_external_url_as_candidate_and_is_read_only(
+    image_client,
+):
     client, sessions, catalog_id = image_client
     content = _image_bytes()
     candidate = {
@@ -415,12 +417,23 @@ def test_hmac_migration_check_is_read_only_when_image_already_exists(image_clien
         IMAGE_MIGRATION_CHECK_ENDPOINT, content=body, headers=_headers(body)
     )
     assert response.status_code == 200
-    assert response.json()["results"][0]["status"] == "IMAGE_ALREADY_EXISTS"
+    assert response.json()["results"][0]["status"] == "ELIGIBLE"
     assert response.json()["results"][0]["catalog_id"] == catalog_id
     with sessions() as db:
         assert db.query(MedicineImageBlob).count() == 0
         assert db.query(MedicineImageLink).count() == 0
         assert db.query(OfertaFarmacia).count() == 1
+
+    upload_body = _request_body(content, migration_mode=True, only_if_missing=True)
+    uploaded = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=upload_body, headers=_headers(upload_body)
+    )
+    assert uploaded.status_code == 200
+    stored_check = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT, content=body, headers=_headers(body)
+    )
+    assert stored_check.status_code == 200
+    assert stored_check.json()["results"][0]["status"] == "IMAGE_ALREADY_EXISTS"
 
 
 def test_migration_upload_maps_by_ean_without_changing_offer(image_client):
