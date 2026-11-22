@@ -103,7 +103,67 @@ it('falls through failed specific images to a pharmacy fallback and then the pla
   expect(screen.getByLabelText(genericLabel).props.source.uri).toContain('/catalogo/ofertas/917/imagem');
   await fireEvent(screen.getByLabelText(genericLabel), 'error');
   expect(screen.queryByTestId('medicine-image')).toBeNull();
+  expect(screen.getByText('Imagem ilustrativa')).toBeTruthy();
+  expect(screen.getByText('Drogarias Pacheco')).toBeTruthy();
+});
+
+it.each([
+  ['Farmácia Indiana', 'Farmácia Indiana'],
+  ['Drogarias Pacheco', 'Drogarias Pacheco'],
+  ['Drogaria Araújo', 'Drogaria Araújo'],
+])('shows the Preço Bão illustration for %s when no photo is available', async (sourceName, expectedLabel) => {
+  const medicine = {
+    id: 20,
+    nome: 'Medicamento sem foto',
+    codigo_barras: '',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: [],
+    ofertas: [{
+      id: 200,
+      farmacia_id: 1,
+      catalogo_id: 20,
+      preco: 10,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://farmacia.example.test/medicamento',
+      farmacia_nome: sourceName,
+    }],
+  } as unknown as Medicamento;
+
+  const screen = await render(<MedicineImage medicine={medicine} preferredOfferId={200} />);
+  expect(screen.getByText('Imagem ilustrativa')).toBeTruthy();
+  expect(screen.getByText(expectedLabel)).toBeTruthy();
+  expect(screen.getByLabelText(new RegExp(`${expectedLabel}.*não representa a embalagem`))).toBeTruthy();
+});
+
+it('keeps the neutral placeholder when the selected offer has no identifiable supported pharmacy', async () => {
+  const medicine = {
+    id: 21,
+    nome: 'Medicamento sem origem identificada',
+    codigo_barras: '',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: [],
+    ofertas: [{
+      id: 210,
+      farmacia_id: 8,
+      catalogo_id: 21,
+      preco: 10,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://farmacia.example.test/medicamento',
+      farmacia_nome: 'Farmácia desconhecida',
+    }],
+  } as unknown as Medicamento;
+
+  const screen = await render(<MedicineImage medicine={medicine} preferredOfferId={210} />);
   expect(screen.getByText('Imagem indisponível')).toBeTruthy();
+  expect(screen.queryByText('Imagem ilustrativa')).toBeNull();
 });
 
 it('keeps a broken real image on the selected pharmacy fallback only', async () => {
