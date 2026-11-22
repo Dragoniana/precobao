@@ -45,6 +45,7 @@ class AraujoScraper(BasePharmacyScraper):
         max_pages: int | None = None,
         allow_page_limit: bool = False,
         stop_requested_callback: Callable[[], bool] | None = None,
+        stop_reason_callback: Callable[[], str | None] | None = None,
     ):
         super().__init__(
             farmacia_cnpj="17256512000116",
@@ -72,6 +73,7 @@ class AraujoScraper(BasePharmacyScraper):
         )
         self.allow_page_limit = allow_page_limit
         self.stop_requested_callback = stop_requested_callback
+        self.stop_reason_callback = stop_reason_callback
         self.http_timeout = source_http_config("araujo").timeout
         if self.request_delay < 0 or self.max_pages < 1:
             raise ValueError("Invalid Araújo request delay or page limit")
@@ -251,10 +253,23 @@ class AraujoScraper(BasePharmacyScraper):
                         )
                         self._write_direct_checkpoint(state)
                         return
-                    if self.stop_requested_callback and self.stop_requested_callback():
+                    stop_reason = (
+                        self.stop_reason_callback()
+                        if self.stop_reason_callback
+                        else None
+                    )
+                    if stop_reason is None and self.stop_requested_callback:
+                        if self.stop_requested_callback():
+                            stop_reason = "safe_stop_requested"
+                    if stop_reason:
+                        is_safe_stop = stop_reason == "safe_stop_requested"
                         state.update(
-                            status="STOPPED",
-                            stop_reason="safe_stop_requested",
+                            status="STOPPED" if is_safe_stop else stop_reason,
+                            stop_reason=(
+                                stop_reason
+                                if is_safe_stop
+                                else stop_reason.casefold()
+                            ),
                             finished_at=datetime.now(UTC).isoformat(),
                         )
                         self._write_direct_checkpoint(state)

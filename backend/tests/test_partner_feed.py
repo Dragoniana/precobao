@@ -173,6 +173,60 @@ async def test_araujo_direct_403_stops_without_advancing_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_araujo_checkpoint_preserves_budget_stop_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("ARAUJO_STATE_DIR", str(tmp_path))
+
+    class Response:
+        status_code = 200
+        headers = {}
+        text = '<div class="productTile" data-pid="1"></div>'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("app.scrapers.source_http_client.httpx.AsyncClient", Client)
+    scraper = AraujoScraper(
+        source_mode="DIRECT",
+        request_delay=0,
+        stop_requested_callback=lambda: True,
+        stop_reason_callback=lambda: "BUDGET_EXHAUSTED",
+    )
+    monkeypatch.setattr(
+        scraper,
+        "adaptar_parser_araujo_html",
+        lambda _html: [
+            {
+                "id": "1",
+                "sku_interno": "ARJ1",
+                "name_search": "Produto",
+                "preco": 10,
+                "link": "https://www.araujo.com.br/produto/1.html",
+            }
+        ],
+    )
+
+    await scraper.extrair_catalogo()
+
+    checkpoint = json.loads(scraper.source_checkpoint_path.read_text())
+    assert checkpoint["status"] == "BUDGET_EXHAUSTED"
+    assert checkpoint["stop_reason"] == "budget_exhausted"
+    assert checkpoint["last_completed_page"] == 1
+    assert checkpoint["next_page"] == 2
+
+
+@pytest.mark.asyncio
 async def test_araujo_resumes_inside_page_after_50_product_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
     monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")

@@ -797,12 +797,17 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
             )
             return len(normalized)
 
+        def stop_source_collection_reason() -> str | None:
+            if scheduled_stop_reason:
+                return scheduled_stop_reason
+            if product_limit_reached:
+                return "CONFIGURED_PRODUCT_LIMIT"
+            if _stop_requested():
+                return "safe_stop_requested"
+            return None
+
         def stop_source_collection() -> bool:
-            return (
-                bool(scheduled_stop_reason)
-                or product_limit_reached
-                or _stop_requested()
-            )
+            return stop_source_collection_reason() is not None
 
         try:
             current_operation = "replay_deferred_image_downloads"
@@ -841,6 +846,7 @@ async def _collect_and_sync(source: str) -> dict[str, Any]:
                         in {"1", "true", "yes", "on"}
                     ),
                     stop_requested_callback=stop_source_collection,
+                    stop_reason_callback=stop_source_collection_reason,
                 )
                 scraper.products_callback = send_page
                 current_operation = "collect_catalog"
