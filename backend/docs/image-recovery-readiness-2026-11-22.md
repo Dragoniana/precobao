@@ -4,11 +4,12 @@
 
 - Production PostgreSQL reports version 15.19. The production API container is
   healthy; the VM's existing containers were not restarted or changed.
-- The production catalog contains 12,791 rows. The image registry has 159 blob
-  records and 899 links, with no links pointing to a missing blob. These are
-  structural counts only: this run did not decode and hash every production
-  blob or make an external HTTP request for every catalog URL, so they are not
-  a claim of valid/displayable coverage.
+- The production catalog contains 12,791 rows. A follow-up consistency audit
+  found 159 blobs and 914 links. All 159 blobs matched their stored size,
+  SHA-256 and decodable image format; 913 links matched their source, SKU and
+  related catalog/offer identity, with one inconsistent link. The link total
+  changed during the audit while production schedulers remained active. This
+  does not establish external URL availability or full frontend coverage.
 - The development database is PostgreSQL 15.17 at Alembic revision
   `9a6d2f81c4b7`. It has 118 blobs and 611 links. Its `medicine_image_links`
   table predates `is_generic` (`c4a8f32d1e9b`). The source-image migration now
