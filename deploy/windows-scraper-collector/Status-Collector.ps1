@@ -39,6 +39,8 @@ if (Test-Path -LiteralPath $rateStatePath) {
             $pachecoRequests = @($activeRequests | Where-Object { $_.source -eq 'pacheco' }).Count
             $httpSourceLimit = if ($rateState.per_source_limit) { [int]$rateState.per_source_limit } else { [math]::Ceiling([int]$rateState.limit / 2) }
             Write-Host "Chamadas HTTP externas (janela móvel $([int]($rateState.window_seconds / 60)) min): total=$($activeRequests.Count)/$($rateState.limit); Araújo=$araujoRequests/$httpSourceLimit; Pacheco=$pachecoRequests/$httpSourceLimit"
+            $backfillLimit = [math]::Min([int]$rateState.image_backfill_per_source_limit, [math]::Max(0, $httpSourceLimit - 20))
+            Write-Host "Recuperação de imagens: máximo compartilhado=$backfillLimit/origem; reserva para coletores normais=20/origem"
         }
     } finally {
         if ($lockAcquired) { $rateLock.Unlock(0, 1) }

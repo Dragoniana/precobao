@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _REQUEST_PURPOSE = contextvars.ContextVar("source_request_purpose", default="normal")
+_IMAGE_BACKFILL_NORMAL_RESERVE = 20
 
 
 class ExternalRequestDeferred(RuntimeError):
@@ -82,6 +83,13 @@ def _image_backfill_source_limit() -> int:
             "0..MAX_REQUESTS"
         )
     return value
+
+
+def _effective_image_backfill_source_limit() -> int:
+    return min(
+        _image_backfill_source_limit(),
+        max(0, _per_source_limit() - _IMAGE_BACKFILL_NORMAL_RESERVE),
+    )
 
 
 @contextmanager
@@ -220,6 +228,7 @@ def _try_reserve_request(
     window = _window_seconds()
     per_source_limit = _per_source_limit()
     backfill_source_limit = _image_backfill_source_limit()
+    effective_backfill_source_limit = _effective_image_backfill_source_limit()
     if purpose not in {"normal", "image_backfill"}:
         raise ValueError("Unsupported external request purpose")
     path = _state_path()
@@ -318,6 +327,21 @@ def _try_reserve_request(
             )
 
         if purpose == "image_backfill":
+            if len(source_events) >= effective_backfill_source_limit:
+                if effective_backfill_source_limit == 0:
+                    return float(window)
+                try:
+                    oldest_source = min(
+                        _parse_time(event["at"]) for event in source_events
+                    )
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError(
+                        "SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED"
+                    ) from error
+                state["events"] = retained
+                state["blocked_until"] = blocked_until
+                _write_state(path, state)
+                return max(0.05, window - (now - oldest_source).total_seconds())
             backfill_events = [
                 event
                 for event in source_events
@@ -478,6 +502,9 @@ def rate_budget_status(*, now: datetime | None = None) -> dict:
         "per_source_limit": state.get("per_source_limit", _per_source_limit()),
         "image_backfill_per_source_limit": state.get(
             "image_backfill_per_source_limit", _image_backfill_source_limit()
+        ),
+        "image_backfill_effective_per_source_limit": (
+            _effective_image_backfill_source_limit()
         ),
         "window_seconds": state.get("window_seconds", window),
         "total": len(active),

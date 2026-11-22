@@ -123,10 +123,11 @@ primeira.
 Para escrita, a configuração requer API pronta, origem em `DIRECT` com acesso
 confirmado e HMAC DPAPI do mesmo usuário. O script confere saúde HTTPS e força
 `ARAUJO_TLS_VERIFY=true` e `PACHECO_TLS_VERIFY=true`; não habilita redirects nem
-proxy. O teto manual é 10 medicamentos por execução e até 10 requisições de
-backfill por origem na janela móvel. Essas chamadas também contam no teto global
-de 50/15 min e no teto combinado da origem de 25/15 min, preservando orçamento
-para os scrapers normais. Sem quota, checkpoint e tentativas ficam persistidos
+proxy. O teto manual é 10 medicamentos por execução. O limitador permite até
+5 chamadas de recuperação por origem na janela móvel, reservando 20 das 25
+chamadas por origem para os coletores normais. Se os scrapers normais já tiverem
+usado cinco chamadas, a recuperação aguarda a próxima janela. As chamadas também
+contam no teto global de 50/15 min. Sem quota, checkpoint e tentativas ficam persistidos
 para a janela seguinte. 403/429 ativam cooldown, sem repetição imediata nem
 tentativa de contornar WAF/CDN. Imagens genéricas ficam excluídas por padrão.
 

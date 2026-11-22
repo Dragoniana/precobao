@@ -74,12 +74,12 @@ def test_http_budget_reserves_25_calls_per_source_with_shared_ceiling(
     }
 
 
-def test_image_backfill_has_a_small_cap_and_preserves_normal_source_quota(
+def test_image_backfill_reserves_twenty_calls_per_source_for_normal_collectors(
     monkeypatch, tmp_path
 ):
     _configure(monkeypatch, tmp_path)
     now = datetime(2026, 11, 22, 12, tzinfo=UTC)
-    for _ in range(10):
+    for _ in range(5):
         assert (
             limiter._try_reserve_request(
                 "araujo", "image.example", now=now, purpose="image_backfill"
@@ -89,7 +89,7 @@ def test_image_backfill_has_a_small_cap_and_preserves_normal_source_quota(
     assert limiter._try_reserve_request(
         "araujo", "image.example", now=now, purpose="image_backfill"
     ) == pytest.approx(900)
-    for _ in range(15):
+    for _ in range(20):
         assert limiter._try_reserve_request("araujo", "shop.example", now=now) is None
     assert limiter._try_reserve_request(
         "araujo", "shop.example", now=now
@@ -98,9 +98,23 @@ def test_image_backfill_has_a_small_cap_and_preserves_normal_source_quota(
     assert status["total"] == 25
     assert status["by_source"]["araujo"] == 25
     assert status["by_source_purpose"]["araujo"] == {
-        "normal": 15,
-        "image_backfill": 10,
+        "normal": 20,
+        "image_backfill": 5,
     }
+    assert status["image_backfill_effective_per_source_limit"] == 5
+
+
+def test_normal_usage_consumes_image_backfill_headroom_first(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    now = datetime(2026, 11, 22, 12, tzinfo=UTC)
+    for _ in range(5):
+        assert limiter._try_reserve_request("pacheco", "shop.example", now=now) is None
+    assert limiter._try_reserve_request(
+        "pacheco", "image.example", now=now, purpose="image_backfill"
+    ) == pytest.approx(900)
+    for _ in range(20):
+        assert limiter._try_reserve_request("pacheco", "shop.example", now=now) is None
+    assert limiter.rate_budget_status(now=now)["by_source"]["pacheco"] == 25
 
 
 def test_state_replace_retries_transient_windows_sharing_violation(
