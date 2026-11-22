@@ -14,6 +14,11 @@ from typing import Any
 
 import httpx
 
+# The imported identity parsers live beside the normal offer-refresh worker.
+# Pin its unused SQLAlchemy engine to an in-memory SQLite URL so this
+# image-only process can never attach to a development or production database.
+os.environ["DATABASE_URL"] = "sqlite://"
+
 from app.scrapers.offer_refresh import (
     IdentityMismatch,
     SourceUnavailable,
