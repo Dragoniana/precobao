@@ -113,8 +113,8 @@ if ($Source -eq 'araujo' -and $legacyTasks.Count -gt 0) {
 
 if ($Source -eq 'pacheco') {
     $araujoTask = Get-ScheduledTask -TaskName 'PrecoBaoCollector-araujo-15m' -ErrorAction SilentlyContinue
-    if (-not $araujoTask -or $araujoTask.State -ne 'Ready') {
-        throw 'A etapa Pacheco só pode começar depois de a tarefa Araújo 15m estar pronta.'
+    if (-not $araujoTask -or $araujoTask.State -notin @('Ready', 'Running')) {
+        throw 'A tarefa Araújo 15m precisa estar registrada e pronta ou em execução.'
     }
     $araujoInfo = Get-ScheduledTaskInfo -TaskName 'PrecoBaoCollector-araujo-15m' -ErrorAction Stop
     $araujoStatePath = Join-Path $stateDir 'araujo.json'
