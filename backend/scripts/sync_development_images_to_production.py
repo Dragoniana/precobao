@@ -22,8 +22,9 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid5
 
 import httpx
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, inspect, select
+from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.utils import validar_ean13
 from app.models import CatalogoBase, Farmacia, OfertaFarmacia
@@ -109,6 +110,30 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
     image_catalog_id = func.coalesce(
         MedicineImageLink.catalog_id, OfertaFarmacia.catalogo_id
     )
+    link_columns = {
+        column["name"]
+        for column in inspect(db.get_bind()).get_columns(
+            MedicineImageLink.__tablename__
+        )
+    }
+    # Development databases can still be on 9a6d2f81c4b7, before generic
+    # offer fallbacks were added. Read only the common columns in that case;
+    # no migration or write to the source database is needed.
+    link_attributes = [
+        MedicineImageLink.id,
+        MedicineImageLink.blob_id,
+        MedicineImageLink.catalog_id,
+        MedicineImageLink.offer_id,
+        MedicineImageLink.pharmacy_id,
+        MedicineImageLink.sku,
+        MedicineImageLink.ean,
+        MedicineImageLink.source,
+        MedicineImageLink.source_image_url,
+        MedicineImageLink.is_primary,
+    ]
+    has_generic_column = "is_generic" in link_columns
+    if has_generic_column:
+        link_attributes.append(MedicineImageLink.is_generic)
     statement = (
         select(
             MedicineImageLink,
@@ -122,6 +147,7 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
         .join(CatalogoBase, CatalogoBase.id == image_catalog_id)
         .join(Farmacia, Farmacia.id == MedicineImageLink.pharmacy_id)
         .where(MedicineImageLink.source.in_(("araujo", "pacheco")))
+        .options(load_only(*link_attributes))
     )
 
     selected: dict[int, Candidate] = {}
@@ -138,6 +164,8 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
             break
         last_link_id = int(rows[-1][0].id)
         for link, blob, catalog, offer, pharmacy in rows:
+            if not has_generic_column:
+                set_committed_value(link, "is_generic", False)
             catalog_id = int(catalog.id)
             distinct_catalogs.add(catalog_id)
             source = str(link.source)

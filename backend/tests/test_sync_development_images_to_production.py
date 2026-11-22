@@ -7,6 +7,7 @@ from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+import scripts.sync_development_images_to_production as image_sync
 from app.models import Base, CatalogoBase, Farmacia, OfertaFarmacia
 from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.services.medicine_images import normalize_medicine_image
@@ -22,7 +23,22 @@ def _normalized_image() -> tuple[bytes, str]:
     return image.content, image.content_type
 
 
-def test_candidate_uses_development_ean_and_real_image_priority():
+def test_candidate_uses_development_ean_and_real_image_priority(monkeypatch):
+    # Emulate a development schema before c4a8f32d1e9b added is_generic.
+    real_inspect = image_sync.inspect
+
+    class LegacySchemaInspector:
+        def __init__(self, bind):
+            self.delegate = real_inspect(bind)
+
+        def get_columns(self, table_name, *args, **kwargs):
+            return [
+                column
+                for column in self.delegate.get_columns(table_name, *args, **kwargs)
+                if column["name"] != "is_generic"
+            ]
+
+    monkeypatch.setattr(image_sync, "inspect", LegacySchemaInspector)
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     content, content_type = _normalized_image()
@@ -117,6 +133,7 @@ def test_candidate_uses_development_ean_and_real_image_priority():
     assert candidates[0].is_generic_fallback is False
     assert candidates[0].size_bytes == len(content)
     assert counts["eligible_source_candidates"] == 1
+    assert counts["invalid_generic_classification"] == 1
 
 
 def test_invalid_blob_hash_is_not_a_candidate():
