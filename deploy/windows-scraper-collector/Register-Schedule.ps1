@@ -123,16 +123,19 @@ if ($Source -eq 'pacheco') {
     }
     $araujoState = Read-CollectorJson -Path $araujoStatePath
     $allowedTaskResults = @(0, 3)
+    $confirmedBatch = (
+        $araujoState.execution_trigger -eq 'scheduled' -and
+        [int]$araujoState.products_sent -ge 1 -and
+        [int]$araujoState.batches_sent -ge 1 -and
+        $araujoState.last_batch_id -and
+        -not (Test-Path -LiteralPath (Join-Path $stateDir 'outbox\araujo.pending.json'))
+    )
     if (
         $araujoInfo.LastRunTime -lt [DateTime]::new(2000, 1, 1) -or
-        $araujoInfo.LastTaskResult -notin $allowedTaskResults -or
-        $araujoState.execution_trigger -ne 'scheduled' -or
-        [int]$araujoState.products_sent -lt 1 -or
-        [int]$araujoState.batches_sent -lt 1 -or
-        -not $araujoState.last_batch_id -or
-        (Test-Path -LiteralPath (Join-Path $stateDir 'outbox\araujo.pending.json'))
+        (-not $confirmedBatch) -or
+        ($araujoTask.State -ne 'Running' -and $araujoInfo.LastTaskResult -notin $allowedTaskResults)
     ) {
-        throw 'Araújo ainda não concluiu uma execução agendada com lote confirmado na API.'
+        throw 'Araújo ainda não tem lote confirmado por execução agendada na API.'
     }
 }
 

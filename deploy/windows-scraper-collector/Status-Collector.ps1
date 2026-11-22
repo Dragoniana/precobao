@@ -9,7 +9,16 @@ if (Test-Path -LiteralPath $rateStatePath) {
     $rateState = Read-CollectorJson -Path $rateStatePath
     $windowStart = [DateTimeOffset]::UtcNow.AddSeconds(-[int]$rateState.window_seconds)
     $activeRequests = @($rateState.events | Where-Object {
-        [DateTimeOffset]::Parse([string]$_.at).ToUniversalTime() -gt $windowStart
+        $eventTime = if ($_.at -is [datetime]) {
+            [DateTimeOffset]$_.at
+        } else {
+            [DateTimeOffset]::Parse(
+                [string]$_.at,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+        $eventTime.ToUniversalTime() -gt $windowStart
     })
     $araujoRequests = @($activeRequests | Where-Object { $_.source -eq 'araujo' }).Count
     $pachecoRequests = @($activeRequests | Where-Object { $_.source -eq 'pacheco' }).Count
