@@ -136,18 +136,24 @@ if ($Source -eq 'pacheco') {
     }
 }
 
-Register-ScheduledTask -TaskName $newTaskName -Action $action -Trigger $trigger -Settings $taskSettings -Principal $principal -ErrorAction Stop | Out-Null
-$registered = Get-ScheduledTask -TaskName $newTaskName -ErrorAction Stop
-$registeredTrigger = @($registered.Triggers)[0]
-if (
-    $registered.State -ne 'Ready' -or
-    $registered.Principal.LogonType -ne 'Interactive' -or
-    $registeredTrigger.StartBoundary.ToString('HH:mm') -ne $nextSlot.ToString('HH:mm') -or
-    $registeredTrigger.Repetition.Interval -ne 'PT15M' -or
-    $registeredTrigger.Repetition.Duration -ne 'P1D'
-) {
+try {
+    Register-ScheduledTask -TaskName $newTaskName -Action $action -Trigger $trigger -Settings $taskSettings -Principal $principal -ErrorAction Stop | Out-Null
+    $registered = Get-ScheduledTask -TaskName $newTaskName -ErrorAction Stop
+    $registeredTrigger = @($registered.Triggers)[0]
+    $registeredStart = [DateTimeOffset]::Parse([string]$registeredTrigger.StartBoundary).LocalDateTime
+    if (
+        $registered.State -ne 'Ready' -or
+        $registered.Principal.LogonType -ne 'Interactive' -or
+        $registeredStart.ToString('HH:mm') -ne $nextSlot.ToString('HH:mm') -or
+        $registeredTrigger.Repetition.Interval -ne 'PT15M' -or
+        $registeredTrigger.Repetition.Duration -ne 'P1D' -or
+        $registered.Settings.MultipleInstances -ne 'IgnoreNew'
+    ) {
+        throw 'A tarefa registrada não corresponde ao trigger validado.'
+    }
+} catch {
     Disable-ScheduledTask -TaskName $newTaskName -ErrorAction SilentlyContinue | Out-Null
-    throw 'A tarefa registrada não corresponde ao trigger validado; ela foi suspensa.'
+    throw
 }
 
 Write-Host "Tarefa $newTaskName ativa a cada 15 minutos, a partir de $nextSlot; orçamento global 50/15 min; sem limite por quantidade de produtos."
