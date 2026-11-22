@@ -50,8 +50,16 @@ foreach ($source in @('araujo', 'pacheco')) {
     $path = Join-Path $settings.state_dir "$source.json"
     if (Test-Path $path) {
         $state = Read-CollectorJson -Path $path
+        $displayStatus = [string]$state.status
+        if ($displayStatus -eq 'RUNNING') {
+            $activePython = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+                $_.CommandLine -match 'app\.scrapers\.scraper_collector' -and
+                $_.CommandLine -match "\s$source(?:\s|$)"
+            })
+            if ($activePython.Count -eq 0) { $displayStatus = 'INTERRUPTED (estado salvo)' }
+        }
         $imageFailures = if ($null -ne $state.image_failures) { $state.image_failures } else { 0 }
-        Write-Host "$source`: $($state.status) recebidos=$($state.products_sent + $state.products_rejected) aceitos=$($state.products_sent) rejeitados=$($state.products_rejected) ofertas_novas=$($state.offers_created) ofertas_atualizadas=$($state.offers_updated) mudancas_preco=$($state.price_changes) imagens_enviadas=$($state.image_blobs_uploaded) falhas_imagem=$imageFailures sincronizado=$($state.finished_at) batch=$($state.last_batch_id) motivo=$($state.stop_reason)"
+        Write-Host "$source`: $displayStatus recebidos=$($state.products_sent + $state.products_rejected) aceitos=$($state.products_sent) rejeitados=$($state.products_rejected) ofertas_novas=$($state.offers_created) ofertas_atualizadas=$($state.offers_updated) mudancas_preco=$($state.price_changes) imagens_enviadas=$($state.image_blobs_uploaded) falhas_imagem=$imageFailures sincronizado=$($state.finished_at) batch=$($state.last_batch_id) motivo=$($state.stop_reason)"
     } else { Write-Host "$source`: sem execução" }
     $checkpointPath = Join-Path (Join-Path $settings.state_dir "sources\$source") $(if ($source -eq 'araujo') { 'source-checkpoint.json' } else { 'checkpoint.json' })
     if (Test-Path -LiteralPath $checkpointPath) {
@@ -75,6 +83,11 @@ foreach ($source in @('araujo', 'pacheco')) {
         @(Get-ChildItem -LiteralPath $imageOutbox -File -Filter '*.json').Count
     } else { 0 }
     Write-Host "$source`: imagens pendentes=$imageCount"
+    $imageFetchOutbox = Join-Path $settings.state_dir "outbox\image-fetch\$source"
+    $imageFetchCount = if (Test-Path $imageFetchOutbox) {
+        @(Get-ChildItem -LiteralPath $imageFetchOutbox -File -Filter '*.json').Count
+    } else { 0 }
+    Write-Host "$source`: downloads_de_imagem_pendentes=$imageFetchCount"
     $lastSlotPath = Join-Path $StateRoot "last-scheduled-slot-$source.txt"
     if (Test-Path -LiteralPath $lastSlotPath) {
         $lastSlot = (Read-CollectorUtf8 -Path $lastSlotPath).Trim()
@@ -94,5 +107,5 @@ $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
         [pscustomobject]@{ TaskName = $_.TaskName; State = $_.State; LastRunTime = $info.LastRunTime; NextRunTime = $info.NextRunTime; LastTaskResult = $info.LastTaskResult; Schedule = $triggerSummary; Arguments = (@($_.Actions | ForEach-Object { $_.Arguments }) -join '; ') }
     }
 $tasks | Format-Table -AutoSize
-Write-Host 'Códigos de saída: 0 concluída; 2 acesso negado; 3 parcial; 4 parada segura; 5 limite da origem; 6 falha API/HMAC; 7 erro; 8 desativada; 9 lock ocupado; 10 horário perdido; 11 repetição do slot.'
+Write-Host 'Códigos de saída: 0 concluída; 2 acesso negado; 3 parcial; 4 parada segura; 5 limite da origem; 6 falha API/HMAC; 7 erro; 8 desativada; 9 lock ocupado; 10 horário perdido; 11 repetição do slot; 12 orçamento externo esgotado; 13 limite de produtos configurado.'
 Write-Host "Log: $($settings.log_file)"

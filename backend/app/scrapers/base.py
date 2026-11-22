@@ -18,6 +18,7 @@ from app.models.farmacia import Farmacia
 from app.models.oferta_farmacia import OfertaFarmacia
 from app.schemas.oferta import ProdutoExtraidoSchema
 from app.scrapers.source_modes import retry_after_seconds
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.enriquecimento import ServicoEnriquecimentoFarmacologico
 from app.services.image_registry import upsert_image_references
 from app.services.imagens import is_generic_image_url
@@ -468,6 +469,8 @@ class BasePharmacyScraper(ABC):
 
                 return response
 
+            except ExternalRequestDeferred:
+                raise
             except Exception as e:
                 # Avalia atributos encadeados de exceção (para libraries como httpx)
                 status_obj = getattr(e, "response", None)

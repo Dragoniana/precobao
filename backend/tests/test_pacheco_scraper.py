@@ -6,6 +6,7 @@ from app.scrapers import pacheco as pacheco_module
 from app.scrapers import source_http_client
 from app.scrapers.pacheco import PachecoScraper
 from app.scrapers.pacheco_scheduler import _next_run
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +52,35 @@ def test_pacheco_starts_new_refresh_cycle_after_completed_legacy_run():
         {"status": "complete", "last_completed_offset": 500, "brands_processed": 4}
     )
     assert state["scan_cursor"] == {"stage": "root", "offset": 0}
+
+
+@pytest.mark.asyncio
+async def test_budget_defer_preserves_pacheco_cursor_without_advancing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PACHECO_STATE_DIR", str(tmp_path))
+    scraper = PachecoScraper(request_delay=0)
+    scraper.stats["scan_cursor"] = {"stage": "root", "offset": 150}
+    scraper.stats["last_completed_offset"] = 100
+    scraper._write_checkpoint()
+
+    class DeferredClient:
+        async def get(self, *_args, **_kwargs):
+            raise ExternalRequestDeferred("BUDGET_EXHAUSTED", 300)
+
+    with pytest.raises(ExternalRequestDeferred):
+        await scraper._scan_partition(
+            DeferredClient(),
+            scraper.API_BASE,
+            partition="medicamentos",
+            max_offset=2500,
+            initial_offset=150,
+            cursor_stage="root",
+        )
+
+    stored = scraper._read_checkpoint()
+    assert stored["last_completed_offset"] == 100
+    assert stored["scan_cursor"] == {"stage": "root", "offset": 150}
 
 
 def test_pacheco_does_not_overwrite_corrupt_checkpoint(tmp_path, monkeypatch):

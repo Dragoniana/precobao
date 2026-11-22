@@ -30,6 +30,7 @@ from app.scrapers.source_modes import (
 from app.scrapers.source_modes import (
     source_mode as configured_source_mode,
 )
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -380,6 +381,11 @@ class PachecoScraper(BasePharmacyScraper):
                     int(brand.get("Quantity", 0)) for brand in brands
                 )
                 self._write_checkpoint()
+            except ExternalRequestDeferred:
+                self.stats["stop_reason"] = "budget_exhausted"
+                self.stats["status"] = "partial"
+                self._write_checkpoint()
+                raise
             except Exception as error:
                 self._page_failed(
                     f"Facet request failed: {type(error).__name__}: {error}"
@@ -675,6 +681,11 @@ class PachecoScraper(BasePharmacyScraper):
                         self.stats["stop_reason"] = "short_page_end_of_partition"
                     return True
                 offset += self.ITEMS_PER_PAGE
+            except ExternalRequestDeferred:
+                self.stats["stop_reason"] = "budget_exhausted"
+                self.stats["status"] = "partial"
+                self._write_checkpoint()
+                raise
             except Exception as error:
                 error_name = type(error).__name__.casefold()
                 if any(

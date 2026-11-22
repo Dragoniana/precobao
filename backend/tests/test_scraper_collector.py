@@ -9,6 +9,7 @@ import pytest
 
 from app.scrapers import scraper_batch_client as sync_client
 from app.scrapers import scraper_collector, scraper_collector_scheduler
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 
 
 def test_pilot_item_cap_limits_batches_across_source_pages():
@@ -73,6 +74,25 @@ def test_scheduled_collector_requires_request_budget_not_product_cap(monkeypatch
 def test_sync_http_failures_have_distinct_categories(status, message, expected):
     error = sync_client.BatchSyncError(message, status_code=status)
     assert scraper_collector._sync_failure_state(error) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [
+        ("COMPLETE", 0),
+        ("ACCESS_BLOCKED", 2),
+        ("PARTIAL", 3),
+        ("STOPPED", 4),
+        ("RATE_LIMITED", 5),
+        ("SYNC_FAILED", 6),
+        ("FAILED", 7),
+        ("ALREADY_RUNNING", 9),
+        ("BUDGET_EXHAUSTED", 12),
+        ("CONFIGURED_PRODUCT_LIMIT", 13),
+    ],
+)
+def test_collector_exit_codes_are_explicit(status, exit_code):
+    assert scraper_collector._exit_code_for_status(status) == exit_code
 
 
 def test_rejected_item_queue_is_persistent_and_idempotent(tmp_path, monkeypatch):
@@ -481,3 +501,241 @@ async def test_image_failures_do_not_interrupt_confirmed_price_batches(
     assert pending_manifest.exists()
     assert pending_blob.read_bytes() == b"image bytes remain queued"
     assert not scraper_collector._outbox_path("araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_confirms_batch_and_queues_remaining_images(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SCRAPER_COLLECTOR_ENABLED", "true")
+    monkeypatch.setenv("SCRAPER_COLLECTION_ENV_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv(
+        "SCRAPER_INGEST_HMAC_SECRET", "collector-secret-which-is-longer-than-32"
+    )
+    monkeypatch.setenv("SCRAPER_COLLECTOR_SCHEDULED", "true")
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "true")
+    scraper_collector._write_state(
+        "araujo",
+        {
+            "status": "RUNNING",
+            "started_at": "2026-11-22T00:00:00+00:00",
+            "run_id": "prior-run",
+        },
+    )
+
+    posted = []
+
+    async def post_batch(_client, payload):
+        posted.append(payload)
+        return {
+            "status": "COMPLETE",
+            "accepted_count": len(payload["products"]),
+            "rejected_count": 0,
+        }
+
+    async def replay_ok(_client, _source):
+        return 0
+
+    async def image_budget_exhausted(_client, _source, _product):
+        raise ExternalRequestDeferred("BUDGET_EXHAUSTED", 321.0)
+
+    class FakeAraujoScraper:
+        products_queued = 0
+        allow_page_limit = False
+
+        def __init__(self, **kwargs):
+            self._run_lock = nullcontext
+            self.stop_requested_callback = kwargs["stop_requested_callback"]
+
+        async def _extract_direct_catalog(self):
+            products = [
+                {
+                    "sku_interno": "ARJ1",
+                    "ean": "7890000000000",
+                    "link": "https://www.araujo.com.br/p/1",
+                    "imagem_url": "https://images.example.test/1.jpg",
+                    "preco": 10,
+                },
+                {
+                    "sku_interno": "ARJ2",
+                    "ean": "7890000000001",
+                    "link": "https://www.araujo.com.br/p/2",
+                    "imagem_url": "https://images.example.test/2.jpg",
+                    "preco": 11,
+                },
+            ]
+            self.products_queued = await self.products_callback(products)
+            assert self.stop_requested_callback()
+
+    monkeypatch.setattr(scraper_collector, "post_batch", post_batch)
+    monkeypatch.setattr(scraper_collector, "sync_pending_image_outbox", replay_ok)
+    monkeypatch.setattr(
+        scraper_collector,
+        "download_and_upload_product_image",
+        image_budget_exhausted,
+    )
+    monkeypatch.setattr("app.scrapers.araujo.AraujoScraper", FakeAraujoScraper)
+
+    result = await scraper_collector.collect_source("araujo")
+
+    assert result["status"] == "BUDGET_EXHAUSTED"
+    assert result["stop_reason"] == "budget_exhausted"
+    assert result["previous_run_interrupted"] is True
+    assert result["previous_run_id"] == "prior-run"
+    assert len(posted) == 1
+    assert result["last_batch_id"] == posted[0]["batch_id"]
+    assert not scraper_collector._outbox_path("araujo").exists()
+    manifests = list(
+        scraper_collector._image_fetch_outbox_dir("araujo").glob("*.json")
+    )
+    assert len(manifests) == 2
+    manifest_skus = {
+        json.loads(path.read_text(encoding="utf-8"))["sku_interno"]
+        for path in manifests
+    }
+    assert manifest_skus == {"ARJ1", "ARJ2"}
+    with scraper_collector._exclusive_lock(tmp_path / "locks" / "araujo.lock"):
+        pass
+
+
+def test_deferred_image_queue_is_idempotent_and_does_not_store_product_payload(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    product = {
+        "sku_interno": "PCH9",
+        "ean": "7890000000000",
+        "link": "https://www.drogariaspacheco.com.br/p/9",
+        "imagem_url": "https://images.example.test/9.jpg",
+        "nome": "Medicine",
+        "preco": 12.5,
+    }
+
+    scraper_collector._queue_image_fetch("pacheco", product)
+    scraper_collector._queue_image_fetch("pacheco", product)
+
+    manifests = list(
+        scraper_collector._image_fetch_outbox_dir("pacheco").glob("*.json")
+    )
+    saved = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert len(manifests) == 1
+    assert saved["sku_interno"] == "PCH9"
+    assert "preco" not in saved and "nome" not in saved
+
+
+@pytest.mark.asyncio
+async def test_confirmed_batch_outbox_replay_keeps_same_id_without_double_counting(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SCRAPER_COLLECTOR_ENABLED", "true")
+    monkeypatch.setenv("SCRAPER_COLLECTION_ENV_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_SOURCE_MODE", "DIRECT")
+    monkeypatch.setenv("ARAUJO_PUBLIC_CATALOG_AUTHORIZED", "true")
+    monkeypatch.setenv("ARAUJO_ACCESS_CONFIRMED", "true")
+    monkeypatch.setenv("SCRAPER_INGEST_URL", "https://api.example.test/ingest")
+    monkeypatch.setenv(
+        "SCRAPER_INGEST_HMAC_SECRET", "collector-secret-which-is-longer-than-32"
+    )
+    scraper_collector._write_state(
+        "araujo", {"status": "RUNNING", "last_batch_id": "stable-batch-id"}
+    )
+    payload = {
+        "batch_id": "stable-batch-id",
+        "source": "araujo",
+        "products": [{"sku_interno": "ARJ1", "preco": 10}],
+    }
+    scraper_collector._write_outbox("araujo", payload)
+    posted_ids = []
+
+    async def post_batch(_client, batch):
+        posted_ids.append(batch["batch_id"])
+        return {"status": "COMPLETE", "accepted_count": 1, "rejected_count": 0}
+
+    async def replay_ok(_client, _source):
+        return 0
+
+    class EmptyAraujoScraper:
+        products_queued = 0
+        allow_page_limit = False
+
+        def __init__(self, **_kwargs):
+            self._run_lock = nullcontext
+
+        async def _extract_direct_catalog(self):
+            return None
+
+    monkeypatch.setattr(scraper_collector, "post_batch", post_batch)
+    monkeypatch.setattr(scraper_collector, "sync_pending_image_outbox", replay_ok)
+    monkeypatch.setattr("app.scrapers.araujo.AraujoScraper", EmptyAraujoScraper)
+
+    result = await scraper_collector.collect_source("araujo")
+
+    assert posted_ids == ["stable-batch-id"]
+    assert result["last_batch_id"] == "stable-batch-id"
+    assert result["products_sent"] == 0
+    assert result["batches_sent"] == 0
+    assert not scraper_collector._outbox_path("araujo").exists()
+
+
+@pytest.mark.asyncio
+async def test_deferred_image_queue_resumes_without_losing_manifest(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    product = {
+        "sku_interno": "PCH9",
+        "ean": "7890000000000",
+        "link": "https://www.drogariaspacheco.com.br/p/9",
+        "imagem_url": "https://images.example.test/9.jpg",
+    }
+    scraper_collector._queue_image_fetch("pacheco", product)
+    state = {
+        "image_blobs_uploaded": 0,
+        "image_bytes_uploaded": 0,
+        "images_skipped_generic": 0,
+        "image_download_failures": 0,
+        "image_upload_failures": 0,
+        "pending_image_replay_failures": 0,
+        "image_failures": [],
+    }
+
+    async def no_budget(_client, _source, _product):
+        raise ExternalRequestDeferred("BUDGET_EXHAUSTED", 10)
+
+    monkeypatch.setattr(
+        scraper_collector, "download_and_upload_product_image", no_budget
+    )
+    assert (
+        await scraper_collector._replay_image_fetch_outbox(
+            object(), "pacheco", state
+        )
+        == "BUDGET_EXHAUSTED"
+    )
+    manifests = list(
+        scraper_collector._image_fetch_outbox_dir("pacheco").glob("*.json")
+    )
+    assert len(manifests) == 1
+
+    async def uploaded(_client, _source, _product):
+        return {"normalized_size_bytes": 256}
+
+    monkeypatch.setattr(
+        scraper_collector, "download_and_upload_product_image", uploaded
+    )
+    assert (
+        await scraper_collector._replay_image_fetch_outbox(
+            object(), "pacheco", state
+        )
+        is None
+    )
+    assert list(
+        scraper_collector._image_fetch_outbox_dir("pacheco").glob("*.json")
+    ) == []
+    assert state["image_blobs_uploaded"] == 1
+    assert state["image_bytes_uploaded"] == 256

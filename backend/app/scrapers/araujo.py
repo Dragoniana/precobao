@@ -27,6 +27,7 @@ from app.scrapers.source_modes import (
 from app.scrapers.source_modes import (
     source_mode as configured_source_mode,
 )
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -297,6 +298,14 @@ class AraujoScraper(BasePharmacyScraper):
                 ),
                 stop_reason=f"http_{error.status_code}",
                 retry_after_seconds=error.retry_after_seconds,
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            self._write_direct_checkpoint(state)
+            raise
+        except ExternalRequestDeferred:
+            state.update(
+                status="PARTIAL",
+                stop_reason="budget_exhausted",
                 finished_at=datetime.now(UTC).isoformat(),
             )
             self._write_direct_checkpoint(state)

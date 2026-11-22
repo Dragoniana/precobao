@@ -21,6 +21,15 @@ _LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 
 
+class ExternalRequestDeferred(RuntimeError):
+    """A scheduled collector must finish this cycle instead of waiting."""
+
+    def __init__(self, reason: str, wait_seconds: float):
+        self.reason = reason
+        self.wait_seconds = wait_seconds
+        super().__init__(reason)
+
+
 def _enabled() -> bool:
     return os.getenv(
         "SCRAPER_EXTERNAL_RATE_LIMIT_ENABLED", "false"
@@ -250,7 +259,7 @@ def _try_reserve_request(
 
 
 async def acquire_external_request(source: str, url: str) -> None:
-    """Count every outbound attempt and wait rather than exceed the shared budget."""
+    """Count attempts; scheduled runs defer to the next cycle when constrained."""
     host = (urlsplit(url).hostname or "").casefold()
     if not host:
         raise ValueError("External request URL must contain a hostname")
@@ -267,7 +276,33 @@ async def acquire_external_request(source: str, url: str) -> None:
                 "wait_seconds": round(wait_seconds, 2),
             },
         )
+        wait_mode = os.getenv("SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE", "wait")
+        if wait_mode.strip().casefold() == "stop":
+            reason = _scheduled_defer_reason(source, host)
+            raise ExternalRequestDeferred(reason, wait_seconds)
         await asyncio.sleep(wait_seconds)
+
+
+def _scheduled_defer_reason(source: str, host: str) -> str:
+    """Distinguish local budget exhaustion from persisted source/host cooldowns."""
+    now = datetime.now(UTC)
+    with _exclusive_file_lock(_lock_path()):
+        state = _read_state(_state_path())
+    source_due = state.get("blocked_sources_until", {}).get(source.casefold())
+    if source_due:
+        try:
+            if now < _parse_time(source_due):
+                return "ACCESS_BLOCKED"
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED") from error
+    host_due = state.get("blocked_until", {}).get(host)
+    if host_due:
+        try:
+            if now < _parse_time(host_due):
+                return "RATE_LIMITED"
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED") from error
+    return "BUDGET_EXHAUSTED"
 
 
 def _retry_after_seconds(value: str | None) -> float | None:

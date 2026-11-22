@@ -162,3 +162,42 @@ async def test_image_download_consumes_the_shared_external_budget(
         )
 
     assert limiter.rate_budget_status()["by_source"]["araujo"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduled_budget_exhaustion_returns_immediately(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE", "stop")
+    now = datetime.now(UTC)
+    for index in range(50):
+        source = "araujo" if index % 2 else "pacheco"
+        assert limiter._try_reserve_request(source, "shop.example", now=now) is None
+
+    async def no_sleep(_seconds):
+        raise AssertionError("scheduled collection must not wait for a new window")
+
+    monkeypatch.setattr(limiter.asyncio, "sleep", no_sleep)
+    with pytest.raises(limiter.ExternalRequestDeferred) as error:
+        await limiter.acquire_external_request("araujo", "https://shop.example/page")
+
+    assert error.value.reason == "BUDGET_EXHAUSTED"
+    assert limiter.rate_budget_status(now=now)["total"] == 50
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected"), [(403, "ACCESS_BLOCKED"), (429, "RATE_LIMITED")]
+)
+async def test_scheduled_cooldowns_keep_source_error_distinct(
+    monkeypatch, tmp_path, status_code, expected
+):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE", "stop")
+    response = SimpleNamespace(status_code=status_code, headers={})
+    limiter.note_source_response("araujo", "https://shop.example/page", response)
+
+    with pytest.raises(limiter.ExternalRequestDeferred) as error:
+        await limiter.acquire_external_request("araujo", "https://shop.example/page")
+
+    assert error.value.reason == expected
+    assert limiter.rate_budget_status()["total"] == 0

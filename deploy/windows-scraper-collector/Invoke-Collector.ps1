@@ -62,6 +62,7 @@ try {
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = '50'
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = '900'
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = Join-Path $stateDir 'rate-limit'
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE = if ($ScheduledSlot -or $ScheduledIntervalMinutes -gt 0) { 'stop' } else { 'wait' }
     $env:SCRAPER_COLLECTOR_STOP_FILE = $settings.stop_file
     $env:SCRAPER_COLLECTOR_SCHEDULE_TIMES = ($settings.schedule_times -join ',')
     $env:SCRAPER_COLLECTOR_TIMEZONE = $settings.timezone
@@ -180,4 +181,5 @@ try {
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_MAX_REQUESTS = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_WINDOW_SECONDS = $null
     $env:SCRAPER_EXTERNAL_RATE_LIMIT_STATE_DIR = $null
+    $env:SCRAPER_EXTERNAL_RATE_LIMIT_WAIT_MODE = $null
 }
