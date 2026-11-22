@@ -495,6 +495,7 @@ export default function HistoryScreen() {
               <OfferRow
                 key={offer.id || `${offer.farmacia_id}-${index}`}
                 medicine={medicine}
+                offerId={offer.id}
                 medicineName={medicine.nome}
                 pharmacy={formatPharmacyHistoryLabel(getPharmacyName(offer), offer)}
                 price={offer.preco}

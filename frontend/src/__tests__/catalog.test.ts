@@ -92,7 +92,7 @@ it('uses a pharmacy-scoped generic image after specific catalog images', () => {
   expect(isGenericOfferImage(medicine, images[1])).toBe(true);
 });
 
-it('bounds image attempts and reserves attempts for pharmacy fallbacks', () => {
+it('uses only the selected offer fallback and never substitutes another pharmacy', () => {
   const medicine = {
     ...item,
     id: 72,
@@ -111,10 +111,26 @@ it('bounds image attempts and reserves attempts for pharmacy fallbacks', () => {
     })),
   } as Medicamento;
 
-  const images = resolveMedicineImages(medicine);
-  expect(images).toHaveLength(5);
+  const images = resolveMedicineImages(medicine, 923);
+  expect(images).toHaveLength(4);
   expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
-  expect(images.slice(3).every((url) => url.includes('/catalogo/ofertas/'))).toBe(true);
+  expect(images[3]).toContain('/catalogo/ofertas/923/imagem');
+  expect(images.some((url) => url.includes('/catalogo/ofertas/921/imagem'))).toBe(false);
+  expect(images.some((url) => url.includes('/catalogo/ofertas/922/imagem'))).toBe(false);
+  expect(resolveMedicineImages(medicine, 999)).toEqual(medicine.imagem_urls!.slice(0, 3));
+});
+
+it('chooses the cheapest available offer as a deterministic card reference', () => {
+  const medicine = {
+    ...item,
+    nome: 'Teste',
+    imagem_urls: [],
+    ofertas: [
+      { id: 11, farmacia_id: 1, catalogo_id: 18, preco: 15, quantidade_estoque: 1, disponivel: true, url_origem: 'https://araujo.test/p/11', imagem_generica: true, imagem_ref: '/catalogo/ofertas/11/imagem' },
+      { id: 12, farmacia_id: 2, catalogo_id: 18, preco: 9, quantidade_estoque: 1, disponivel: true, url_origem: 'https://pacheco.test/p/12', imagem_generica: true, imagem_ref: '/catalogo/ofertas/12/imagem' },
+    ],
+  } as Medicamento;
+  expect(resolveMedicineImages(medicine)[0]).toContain('/catalogo/ofertas/12/imagem');
 });
 
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {

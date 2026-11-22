@@ -86,7 +86,7 @@ export function MedicineCard({ medicine, onPress, compact = false, wide = false,
       onBlur={() => setFocused(false)}
       style={({ pressed }) => [styles.card, (isCompactList || wide) && styles.cardCompactList, { width: cardWidth }, (hovered || focused) && styles.cardHighlighted, pressed && styles.cardPressed]}
     >
-      <MedicineImage medicine={medicine} style={[styles.imagePanel, (isCompactList || wide) && styles.imagePanelCompactList]} label="Imagem não disponível" />
+      <MedicineImage medicine={medicine} preferredOfferId={lowestOffer?.id} style={[styles.imagePanel, (isCompactList || wide) && styles.imagePanelCompactList]} label="Imagem não disponível" />
 
       <Pressable
         accessibilityRole="button"

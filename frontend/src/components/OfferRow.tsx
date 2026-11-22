@@ -10,12 +10,13 @@ type OfferRowProps = {
   medicineName: string;
   laboratory?: string;
   pharmacy: string;
+  offerId?: number;
   price: number | string;    // Agora aceita a string do Decimal do backend
   color?: string;
   onPress?: () => void;
 };
 
-function OfferRowContent({ medicine, medicineName, laboratory, pharmacy, price, color }: OfferRowProps) {
+function OfferRowContent({ medicine, medicineName, laboratory, pharmacy, offerId, price, color }: OfferRowProps) {
   const styles = useStyles();
   const safePrice = Number(price);
   const priceDisplay = Number.isFinite(safePrice)
@@ -24,7 +25,7 @@ function OfferRowContent({ medicine, medicineName, laboratory, pharmacy, price, 
 
   return (
     <>
-      {medicine ? <MedicineImage medicine={medicine} style={styles.medicineImage} label="" /> : null}
+      {medicine ? <MedicineImage medicine={medicine} preferredOfferId={offerId} style={styles.medicineImage} label="" /> : null}
       <View style={styles.offerInfo}>
         <Text style={styles.name} numberOfLines={2} ellipsizeMode="tail">{medicineName}</Text>
         {!!laboratory && <Text style={styles.laboratory} numberOfLines={1} ellipsizeMode="tail">{laboratory}</Text>}

@@ -46,18 +46,23 @@ export function normalizeText(value: unknown) {
   return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
-export function resolveMedicineImages(medicine: Medicamento): string[] {
+export function resolveMedicineImages(medicine: Medicamento, preferredOfferId?: number): string[] {
   const urls = Array.isArray(medicine.imagem_urls) ? medicine.imagem_urls : [];
   const legacyRef = medicine.imagem_ref?.startsWith('/catalogo/medicamentos/')
     ? `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}` : undefined;
   const specificCandidates = medicine.imagem_armazenada && legacyRef
     ? [legacyRef, ...urls, medicine.imagem_url]
     : [...urls, medicine.imagem_url, legacyRef];
-  const offerFallbacks = medicine.ofertas
-    .filter((offer) => offer.imagem_generica && offer.imagem_ref)
-    .map((offer) => offer.imagem_ref!.startsWith('/')
-      ? `${API_URL.replace(/\/+$/, '')}${offer.imagem_ref}`
-      : offer.imagem_ref!);
+  const selectedOffer = preferredOfferId !== undefined
+    ? medicine.ofertas.find((offer) => offer.id === preferredOfferId)
+    : [...medicine.ofertas]
+      .filter((offer) => offer.disponivel !== false)
+      .sort((a, b) => Number(a.preco) - Number(b.preco) || a.id - b.id)[0];
+  const selectedFallback = selectedOffer?.imagem_generica && selectedOffer.imagem_ref
+    ? selectedOffer.imagem_ref.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${selectedOffer.imagem_ref}`
+      : selectedOffer.imagem_ref
+    : undefined;
   const validHttps = (ordered: (string | null | undefined)[]) => [...new Set(ordered
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
@@ -65,7 +70,9 @@ export function resolveMedicineImages(medicine: Medicamento): string[] {
   // Bound failed network attempts while still reserving slots for offer images.
   // Catalog-specific images always get tried before pharmacy generic fallbacks.
   const specific = validHttps(specificCandidates).slice(0, 3);
-  const generic = validHttps(offerFallbacks).slice(0, 2);
+  // Never fall through to another pharmacy's image. Without an explicitly
+  // selected offer, the deterministic reference is the cheapest available one.
+  const generic = validHttps([selectedFallback]);
   return [...new Set([...specific, ...generic])];
 }
 
@@ -79,8 +86,8 @@ export function isGenericOfferImage(medicine: Medicamento, url: string | undefin
     return resolved === url;
   });
 }
-export function resolveMedicineImage(medicine: Medicamento): string | undefined {
-  return resolveMedicineImages(medicine)[0];
+export function resolveMedicineImage(medicine: Medicamento, preferredOfferId?: number): string | undefined {
+  return resolveMedicineImages(medicine, preferredOfferId)[0];
 }
 
 export function normalizeMedicine(raw: Partial<Medicamento> & { name_search?: string }): Medicamento {

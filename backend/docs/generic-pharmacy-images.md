@@ -6,6 +6,10 @@ O fallback é associado somente à oferta e à farmácia, com `catalog_id` nulo,
 
 A API entrega o fallback no endpoint da oferta, com ETag. O catálogo não inclui bytes nem URLs genéricas como imagens específicas. A interface tenta primeiro as imagens específicas e só então as imagens genéricas das ofertas.
 
+Na interface, o fallback deve corresponder à oferta de referência do cartão ou da linha. Cartões gerais usam a oferta disponível de menor preço; linhas de comparação usam a oferta daquela linha; detalhes usam a menor oferta disponível. Se a oferta de referência não possuir fallback próprio, a interface mantém o placeholder neutro em vez de usar a imagem de outra farmácia. Uma imagem genérica vinculada a uma oferta não é, por si só, um ativo universal reutilizável da farmácia.
+
+Atualmente não há ativo universal oficial aprovado e verificado visualmente para cada uma das três farmácias no manifesto de imagens genéricas versionado. Em particular, o manifesto não registra URLs genéricas da Pacheco. Até que um ativo oficial universal seja identificado, armazenado e aprovado, medicamentos sem imagem específica nem fallback válido da própria oferta permanecem com o placeholder neutro. Não promover uma embalagem de medicamento específico a fallback universal.
+
 O coletor salva uma confirmação local de imagens genéricas já aceitas para não baixá-las novamente na mesma instalação. O cache fica no diretório de estado do coletor, não contém segredos e só é atualizado depois que a API confirma o upload. A outbox remove o manifesto e os bytes somente após essa confirmação. Para recuperar apenas pendências existentes, use `Sync-Pending-Images.ps1`; o comando não acessa os sites das farmácias nem sincroniza preços.
 
 A migration `c4a8f32d1e9b` torna `catalog_id` anulável, adiciona a classificação genérica e mantém no máximo um vínculo específico e um fallback genérico por oferta. O downgrade recusa prosseguir enquanto existirem fallbacks genéricos, evitando associá-los automaticamente a medicamentos.

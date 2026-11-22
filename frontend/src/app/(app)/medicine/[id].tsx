@@ -247,7 +247,7 @@ export default function MedicineDetailScreen() {
       <View style={[styles.layout, isDesktop && styles.layoutDesktop]}>
         <View style={[styles.mainColumn, isDesktop && styles.mainColumnDesktop]}>
           <View style={[styles.productOverview, isDesktop && styles.productOverviewDesktop]}>
-            <MedicineImage medicine={medicine} style={[styles.imageCard, isTablet && styles.imageCardTablet, isDesktop && styles.imageCardDesktop]} onLoad={() => markMedicineOpenTrace(medicine.id, 'image-loaded')} />
+            <MedicineImage medicine={medicine} preferredOfferId={lowest?.id} style={[styles.imageCard, isTablet && styles.imageCardTablet, isDesktop && styles.imageCardDesktop]} onLoad={() => markMedicineOpenTrace(medicine.id, 'image-loaded')} />
 
             <View style={[styles.detailsColumn, isDesktop && styles.detailsColumnDesktop]}>
               <View style={[styles.headerRow, isDesktop && styles.headerRowDesktop]}>

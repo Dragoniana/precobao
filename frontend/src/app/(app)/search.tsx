@@ -15,7 +15,7 @@ import { radius, spacing } from '../../theme';
 import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 import { Medicamento } from '../../types/api';
 
-type SearchRow = { medicine: Medicamento; medicineId: number; medicineName: string; pharmacyId: number; pharmacyName: string; price: number };
+type SearchRow = { medicine: Medicamento; medicineId: number; medicineName: string; offerId: number; pharmacyId: number; pharmacyName: string; price: number };
 
 export default function SearchScreen() {
   const styles = useStyles();
@@ -75,6 +75,7 @@ export default function SearchScreen() {
         medicine,
         medicineId: medicine.id,
         medicineName: medicine.nome,
+        offerId: offer.id,
         pharmacyId: offer.farmacia_id,
         pharmacyName: `${offer.farmacia_nome || offer.farmacia?.nome_fantasia || `Farmácia ${offer.farmacia_id}`}${offer.contexto_local === 'online_sem_localizacao_confirmada' ? ' — Online' : ''}${offer.cep ? ` — Entrega para ${offer.cidade || 'localidade'}${offer.uf ? `/${offer.uf}` : ''} ${offer.cep}` : ''}${offer.contexto_local === 'retirada_loja_confirmada' ? ` — Retirada · ${offer.loja_nome || offer.loja_id || 'unidade confirmada'}` : ''}`,
         price: Number(offer.preco),
@@ -146,7 +147,7 @@ export default function SearchScreen() {
         <View style={[styles.rows, hasDesktopSidebar && styles.rowsDesktop]}>
           {rows.map((row) => (
             <View key={`${row.medicineId}-${row.pharmacyId}`} style={hasDesktopSidebar && (width >= 1640 ? styles.offerGridItemThree : styles.offerGridItemTwo)}>
-              <OfferRow medicine={row.medicine} medicineName={row.medicineName} laboratory={getLaboratoryDisplayName(row.medicine.laboratorio)} pharmacy={row.pharmacyName} price={row.price} color={palette.primary} onPress={() => openDetail(row.medicineId)} />
+              <OfferRow medicine={row.medicine} medicineName={row.medicineName} offerId={row.offerId} laboratory={getLaboratoryDisplayName(row.medicine.laboratorio)} pharmacy={row.pharmacyName} price={row.price} color={palette.primary} onPress={() => openDetail(row.medicineId)} />
             </View>
           ))}
         </View>

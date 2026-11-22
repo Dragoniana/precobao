@@ -15,12 +15,13 @@ type MedicineImageProps = {
   imageStyle?: StyleProp<ImageStyle>;
   label?: string;
   onLoad?: () => void;
+  preferredOfferId?: number;
 };
 
-export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem indispon\u00edvel', onLoad }: MedicineImageProps) {
+export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem indispon\u00edvel', onLoad, preferredOfferId }: MedicineImageProps) {
   const styles = useStyles();
   const { palette } = useAppTheme();
-  const imageUrls = resolveMedicineImages(medicine);
+  const imageUrls = resolveMedicineImages(medicine, preferredOfferId);
   const imageKey = imageUrls.join('|');
   const [failedIndex, setFailedIndex] = useState(0);
   const [imageLoaded, setImageLoaded] = useState(false);

@@ -106,6 +106,28 @@ it('falls through failed specific images to a pharmacy fallback and then the pla
   expect(screen.getByText('Imagem indisponível')).toBeTruthy();
 });
 
+it('keeps a broken real image on the selected pharmacy fallback only', async () => {
+  const medicine = {
+    id: 19,
+    nome: 'Produto em duas farmácias',
+    codigo_barras: '',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_urls: ['https://api.example.test/catalogo/medicamentos/19/imagem'],
+    ofertas: [
+      { id: 190, farmacia_id: 1, catalogo_id: 19, preco: 8, quantidade_estoque: 1, disponivel: true, url_origem: 'https://araujo.test/p/19', imagem_generica: true, imagem_ref: '/catalogo/ofertas/190/imagem?v=araujo' },
+      { id: 191, farmacia_id: 2, catalogo_id: 19, preco: 9, quantidade_estoque: 1, disponivel: true, url_origem: 'https://pacheco.test/p/19', imagem_generica: true, imagem_ref: '/catalogo/ofertas/191/imagem?v=pacheco' },
+    ],
+  } as Medicamento;
+  const screen = await render(<MedicineImage medicine={medicine} preferredOfferId={191} />);
+  await fireEvent(screen.getByLabelText(`Embalagem de ${medicine.nome}`), 'error');
+  const label = `Imagem ilustrativa fornecida pela farmácia para ${medicine.nome}`;
+  expect(screen.getByLabelText(label).props.source.uri).toContain('/catalogo/ofertas/191/imagem');
+  expect(screen.queryByLabelText(`Embalagem de ${medicine.nome}`)).toBeNull();
+});
+
 it('moves past a timed out image request instead of leaving a spinner indefinitely', async () => {
   jest.useFakeTimers();
   try {
