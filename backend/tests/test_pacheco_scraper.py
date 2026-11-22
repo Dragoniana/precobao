@@ -605,6 +605,7 @@ async def test_pacheco_persists_and_resumes_next_offset_after_product_limit(
 
     async def run_one_page(scraper, expected_offset):
         scraper._start_run()
+        scraper.stop_requested_callback = lambda: True
 
         def queue(rows):
             scraper.stats["products_enqueued"] += len(rows)

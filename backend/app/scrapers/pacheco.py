@@ -631,10 +631,6 @@ class PachecoScraper(BasePharmacyScraper):
                     except Exception:
                         self.collector_delivery_failed = True
                         raise
-                if self.stop_requested_callback and self.stop_requested_callback():
-                    self.stats["stop_reason"] = "safe_stop_requested"
-                    self._write_checkpoint()
-                    return True
                 self.stats["pages_succeeded"] += 1
                 self.stats["last_completed_offset"] = offset
                 cursor = {"stage": cursor_stage, "offset": offset + self.ITEMS_PER_PAGE}
@@ -649,6 +645,11 @@ class PachecoScraper(BasePharmacyScraper):
                 )
                 if self.request_delay:
                     await asyncio.sleep(self.request_delay)
+
+                if self.stop_requested_callback and self.stop_requested_callback():
+                    self.stats["stop_reason"] = "safe_stop_requested"
+                    self._write_checkpoint()
+                    return True
 
                 if self._limit_reached():
                     return True
