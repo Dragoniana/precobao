@@ -89,3 +89,43 @@ nunca são excluídas por essa ferramenta.
 
 O status mostra fila, tamanho dos temporários, órfãos/quarentena, confirmações e
 espaço liberado. Nenhum agendamento é criado ou habilitado por esses scripts.
+
+## Recuperar imagens ausentes da produção (modo exclusivo)
+
+`Invoke-ImageBackfill.ps1` usa apenas a fila autenticada HMAC da API e o rate
+limiter persistente compartilhado com os scrapers normais. Não lê o PostgreSQL
+de desenvolvimento nem coleta preços, estoque, histórico ou catálogo. O modo
+manual exige uma origem por vez; os bytes ficam em uma outbox separada em
+`state\outbox\images\image-backfill\<origem>`. A API valida identidade e só
+armazena para medicamentos/ofertas existentes; deduplica por hash e não
+substitui uma imagem BYTEA existente. Arquivos temporários e manifests são
+removidos somente depois da confirmação do servidor.
+
+```powershell
+# Inventário agregado autenticado; não consulta farmácias
+.\deploy\windows-scraper-collector\Invoke-ImageBackfill.ps1 -Mode Inventory
+
+# Simulação de uma origem; nenhuma consulta externa nem escrita em produção
+.\deploy\windows-scraper-collector\Invoke-ImageBackfill.ps1 -Mode DryRun -Source pacheco -Limit 3
+
+# Execução manual pequena, após validar backup recuperável
+.\deploy\windows-scraper-collector\Invoke-ImageBackfill.ps1 -Mode Execute -Source pacheco -Limit 3 -BackupVerified
+```
+
+Para escrita, a configuração requer API pronta, origem em `DIRECT` com acesso
+confirmado e HMAC DPAPI do mesmo usuário. O script confere saúde HTTPS e força
+`ARAUJO_TLS_VERIFY=true` e `PACHECO_TLS_VERIFY=true`; não habilita redirects nem
+proxy. O teto manual é 10 medicamentos por execução e até 10 requisições de
+backfill por origem na janela móvel. Essas chamadas também contam no teto global
+de 50/15 min e no teto combinado da origem de 25/15 min, preservando orçamento
+para os scrapers normais. Sem quota, checkpoint e tentativas ficam persistidos
+para a janela seguinte. 403/429 ativam cooldown, sem repetição imediata nem
+tentativa de contornar WAF/CDN. Imagens genéricas ficam excluídas por padrão.
+
+O piloto deve ser validado manualmente por origem: conferir hash, associação e
+resposta HTTP da imagem antes de ampliar. Os comandos de agendamento são uma
+etapa posterior e não são executados automaticamente. O registro requer
+`-Enable -BackupVerified`, piloto confirmado e outbox sem pendências. Os slots
+são Araújo em 00/15/30/45 e Pacheco em 07/22/37/52, com `IgnoreNew`. Remova
+somente essas tarefas com `Unregister-ImageBackfillSchedule.ps1`; os
+agendamentos normais permanecem separados.

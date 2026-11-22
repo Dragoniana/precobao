@@ -62,21 +62,44 @@ def test_http_budget_reserves_25_calls_per_source_with_shared_ceiling(
     _configure(monkeypatch, tmp_path)
     now = datetime(2026, 11, 22, 12, tzinfo=UTC)
     for index in range(25):
-        assert (
-            limiter._try_reserve_request("araujo", "shop.example", now=now)
-            is None
-        )
+        assert limiter._try_reserve_request("araujo", "shop.example", now=now) is None
     wait = limiter._try_reserve_request("araujo", "shop.example", now=now)
     assert wait == pytest.approx(900)
     for index in range(25):
-        assert (
-            limiter._try_reserve_request("pacheco", "shop.example", now=now)
-            is None
-        )
+        assert limiter._try_reserve_request("pacheco", "shop.example", now=now) is None
     assert limiter.rate_budget_status(now=now)["total"] == 50
     assert limiter.rate_budget_status(now=now)["by_source"] == {
         "araujo": 25,
         "pacheco": 25,
+    }
+
+
+def test_image_backfill_has_a_small_cap_and_preserves_normal_source_quota(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    now = datetime(2026, 11, 22, 12, tzinfo=UTC)
+    for _ in range(10):
+        assert (
+            limiter._try_reserve_request(
+                "araujo", "image.example", now=now, purpose="image_backfill"
+            )
+            is None
+        )
+    assert limiter._try_reserve_request(
+        "araujo", "image.example", now=now, purpose="image_backfill"
+    ) == pytest.approx(900)
+    for _ in range(15):
+        assert limiter._try_reserve_request("araujo", "shop.example", now=now) is None
+    assert limiter._try_reserve_request(
+        "araujo", "shop.example", now=now
+    ) == pytest.approx(900)
+    status = limiter.rate_budget_status(now=now)
+    assert status["total"] == 25
+    assert status["by_source"]["araujo"] == 25
+    assert status["by_source_purpose"]["araujo"] == {
+        "normal": 15,
+        "image_backfill": 10,
     }
 
 

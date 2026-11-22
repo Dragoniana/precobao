@@ -180,6 +180,88 @@ def _image_endpoint() -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, f"{path}/medicine-images", "", ""))
 
 
+def _image_backfill_endpoint(route: str) -> str:
+    if route not in {"backfill-inventory", "backfill-queue"}:
+        raise BatchSyncError("scraper_image_backfill_route_invalid")
+    parsed = urlsplit(_endpoint())
+    path = parsed.path.rstrip("/")
+    if path.endswith("/scraper-batches"):
+        path = path[: -len("/scraper-batches")]
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, f"{path}/medicine-images/{route}", "", "")
+    )
+
+
+async def _post_image_backfill_request(
+    client: httpx.AsyncClient, route: str, body: bytes
+) -> dict[str, Any]:
+    endpoint = _image_backfill_endpoint(route)
+    secret = os.getenv("SCRAPER_INGEST_HMAC_SECRET", "")
+    if len(secret.encode("utf-8")) < 32:
+        raise BatchSyncError("scraper_ingest_secret_not_configured")
+    try:
+        response = await client.post(
+            endpoint, content=body, headers=_signed_headers(body, secret)
+        )
+    except httpx.TimeoutException as error:
+        raise BatchSyncError("scraper_image_backfill_timeout") from error
+    except httpx.HTTPError as error:
+        raise BatchSyncError("scraper_image_backfill_transport_error") from error
+    if response.status_code == 429:
+        raise BatchSyncError(
+            "scraper_image_backfill_rate_limited",
+            status_code=429,
+            retry_after_seconds=_retry_after_seconds(
+                response.headers.get("Retry-After")
+            ),
+        )
+    if response.status_code != 200:
+        detail = None
+        try:
+            value = response.json().get("detail")
+            detail = value if isinstance(value, str) else None
+        except (ValueError, AttributeError):
+            pass
+        raise BatchSyncError(
+            f"scraper_image_backfill_rejected:{response.status_code}",
+            status_code=response.status_code,
+            error_code=detail,
+        )
+    try:
+        value = response.json()
+    except ValueError as error:
+        raise BatchSyncError("scraper_image_backfill_invalid_response") from error
+    if not isinstance(value, dict):
+        raise BatchSyncError("scraper_image_backfill_invalid_response")
+    return value
+
+
+async def fetch_image_backfill_inventory(
+    client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    return await _post_image_backfill_request(client, "backfill-inventory", b"{}")
+
+
+async def fetch_image_backfill_page(
+    client: httpx.AsyncClient,
+    *,
+    after_catalog_id: int,
+    limit: int = 50,
+    source: str | None = None,
+) -> dict[str, Any]:
+    if after_catalog_id < 0 or limit < 1 or limit > 100:
+        raise BatchSyncError("scraper_image_backfill_page_invalid")
+    if source not in {None, "araujo", "pacheco"}:
+        raise BatchSyncError("scraper_image_backfill_source_invalid")
+    payload: dict[str, Any] = {"after_catalog_id": after_catalog_id, "limit": limit}
+    if source:
+        payload["source"] = source
+    body = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return await _post_image_backfill_request(client, "backfill-queue", body)
+
+
 async def post_image_upload(
     client: httpx.AsyncClient,
     metadata: dict[str, Any],

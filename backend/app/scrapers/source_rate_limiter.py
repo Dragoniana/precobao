@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import email.utils
 import json
 import logging
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 _LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
+_REQUEST_PURPOSE = contextvars.ContextVar("source_request_purpose", default="normal")
 
 
 class ExternalRequestDeferred(RuntimeError):
@@ -67,6 +69,31 @@ def _per_source_limit() -> int:
             "1..MAX_REQUESTS"
         )
     return value
+
+
+def _image_backfill_source_limit() -> int:
+    total = _limit()
+    value = int(
+        os.getenv("SCRAPER_EXTERNAL_RATE_LIMIT_IMAGE_BACKFILL_PER_SOURCE", "10")
+    )
+    if value < 0 or value > total:
+        raise ValueError(
+            "SCRAPER_EXTERNAL_RATE_LIMIT_IMAGE_BACKFILL_PER_SOURCE must be in "
+            "0..MAX_REQUESTS"
+        )
+    return value
+
+
+@contextmanager
+def external_request_purpose(purpose: str):
+    """Classify image-recovery calls separately from the normal request budget."""
+    if purpose not in {"normal", "image_backfill"}:
+        raise ValueError("Unsupported external request purpose")
+    token = _REQUEST_PURPOSE.set(purpose)
+    try:
+        yield
+    finally:
+        _REQUEST_PURPOSE.reset(token)
 
 
 def _state_path() -> Path:
@@ -130,6 +157,7 @@ def _read_state(path: Path) -> dict:
             "limit": _limit(),
             "window_seconds": _window_seconds(),
             "per_source_limit": _per_source_limit(),
+            "image_backfill_per_source_limit": _image_backfill_source_limit(),
         }
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED") from error
@@ -175,7 +203,11 @@ def _parse_time(value: str) -> datetime:
 
 
 def _try_reserve_request(
-    source: str, host: str, *, now: datetime | None = None
+    source: str,
+    host: str,
+    *,
+    now: datetime | None = None,
+    purpose: str = "normal",
 ) -> float | None:
     """Persist a reservation or return seconds until the next safe reservation."""
     if not _enabled():
@@ -187,6 +219,9 @@ def _try_reserve_request(
     limit = _limit()
     window = _window_seconds()
     per_source_limit = _per_source_limit()
+    backfill_source_limit = _image_backfill_source_limit()
+    if purpose not in {"normal", "image_backfill"}:
+        raise ValueError("Unsupported external request purpose")
     path = _state_path()
     with _exclusive_file_lock(_lock_path()):
         state = _read_state(path)
@@ -194,6 +229,8 @@ def _try_reserve_request(
             state.get("limit", limit) != limit
             or state.get("window_seconds", window) != window
             or state.get("per_source_limit", per_source_limit) != per_source_limit
+            or state.get("image_backfill_per_source_limit", backfill_source_limit)
+            != backfill_source_limit
         ):
             raise RuntimeError("SOURCE_RATE_LIMIT_CONFIGURATION_CHANGED_FAIL_CLOSED")
         events = state["events"]
@@ -280,11 +317,35 @@ def _try_reserve_request(
                 window - (now - oldest_source).total_seconds(),
             )
 
+        if purpose == "image_backfill":
+            backfill_events = [
+                event
+                for event in source_events
+                if event.get("purpose", "normal") == "image_backfill"
+            ]
+            if len(backfill_events) >= backfill_source_limit:
+                try:
+                    oldest_backfill = min(
+                        _parse_time(event["at"]) for event in backfill_events
+                    )
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError(
+                        "SOURCE_RATE_LIMIT_STATE_INVALID_FAIL_CLOSED"
+                    ) from error
+                state["events"] = retained
+                state["blocked_until"] = blocked_until
+                _write_state(path, state)
+                return max(
+                    0.05,
+                    window - (now - oldest_backfill).total_seconds(),
+                )
+
         retained.append(
             {
                 "at": now.isoformat(),
                 "source": source.casefold(),
                 "host": host.casefold(),
+                "purpose": purpose,
             }
         )
         state["events"] = retained
@@ -299,7 +360,10 @@ async def acquire_external_request(source: str, url: str) -> None:
     if not host:
         raise ValueError("External request URL must contain a hostname")
     while True:
-        wait_seconds = await asyncio.to_thread(_try_reserve_request, source, host)
+        purpose = _REQUEST_PURPOSE.get()
+        wait_seconds = await asyncio.to_thread(
+            _try_reserve_request, source, host, purpose=purpose
+        )
         if wait_seconds is None:
             return
         logger.warning(
@@ -412,10 +476,25 @@ def rate_budget_status(*, now: datetime | None = None) -> dict:
         "enabled": _enabled(),
         "limit": state.get("limit", _limit()),
         "per_source_limit": state.get("per_source_limit", _per_source_limit()),
+        "image_backfill_per_source_limit": state.get(
+            "image_backfill_per_source_limit", _image_backfill_source_limit()
+        ),
         "window_seconds": state.get("window_seconds", window),
         "total": len(active),
         "by_source": {
             source: sum(1 for event in active if event["source"] == source)
+            for source in ("araujo", "pacheco")
+        },
+        "by_source_purpose": {
+            source: {
+                purpose: sum(
+                    1
+                    for event in active
+                    if event["source"] == source
+                    and event.get("purpose", "normal") == purpose
+                )
+                for purpose in ("normal", "image_backfill")
+            }
             for source in ("araujo", "pacheco")
         },
         "blocked_until": state.get("blocked_until", {}),

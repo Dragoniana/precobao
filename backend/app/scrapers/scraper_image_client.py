@@ -34,9 +34,14 @@ _IMAGE_RETRY_BASE_SECONDS = 60
 _IMAGE_RETRY_MAX_SECONDS = 12 * 60 * 60
 
 
-def _image_outbox_dir(source: str) -> Path:
+def _image_outbox_dir(source: str, namespace: str | None = None) -> Path:
     state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
-    return state_dir.resolve() / "outbox" / "images" / source
+    path = state_dir.resolve() / "outbox" / "images"
+    if namespace:
+        if not re.fullmatch(r"[a-z0-9_-]{1,32}", namespace):
+            raise ValueError("Invalid image outbox namespace")
+        path /= namespace
+    return path / source
 
 
 def _generic_image_cache_path() -> Path:
@@ -404,8 +409,10 @@ async def _submit_pending_image(
     return _finalize_confirmed_pending_image(metadata_path, metadata)
 
 
-async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> int:
-    directory = _image_outbox_dir(source)
+async def sync_pending_image_outbox(
+    client: httpx.AsyncClient, source: str, *, namespace: str | None = None
+) -> int:
+    directory = _image_outbox_dir(source, namespace)
     if not directory.exists():
         return 0
     manifests = {path.stem for path in directory.glob("*.json")}
@@ -450,8 +457,10 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
     return uploaded
 
 
-def pending_image_outbox_status(source: str) -> dict[str, int]:
-    directory = _image_outbox_dir(source)
+def pending_image_outbox_status(
+    source: str, *, namespace: str | None = None
+) -> dict[str, int]:
+    directory = _image_outbox_dir(source, namespace)
     result = {"pending": 0, "dead_letter": 0, "backoff": 0}
     if not directory.exists():
         return result
@@ -480,7 +489,12 @@ def pending_image_outbox_status(source: str) -> dict[str, int]:
 
 
 async def download_and_upload_product_image(
-    client: httpx.AsyncClient, source: str, product: dict[str, Any]
+    client: httpx.AsyncClient,
+    source: str,
+    product: dict[str, Any],
+    *,
+    only_if_missing: bool = False,
+    outbox_namespace: str | None = None,
 ) -> dict[str, Any]:
     image_url = str(product.get("imagem_url") or "").strip()
     if not image_url:
@@ -547,10 +561,11 @@ async def download_and_upload_product_image(
         "product_url": product_url,
         "source_image_url": image_url,
         "is_generic_fallback": generic,
+        "only_if_missing": only_if_missing,
         "content_type": normalized.content_type,
         "content_sha256": normalized.sha256,
     }
-    directory = _image_outbox_dir(source)
+    directory = _image_outbox_dir(source, outbox_namespace)
     metadata_path = directory / f"{metadata['upload_id']}.json"
     content_path = metadata_path.with_suffix(".bin")
     _atomic_write(content_path, normalized.content)
