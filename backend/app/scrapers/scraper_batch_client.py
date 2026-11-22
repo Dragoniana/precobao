@@ -230,9 +230,24 @@ async def post_image_upload(
                 payload = response.json()
             except ValueError as error:
                 raise BatchSyncError("scraper_image_upload_invalid_response") from error
-            if payload.get("status") != "STORED":
-                raise BatchSyncError("scraper_image_upload_not_confirmed")
-            return payload
+            status = payload.get("status")
+            if status == "STORED":
+                if payload.get("sha256") != metadata.get("content_sha256"):
+                    raise BatchSyncError("scraper_image_upload_hash_unconfirmed")
+                if (
+                    payload.get("catalog_id") is None
+                    and payload.get("offer_id") is None
+                ):
+                    raise BatchSyncError("scraper_image_upload_link_unconfirmed")
+                return payload
+            if status == "SKIPPED_EXISTING_IMAGE":
+                if payload.get("confirmed_existing_image") is not True or (
+                    payload.get("catalog_id") is None
+                    and payload.get("offer_id") is None
+                ):
+                    raise BatchSyncError("scraper_image_existing_link_unconfirmed")
+                return payload
+            raise BatchSyncError("scraper_image_upload_not_confirmed")
         if response.status_code == 429:
             retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
             if attempt >= max_retries:

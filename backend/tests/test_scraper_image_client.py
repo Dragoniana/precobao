@@ -38,7 +38,11 @@ async def test_image_outbox_retries_same_binary_and_upload_id(monkeypatch, tmp_p
         attempts.append((metadata, content))
         if len(attempts) == 1:
             raise BatchSyncError("network_interrupted")
-        return {"status": "STORED"}
+        return {
+            "status": "STORED",
+            "sha256": metadata["content_sha256"],
+            "catalog_id": 101,
+        }
 
     monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
     async with httpx.AsyncClient(
@@ -276,7 +280,12 @@ async def test_generic_source_image_is_downloaded_and_uploaded_as_fallback(
 
     async def upload(_client, metadata, content):
         uploads.append((metadata, content))
-        return {"status": "STORED", "is_generic": True}
+        return {
+            "status": "STORED",
+            "sha256": metadata["content_sha256"],
+            "offer_id": 102,
+            "is_generic": True,
+        }
 
     monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
     product = {
@@ -397,7 +406,12 @@ async def test_generic_pacheco_outbox_replays_and_is_removed_after_confirmation(
 
     async def upload(_client, metadata, image_bytes):
         attempts.append((metadata, image_bytes))
-        return {"status": "STORED", "is_generic": True}
+        return {
+            "status": "STORED",
+            "sha256": metadata.get("content_sha256"),
+            "offer_id": 103,
+            "is_generic": True,
+        }
 
     monkeypatch.setattr(scraper_image_client, "post_image_upload", upload)
 
@@ -416,3 +430,83 @@ async def test_generic_pacheco_outbox_replays_and_is_removed_after_confirmation(
     assert attempts[0][1] == b"preserved image bytes"
     assert not manifest.exists()
     assert not content.exists()
+    audit = next((tmp_path / "confirmed-images").glob("*.json"))
+    assert json.loads(audit.read_text(encoding="utf-8"))["status"] == "STORED"
+    counters = json.loads(
+        (tmp_path / "image-cleanup-counters.json").read_text(encoding="utf-8")
+    )
+    assert counters["confirmed_files_removed"] == 2
+    assert counters["confirmed_bytes_freed"] > len(b"preserved image bytes")
+
+
+@pytest.mark.asyncio
+async def test_confirmed_outbox_restart_finishes_cleanup_without_reupload(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "araujo"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "resume.json"
+    content = outbox / "resume.bin"
+    manifest.write_text(
+        json.dumps(
+            {
+                "upload_id": "aeb90a99-b284-4ea9-9970-25ab645972db",
+                "source": "araujo",
+                "sku": "ARJ101392",
+                "content_sha256": "c" * 64,
+                "status": "CONFIRMED",
+                "confirmation": {
+                    "status": "STORED",
+                    "sha256": "c" * 64,
+                    "catalog_id": 77,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    content.write_bytes(b"confirmed and safe to delete")
+
+    async def unexpected_upload(*_args, **_kwargs):
+        raise AssertionError("confirmed image must not be uploaded again")
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", unexpected_upload)
+    async with httpx.AsyncClient() as client:
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "araujo") == 1
+        )
+    assert not manifest.exists()
+    assert not content.exists()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_upload_keeps_local_image_and_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPER_COLLECTOR_STATE_DIR", str(tmp_path))
+    outbox = tmp_path / "outbox" / "images" / "pacheco"
+    outbox.mkdir(parents=True)
+    manifest = outbox / "pending.json"
+    content = outbox / "pending.bin"
+    manifest.write_text(
+        json.dumps(
+            {
+                "upload_id": "501b8f72-8d5a-4544-8046-46561c275379",
+                "source": "pacheco",
+                "sku": "PCH155349",
+                "content_sha256": "a" * 64,
+                "status": "PENDING",
+            }
+        ),
+        encoding="utf-8",
+    )
+    content.write_bytes(b"keep this until confirmed")
+
+    async def ambiguous_upload(_client, _metadata, _content):
+        return {"status": "STORED", "sha256": "b" * 64, "offer_id": 10}
+
+    monkeypatch.setattr(scraper_image_client, "post_image_upload", ambiguous_upload)
+    async with httpx.AsyncClient() as client:
+        assert (
+            await scraper_image_client.sync_pending_image_outbox(client, "pacheco") == 0
+        )
+    assert manifest.exists()
+    assert content.read_bytes() == b"keep this until confirmed"

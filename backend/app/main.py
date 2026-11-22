@@ -39,6 +39,12 @@ _RATE_LIMIT_POLICIES = {
         600,
         3600,
     ),
+    ("POST", "/api/v1/internal/medicine-images/migration-check"): (
+        "scraper-image-migration-check",
+        "SCRAPER_IMAGE_MIGRATION_CHECK_RATE_LIMIT_PER_HOUR",
+        600,
+        3600,
+    ),
     ("POST", "/auth/jwt/login"): ("login", "RATE_LIMIT_LOGIN_PER_MINUTE", 10, 60),
     ("POST", "/auth/password-reset/request"): (
         "password_reset_request",

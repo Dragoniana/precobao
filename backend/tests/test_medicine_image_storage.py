@@ -29,6 +29,7 @@ from app.services.medicine_images import normalize_medicine_image
 
 SECRET = "test-collector-hmac-secret-with-more-than-32-bytes"
 IMAGE_UPLOAD_ENDPOINT = "/api/v1/internal/medicine-images"
+IMAGE_MIGRATION_CHECK_ENDPOINT = "/api/v1/internal/medicine-images/migration-check"
 
 
 @pytest.fixture
@@ -110,9 +111,9 @@ def image_client(monkeypatch):
         engine.dispose()
 
 
-def _image_bytes() -> bytes:
+def _image_bytes(color: tuple[int, int, int] = (230, 220, 200)) -> bytes:
     output = BytesIO()
-    Image.new("RGB", (480, 640), (230, 220, 200)).save(output, format="PNG")
+    Image.new("RGB", (480, 640), color).save(output, format="PNG")
     normalized = normalize_medicine_image(
         output.getvalue(), declared_content_type="image/png"
     )
@@ -132,6 +133,8 @@ def _request_body(
     ean: str | None = "7897705203095",
     product_url: str = "https://www.araujo.com.br/produto/101392.html",
     is_generic_fallback: bool = False,
+    only_if_missing: bool = False,
+    migration_mode: bool = False,
 ) -> bytes:
     if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         detected = "image/webp"
@@ -147,6 +150,8 @@ def _request_body(
         "product_url": product_url,
         "source_image_url": source_image_url,
         "is_generic_fallback": is_generic_fallback,
+        "only_if_missing": only_if_missing,
+        "migration_mode": migration_mode,
         "content_type": content_type or detected,
         "content_sha256": hashlib.sha256(content).hexdigest(),
     }
@@ -344,16 +349,102 @@ def test_same_bytes_with_new_upload_id_reuse_one_blob(image_client):
         ).status_code
         == 200
     )
-    assert (
-        client.post(
-            IMAGE_UPLOAD_ENDPOINT, content=second, headers=_headers(second)
-        ).status_code
-        == 200
+    duplicate = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=second, headers=_headers(second)
     )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["status"] == "SKIPPED_EXISTING_IMAGE"
     with sessions() as db:
         assert db.query(MedicineImageBlob).count() == 1
         assert db.query(MedicineImageLink).count() == 1
-        assert db.query(MedicineImageUpload).count() == 2
+        assert db.query(MedicineImageUpload).count() == 1
+
+
+def test_upload_never_replaces_existing_catalog_image(image_client):
+    client, sessions, catalog_id = image_client
+    original = _image_bytes()
+    replacement = _image_bytes((15, 90, 180))
+    first_body = _request_body(original)
+    first = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=first_body, headers=_headers(first_body)
+    )
+    assert first.status_code == 200
+    original_sha = first.json()["sha256"]
+
+    replacement_body = _request_body(replacement)
+    response = client.post(
+        IMAGE_UPLOAD_ENDPOINT,
+        content=replacement_body,
+        headers=_headers(replacement_body),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "SKIPPED_EXISTING_IMAGE"
+    assert response.json()["confirmed_existing_image"] is True
+    assert response.json()["sha256"] == original_sha
+    assert response.json()["catalog_id"] == catalog_id
+
+    with sessions() as db:
+        blobs = db.execute(select(MedicineImageBlob)).scalars().all()
+        links = db.execute(select(MedicineImageLink)).scalars().all()
+        assert len(blobs) == 1
+        assert blobs[0].image_data == original
+        assert len(links) == 1
+
+
+def test_hmac_migration_check_is_read_only_when_image_already_exists(image_client):
+    client, sessions, catalog_id = image_client
+    content = _image_bytes()
+    candidate = {
+        "source": "araujo",
+        "sku": "ARJ101392",
+        "ean": "7897705203095",
+        "product_url": "https://www.araujo.com.br/produto/101392.html",
+        "source_image_url": "https://i3-imagens-prd.araujo.com.br/101392/7897705203095.jpg",
+        "content_type": "image/webp",
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+        "is_generic_fallback": False,
+    }
+    body = json.dumps({"candidates": [candidate]}, separators=(",", ":")).encode()
+    rejected = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT,
+        content=body,
+        headers=_headers(body, valid=False),
+    )
+    assert rejected.status_code == 401
+    response = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT, content=body, headers=_headers(body)
+    )
+    assert response.status_code == 200
+    assert response.json()["results"][0]["status"] == "IMAGE_ALREADY_EXISTS"
+    assert response.json()["results"][0]["catalog_id"] == catalog_id
+    with sessions() as db:
+        assert db.query(MedicineImageBlob).count() == 0
+        assert db.query(MedicineImageLink).count() == 0
+        assert db.query(OfertaFarmacia).count() == 1
+
+
+def test_migration_upload_maps_by_ean_without_changing_offer(image_client):
+    client, sessions, catalog_id = image_client
+    with sessions() as db:
+        offer = db.execute(select(OfertaFarmacia)).scalar_one()
+        offer.imagem_url = None
+        original_price = offer.preco
+        original_available = offer.disponivel
+        original_offer_count = db.query(OfertaFarmacia).count()
+        db.commit()
+    content = _image_bytes()
+    body = _request_body(content, migration_mode=True, only_if_missing=True)
+    response = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
+    assert response.status_code == 200
+    assert response.json()["status"] == "STORED"
+    assert response.json()["catalog_id"] == catalog_id
+    with sessions() as db:
+        offer = db.execute(select(OfertaFarmacia)).scalar_one()
+        assert offer.preco == original_price
+        assert offer.disponivel is original_available
+        assert db.query(OfertaFarmacia).count() == original_offer_count
+        link = db.execute(select(MedicineImageLink)).scalar_one()
+        assert link.catalog_id == catalog_id
 
 
 def test_image_upload_rejects_bad_hmac_and_non_image_content(image_client):
@@ -390,18 +481,14 @@ def test_generic_image_with_divergent_ean_is_offer_scoped_and_served_as_fallback
     )
     assert specific.status_code == 200
     assert specific.json()["is_generic"] is False
-    source_url = (
-        "https://i3-imagens-prd.araujo.com.br/128666_7896026306751_1.webp"
-    )
+    source_url = "https://i3-imagens-prd.araujo.com.br/128666_7896026306751_1.webp"
     body = _request_body(
         content,
         source_image_url=source_url,
         is_generic_fallback=True,
     )
 
-    response = client.post(
-        IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body)
-    )
+    response = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
 
     assert response.status_code == 200
     assert response.json()["is_generic"] is True
@@ -438,10 +525,13 @@ def test_generic_image_with_divergent_ean_is_offer_scoped_and_served_as_fallback
     assert image.status_code == 200
     assert image.content == content
     assert image.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
-    assert client.get(
-        image.request.url.path,
-        headers={"If-None-Match": image.headers["etag"]},
-    ).status_code == 304
+    assert (
+        client.get(
+            image.request.url.path,
+            headers={"If-None-Match": image.headers["etag"]},
+        ).status_code
+        == 304
+    )
 
 
 def test_pacheco_generic_upload_allows_ean_conflict_without_catalog_association(

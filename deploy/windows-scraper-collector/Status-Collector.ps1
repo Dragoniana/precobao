@@ -112,6 +112,19 @@ foreach ($source in @('araujo', 'pacheco')) {
         @(Get-ChildItem -LiteralPath $imageOutbox -File -Filter '*.json').Count
     } else { 0 }
     Write-Host "$source`: imagens pendentes=$imageCount"
+    $imageBytes = 0
+    $quarantineCount = 0
+    $quarantineBytes = 0
+    if (Test-Path -LiteralPath $imageOutbox) {
+        $imageBytes = [long](@(Get-ChildItem -LiteralPath $imageOutbox -File -Filter '*.bin' | Measure-Object -Property Length -Sum).Sum)
+        $quarantinePath = Join-Path $imageOutbox 'quarantine\orphaned'
+        if (Test-Path -LiteralPath $quarantinePath) {
+            $quarantinedFiles = @(Get-ChildItem -LiteralPath $quarantinePath -File -Filter '*.bin')
+            $quarantineCount = $quarantinedFiles.Count
+            $quarantineBytes = [long](($quarantinedFiles | Measure-Object -Property Length -Sum).Sum)
+        }
+    }
+    Write-Host "$source`: cópias temporárias na outbox=$(@(Get-ChildItem -LiteralPath $imageOutbox -File -Filter '*.bin' -ErrorAction SilentlyContinue).Count) tamanho=$([math]::Round(($imageBytes / 1MB), 2))MB; órfãos em quarentena=$quarantineCount tamanho=$([math]::Round(($quarantineBytes / 1MB), 2))MB"
     $imageFetchOutbox = Join-Path $settings.state_dir "outbox\image-fetch\$source"
     $imageFetchCount = if (Test-Path $imageFetchOutbox) {
         @(Get-ChildItem -LiteralPath $imageFetchOutbox -File -Filter '*.json').Count
@@ -170,3 +183,46 @@ $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue |
 $tasks | Format-Table -AutoSize
 Write-Host 'Códigos de saída: 0 concluída; 2 acesso negado; 3 parcial; 4 parada segura; 5 limite da origem; 6 falha API/HMAC; 7 erro; 8 desativada; 9 lock ocupado; 10 horário perdido; 11 repetição do slot; 12 limite HTTP externo; 13 limite configurado por execução; 14 limite de medicamentos da janela.'
 Write-Host "Log: $($settings.log_file)"
+$imageCleanupPath = Join-Path $settings.state_dir 'image-cleanup-counters.json'
+if (Test-Path -LiteralPath $imageCleanupPath) {
+    try {
+        $imageCleanup = Read-CollectorJson -Path $imageCleanupPath
+        $freedMb = [math]::Round(([double]$imageCleanup.confirmed_bytes_freed / 1MB), 2)
+        Write-Host "Limpeza confirmada de imagens: arquivos removidos=$($imageCleanup.confirmed_files_removed); espaço liberado acumulado=${freedMb}MB"
+    } catch { Write-Host 'Contadores de limpeza de imagens indisponíveis.' }
+} else {
+    Write-Host 'Limpeza confirmada de imagens: nenhum arquivo contabilizado.'
+}
+$confirmedImagesPath = Join-Path $settings.state_dir 'confirmed-images'
+$confirmedImageCount = if (Test-Path -LiteralPath $confirmedImagesPath) {
+    @(Get-ChildItem -LiteralPath $confirmedImagesPath -File -Filter '*.json').Count
+} else { 0 }
+Write-Host "Imagens com confirmação auditada da Azure: $confirmedImageCount"
+$migrationReportPath = Join-Path $settings.state_dir 'development-image-migration-report.json'
+if (Test-Path -LiteralPath $migrationReportPath) {
+    try {
+        $migrationReport = Read-CollectorJson -Path $migrationReportPath
+        $sent = 0
+        $skipped = 0
+        $failed = 0
+        $eligible = [int]$migrationReport.identity_safe_candidates
+        $alreadyHasImage = [int]$migrationReport.production_check_counts.IMAGE_ALREADY_EXISTS
+        $missingInProduction = [int]$migrationReport.production_check_counts.CATALOG_NOT_FOUND
+        $ambiguous = 0
+        foreach ($reason in @('CATALOG_IDENTITY_AMBIGUOUS', 'SOURCE_PHARMACY_AMBIGUOUS', 'SOURCE_OFFER_AMBIGUOUS')) {
+            $ambiguous += [int]$migrationReport.production_check_counts.$reason
+        }
+        if ($migrationReport.execution_counts) {
+            $sent = [int]$migrationReport.execution_counts.STORED
+            $skipped = [int]$migrationReport.execution_counts.SKIPPED_EXISTING_IMAGE
+            foreach ($property in $migrationReport.execution_counts.PSObject.Properties) {
+                if ($property.Name -notin @('STORED', 'SKIPPED_EXISTING_IMAGE')) {
+                    $failed += [int]$property.Value
+                }
+            }
+        }
+        Write-Host "Migração de imagens de desenvolvimento: elegíveis=$eligible enviadas=$sent já_com_imagem=$alreadyHasImage catálogo_ausente=$missingInProduction ambíguas=$ambiguous outras_pendências=$failed modo=$($migrationReport.mode)"
+    } catch { Write-Host 'Relatório da migração de imagens indisponível.' }
+} else {
+    Write-Host 'Migração de imagens de desenvolvimento: ainda sem relatório.'
+}

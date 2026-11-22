@@ -44,6 +44,11 @@ def _generic_image_cache_path() -> Path:
     return state_dir.resolve() / "generic-image-cache.json"
 
 
+def _confirmed_image_audit_dir() -> Path:
+    state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
+    return state_dir.resolve() / "confirmed-images"
+
+
 def _blocked_source_images_path() -> Path:
     state_dir = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
     return state_dir.resolve() / "blocked-source-images.json"
@@ -125,6 +130,126 @@ def _remember_generic_image(metadata: dict[str, Any]) -> None:
     )
 
 
+def _record_confirmed_image(metadata: dict[str, Any], response: dict[str, Any]) -> None:
+    upload_id = str(metadata.get("upload_id") or "")
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", upload_id):
+        raise BatchSyncError("scraper_image_upload_id_unconfirmed")
+    status = response.get("status")
+    linked = (
+        response.get("catalog_id") is not None or response.get("offer_id") is not None
+    )
+    if status == "STORED":
+        if response.get("sha256") != metadata.get("content_sha256") or not linked:
+            raise BatchSyncError("scraper_image_upload_storage_unconfirmed")
+    elif status == "SKIPPED_EXISTING_IMAGE":
+        if response.get("confirmed_existing_image") is not True or not linked:
+            raise BatchSyncError("scraper_image_existing_link_unconfirmed")
+    else:
+        raise BatchSyncError("scraper_image_upload_not_confirmed")
+    record = {
+        "upload_id": upload_id,
+        "source": metadata.get("source"),
+        "sku": metadata.get("sku"),
+        "ean": metadata.get("ean"),
+        "candidate_sha256": metadata.get("content_sha256"),
+        "stored_sha256": response.get("sha256"),
+        "catalog_id": response.get("catalog_id"),
+        "offer_id": response.get("offer_id"),
+        "status": response.get("status"),
+        "size_bytes": response.get("size_bytes"),
+        "confirmed_at": datetime.now(UTC).isoformat(),
+    }
+    content = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    _atomic_write(_confirmed_image_audit_dir() / f"{upload_id}.json", content)
+
+
+def _record_local_image_cleanup(*, files: int, bytes_freed: int) -> None:
+    if files <= 0:
+        return
+    path = (
+        Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
+        / "image-cleanup-counters.json"
+    )
+    try:
+        counters = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(counters, dict):
+            counters = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        counters = {}
+    counters["confirmed_files_removed"] = (
+        int(counters.get("confirmed_files_removed", 0)) + files
+    )
+    counters["confirmed_bytes_freed"] = (
+        int(counters.get("confirmed_bytes_freed", 0)) + bytes_freed
+    )
+    counters["updated_at"] = datetime.now(UTC).isoformat()
+    try:
+        _atomic_write(
+            path,
+            json.dumps(counters, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+        )
+    except OSError:
+        logger.warning("scraper_image_cleanup_counter_write_failed")
+
+
+def _has_confirmed_upload(upload_id: str) -> bool:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", upload_id):
+        return False
+    try:
+        record = json.loads(
+            (_confirmed_image_audit_dir() / f"{upload_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return False
+    return (
+        record.get("upload_id") == upload_id
+        and record.get("status") in {"STORED", "SKIPPED_EXISTING_IMAGE"}
+        and bool(record.get("catalog_id") or record.get("offer_id"))
+    )
+
+
+def _remove_confirmed_orphan(path: Path, upload_id: str) -> bool:
+    if not _has_confirmed_upload(upload_id):
+        return False
+    try:
+        size = path.stat().st_size
+        path.unlink()
+    except OSError:
+        return False
+    _record_local_image_cleanup(files=1, bytes_freed=size)
+    return True
+
+
+def _finalize_confirmed_pending_image(
+    metadata_path: Path, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    confirmation = metadata.get("confirmation")
+    if not isinstance(confirmation, dict):
+        raise BatchSyncError("scraper_image_confirmation_record_missing")
+    _record_confirmed_image(metadata, confirmation)
+    content_path = metadata_path.with_suffix(".bin")
+    removed_files = 0
+    bytes_freed = 0
+    if content_path.is_file():
+        size = content_path.stat().st_size
+        content_path.unlink()
+        removed_files += 1
+        bytes_freed += size
+    if metadata_path.is_file():
+        size = metadata_path.stat().st_size
+        metadata_path.unlink()
+        removed_files += 1
+        bytes_freed += size
+    _record_local_image_cleanup(files=removed_files, bytes_freed=bytes_freed)
+    return confirmation
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
@@ -177,6 +302,8 @@ async def _submit_pending_image(
     client: httpx.AsyncClient, metadata_path: Path
 ) -> dict[str, Any]:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("status") == "CONFIRMED":
+        return _finalize_confirmed_pending_image(metadata_path, metadata)
     if metadata.get("status") == "DEAD_LETTER":
         raise BatchSyncError("scraper_image_upload_dead_letter")
     next_retry_at = metadata.get("next_retry_at")
@@ -264,13 +391,17 @@ async def _submit_pending_image(
             },
         )
         raise
+    _record_confirmed_image(metadata, result)
     _remember_generic_image(metadata)
-    # The manifest is the outbox commit marker. Remove it first so an
-    # interruption can leave only a harmless orphaned binary, never a broken
-    # manifest that blocks the next replay.
-    metadata_path.unlink(missing_ok=True)
-    content_path.unlink(missing_ok=True)
-    return result
+    # Persist confirmation before local cleanup. If interrupted, replay performs
+    # cleanup only and does not issue another upload.
+    metadata["status"] = "CONFIRMED"
+    metadata["confirmation"] = result
+    _atomic_write(
+        metadata_path,
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+    return _finalize_confirmed_pending_image(metadata_path, metadata)
 
 
 async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> int:
@@ -281,9 +412,16 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
     orphan_directory = directory / "quarantine" / "orphaned"
     for content_path in directory.glob("*.bin"):
         if content_path.stem not in manifests:
+            if _remove_confirmed_orphan(content_path, content_path.stem):
+                continue
             orphan_directory.mkdir(parents=True, exist_ok=True)
             destination = orphan_directory / f"{content_path.stem}-{uuid4().hex}.bin"
             content_path.replace(destination)
+    if orphan_directory.exists():
+        for content_path in orphan_directory.glob("*.bin"):
+            upload_id = content_path.name[:36]
+            if content_path.name[36:37] == "-":
+                _remove_confirmed_orphan(content_path, upload_id)
     uploaded = 0
     for metadata_path in sorted(directory.glob("*.json")):
         try:
@@ -301,14 +439,14 @@ async def sync_pending_image_outbox(client: httpx.AsyncClient, source: str) -> i
             logger.warning("scraper_image_outbox_invalid", extra={"source": source})
             continue
         try:
-            await _submit_pending_image(client, metadata_path)
+            result = await _submit_pending_image(client, metadata_path)
         except (OSError, json.JSONDecodeError):
             logger.warning("scraper_image_outbox_invalid", extra={"source": source})
             continue
         except BatchSyncError:
             continue
         else:
-            uploaded += 1
+            uploaded += result.get("status") == "STORED"
     return uploaded
 
 

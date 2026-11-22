@@ -60,3 +60,32 @@ As tarefas usam logon interativo para que o mesmo usuário Windows possa descrip
 ## Segredo e rotação
 
 Use segredo aleatório exclusivo com pelo menos 32 bytes; não reutilize JWT ou credenciais de usuários. Para rotação, suspenda as tarefas, atualize o HMAC na API por canal seguro e então rode `Set-CollectorSecret.ps1` com o novo valor antes de reabilitar as tarefas. Faça isso dentro de uma janela curta; segredo inválido deixa o lote preservado no outbox e interrompe a sincronização.
+# Migrar imagens já existentes no PostgreSQL de desenvolvimento
+
+`Sync-DevelopmentImages.ps1` lê somente registros de imagens do PostgreSQL de
+desenvolvimento e consulta a API HTTPS/HMAC para identificar medicamentos
+correspondentes e sem imagem em produção. O padrão é `-DryRun` implícito: a API
+somente verifica candidatos e nenhum byte é enviado. O relatório sanitizado fica
+em `development-image-migration-report.json` dentro do diretório de estado do
+coletor. Configure `PRECOBAO_DEVELOPMENT_DATABASE_URL` no processo chamador sem
+colocá-la em argumentos, arquivos versionados ou logs.
+
+Após revisar o relatório e confirmar um backup recuperável da produção, a
+execução real exige ambos os parâmetros `-Execute -BackupVerified`. O script
+revalida cada medicamento imediatamente antes do upload, envia uma imagem por
+medicamento via HTTPS/HMAC e mantém o PostgreSQL de desenvolvimento em transação
+somente de leitura. Produção não recebe escrita direta do computador Windows.
+Um EAN inválido, associação ambígua, fonte incompatível ou imagem existente em
+produção causa uma rejeição/ignoragem sem alterar catálogo, ofertas ou preços.
+Reexecutar é seguro: o servidor verifica novamente a imagem e a associação.
+
+Os scrapers removem os arquivos temporários `.bin` e o manifesto somente após a
+API confirmar o hash e a associação (ou confirmar uma imagem já existente que
+torna o fallback desnecessário). A confirmação é gravada em metadados mínimos
+antes da exclusão. Se o processo parar durante a limpeza, a próxima execução a
+conclui sem reenviar. Arquivos sem confirmação continuam preservados ou são
+mantidos em quarentena. As imagens originais no PostgreSQL de desenvolvimento
+nunca são excluídas por essa ferramenta.
+
+O status mostra fila, tamanho dos temporários, órfãos/quarentena, confirmações e
+espaço liberado. Nenhum agendamento é criado ou habilitado por esses scripts.
