@@ -89,9 +89,12 @@ def test_rejected_item_queue_is_persistent_and_idempotent(tmp_path, monkeypatch)
     ]
     scraper_collector._persist_rejected_products("pacheco", batch, rejected)
     scraper_collector._persist_rejected_products("pacheco", batch, rejected)
+    repeated_batch = {**batch, "batch_id": "batch-two"}
+    scraper_collector._persist_rejected_products("pacheco", repeated_batch, rejected)
     path = tmp_path / "rejected" / "pacheco.json"
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert len(stored) == 1
+    assert stored[0]["batch_id"] == "batch-one"
     assert stored[0]["product"]["preco"] == 9.4
     assert stored[0]["reason"] == "ean_catalog_mismatch"
 

@@ -159,11 +159,17 @@ def _persist_rejected_products(
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("SCRAPER_REJECTED_QUEUE_INVALID") from error
-    indexed = {
-        (item.get("batch_id"), item.get("sku_interno"), item.get("reason")): item
-        for item in existing
-        if isinstance(item, dict)
-    }
+    indexed: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("source") or source),
+            str(item.get("sku_interno") or ""),
+            str(item.get("reason") or ""),
+            str(item.get("link") or ""),
+        )
+        indexed.setdefault(key, item)
     products = {
         (str(product.get("sku_interno")), str(product.get("link"))): product
         for product in batch.get("products", [])
@@ -172,14 +178,15 @@ def _persist_rejected_products(
         sku = str(item.get("sku_interno") or "")
         link = str(item.get("link") or "")
         product = products.get((sku, link))
-        key = (batch.get("batch_id"), sku, item.get("reason"))
+        reason = str(item.get("reason") or "")
+        key = (source, sku, reason, link)
         if key in indexed:
             continue
         indexed[key] = {
             "batch_id": batch.get("batch_id"),
             "source": source,
             "rejected_at": datetime.now(UTC).isoformat(),
-            "reason": item.get("reason"),
+            "reason": reason,
             "product_id": item.get("product_id"),
             "sku_interno": sku,
             "ean": item.get("ean"),
