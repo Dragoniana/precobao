@@ -115,7 +115,7 @@ async def _replay_image_fetch_outbox(
     client: httpx.AsyncClient, source: str, state: dict[str, Any]
 ) -> str | None:
     """Resume deferred source-image downloads, returning a controlled stop code."""
-    max_attempts = int(os.getenv("SCRAPER_IMAGE_REPLAY_MAX_PER_RUN", "5"))
+    max_attempts = int(os.getenv("SCRAPER_IMAGE_REPLAY_MAX_PER_RUN", "15"))
     max_retries = int(os.getenv("SCRAPER_IMAGE_FETCH_MAX_ATTEMPTS", "3"))
     if max_attempts < 0 or max_retries < 1:
         raise ValueError("Invalid image replay limits")

@@ -56,7 +56,7 @@ if (-not (Test-Path $settingsPath)) {
         max_medicines_per_source_share = 25
         max_http_requests_per_window = 50
         max_http_requests_per_source_per_window = 25
-        max_image_downloads_per_run = 5
+        max_image_downloads_per_run = 15
         source_schedule_times = @{
             araujo = @('08:00', '20:00')
             pacheco = @('10:00', '22:00')

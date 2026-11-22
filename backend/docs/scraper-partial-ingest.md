@@ -60,7 +60,7 @@ The scheduled PowerShell runner stops at the configured ceiling rather than
 waiting for the window to roll over. HTTP 403/429, `Retry-After`, cooldown, and
 TLS protections remain independent and active.
 
-Image-fetch work is replayed separately from catalog collection, at most five
+Image-fetch work is replayed separately from catalog collection, at most 15
 queue items per source run by default. It does not reserve another medicine
 unit, but its external downloads still consume the source's HTTP allowance.
 Successful price/offers can therefore sync while an image remains deferred.

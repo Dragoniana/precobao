@@ -49,6 +49,7 @@ if (Test-Path -LiteralPath $rateStatePath) {
 }
 $medicineLimit = if ($settings.PSObject.Properties.Name -contains 'max_medicines_per_window') { [int]$settings.max_medicines_per_window } else { 50 }
 $medicineShare = if ($settings.PSObject.Properties.Name -contains 'max_medicines_per_source_share') { [int]$settings.max_medicines_per_source_share } else { 25 }
+$imageReplayLimit = if ($settings.PSObject.Properties.Name -contains 'max_image_downloads_per_run') { [int]$settings.max_image_downloads_per_run } else { 15 }
 $medicinePath = Join-Path $settings.state_dir 'medicine-budget\processed-medicines.json'
 if (Test-Path -LiteralPath $medicinePath) {
     try {
@@ -147,7 +148,7 @@ foreach ($source in @('araujo', 'pacheco')) {
     }
     $imageFetchBlocked = $imageFetchBlocked403 + $imageFetchBlocked404
     $imageFetchOrdinary = [math]::Max(0, $imageFetchCount - $imageFetchBlocked - $imageFetchGeneric - $imageFetchInvalid)
-    Write-Host "$source downloads de imagem: pendentes=$imageFetchCount aguardando/retry=$imageFetchRetry dead_letter=$imageFetchDeadLetter URL_real=$imageFetchOrdinary generica=$imageFetchGeneric bloqueada_403=$imageFetchBlocked403 bloqueada_404=$imageFetchBlocked404 URL_invalida=$imageFetchInvalid"
+    Write-Host "$source downloads de imagem: pendentes=$imageFetchCount maximo_tentativas_execucao=$imageReplayLimit aguardando/retry=$imageFetchRetry dead_letter=$imageFetchDeadLetter URL_real=$imageFetchOrdinary generica=$imageFetchGeneric bloqueada_403=$imageFetchBlocked403 bloqueada_404=$imageFetchBlocked404 URL_invalida=$imageFetchInvalid"
     $lastSlotPath = Join-Path $StateRoot "last-scheduled-slot-$source.txt"
     if (Test-Path -LiteralPath $lastSlotPath) {
         $lastSlot = (Read-CollectorUtf8 -Path $lastSlotPath).Trim()
