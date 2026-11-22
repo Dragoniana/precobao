@@ -8,6 +8,12 @@ import pytest
 from scripts import image_backfill
 
 
+def test_empty_backfill_outbox_does_not_hold_execution():
+    report = image_backfill._new_execution_report("pacheco")
+    assert report["pending_outbox_hold"] is False
+    assert report["rate_limited"] is False
+
+
 @pytest.mark.asyncio
 async def test_pacheco_partial_product_response_is_rejected(monkeypatch):
     class Client:

@@ -429,6 +429,27 @@ def _ready_retries(state: dict[str, Any]) -> list[dict[str, Any]]:
     return due
 
 
+def _new_execution_report(source: str | None) -> dict[str, Any]:
+    return {
+        "operation": "execute",
+        "source": source or "both",
+        "processed": 0,
+        "stored": 0,
+        "already_stored": 0,
+        "existing_valid": 0,
+        "generic_skipped": 0,
+        "identity_conflicts": 0,
+        "no_valid_image": 0,
+        "retry_pending": 0,
+        "blocked_sources": 0,
+        "stored_by_source": {"araujo": 0, "pacheco": 0},
+        "stored_items": [],
+        "reason_counts": {},
+        "rate_limited": False,
+        "pending_outbox_hold": False,
+    }
+
+
 async def _run(args: argparse.Namespace) -> int:
     headers = {
         "Accept": "application/json",
@@ -478,23 +499,7 @@ async def _run(args: argparse.Namespace) -> int:
             state["status"] = "RUNNING"
             state["updated_at"] = datetime.now(UTC).isoformat()
             _atomic_json(state_path, state)
-            report = {
-                "operation": "execute",
-                "source": args.source or "both",
-                "processed": 0,
-                "stored": 0,
-                "already_stored": 0,
-                "existing_valid": 0,
-                "generic_skipped": 0,
-                "identity_conflicts": 0,
-                "no_valid_image": 0,
-                "retry_pending": 0,
-                "blocked_sources": 0,
-                "stored_by_source": {"araujo": 0, "pacheco": 0},
-                "stored_items": [],
-                "reason_counts": {},
-                "rate_limited": False,
-            }
+            report = _new_execution_report(args.source)
             max_items = args.limit
             for source in (args.source,) if args.source else ("araujo", "pacheco"):
                 try:
