@@ -82,6 +82,13 @@ produção causa uma rejeição/ignoragem sem alterar catálogo, ofertas ou pre�
 O checkpoint local registra cada entrega conferida e permite retomar após falha.
 Reexecutar é seguro: o servidor verifica novamente a imagem e a associação.
 
+Depois de um piloto aprovado, `-Execute -BackupVerified -AllEligible` percorre
+os candidatos em sequência, respeitando a pré-checagem HMAC, a revalidação por
+medicamento e uma pausa padrão de 7,5 segundos entre envios. O modo completo
+pode ser interrompido e retomado pelo checkpoint. A variável
+`SCRAPER_IMAGE_TRANSFER_DELAY_SECONDS` aceita valores entre 6,5 e 60 segundos
+para respeitar o limite de chamadas da API.
+
 Os scrapers removem os arquivos temporários `.bin` e o manifesto somente após a
 API confirmar o hash e a associação (ou confirmar uma imagem já existente que
 torna o fallback desnecessário). A confirmação é gravada em metadados mínimos

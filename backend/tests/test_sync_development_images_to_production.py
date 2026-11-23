@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from PIL import Image
 from sqlalchemy import (
@@ -25,6 +26,7 @@ from app.services.medicine_images import normalize_medicine_image
 from scripts.sync_development_images_to_production import (
     _candidate_key,
     _catalog_image_url,
+    _check_candidates,
     _load_checkpoint,
     _load_descriptors,
     _load_scraped_image_candidates,
@@ -81,6 +83,12 @@ def test_execute_requires_a_small_explicit_limit(monkeypatch):
     with pytest.raises(SystemExit):
         image_sync.main()
 
+    monkeypatch.setattr(
+        "sys.argv", ["image-sync", "--execute", "--all-eligible", "--limit", "3"]
+    )
+    with pytest.raises(SystemExit):
+        image_sync.main()
+
 
 def test_migration_checkpoint_is_atomic_and_reusable(tmp_path, monkeypatch):
     report = tmp_path / "development-image-migration-report.json"
@@ -96,6 +104,54 @@ def test_migration_checkpoint_is_atomic_and_reusable(tmp_path, monkeypatch):
 
     assert _load_checkpoint() == {key: "STORED"}
     assert not report.with_name("development-image-migration-checkpoint.tmp").exists()
+
+
+@pytest.mark.asyncio
+async def test_migration_check_retries_after_rate_limit(monkeypatch):
+    monkeypatch.setenv(
+        "SCRAPER_IMAGE_INGEST_URL",
+        "https://precobao.app/backend/api/v1/internal/medicine-images",
+    )
+    candidate = image_sync.Candidate(
+        dev_catalog_id=1,
+        blob_id=None,
+        source="pacheco",
+        sku="PCH155349",
+        ean="7897705203095",
+        product_url="https://www.drogariaspacheco.com.br/produto/155349/p",
+        source_image_url="https://drogariaspacheco.vteximg.com.br/7897705203095.jpg",
+        content_type="image/webp",
+        content_sha256="a" * 64,
+        size_bytes=64,
+        is_generic_fallback=False,
+    )
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "source": candidate.source,
+                        "sku": candidate.sku,
+                        "ean": candidate.ean,
+                        "content_sha256": candidate.content_sha256,
+                        "status": "ELIGIBLE",
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await _check_candidates(client, [candidate], "test-secret-" * 4)
+
+    assert calls == 2
+    assert result[0]["status"] == "ELIGIBLE"
 
 
 def test_candidate_uses_development_ean_and_real_image_priority(monkeypatch):

@@ -33,6 +33,7 @@ from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.scrapers.scraper_batch_client import (
     BatchSyncError,
     _image_endpoint,
+    _retry_after_seconds,
     _signed_headers,
     post_image_upload,
 )
@@ -46,6 +47,7 @@ from app.services.medicine_images import (
 _UPLOAD_NAMESPACE = UUID("bc8517a9-ff04-49f3-8f2a-7b0cb8987d93")
 _BATCH_SIZE = 100
 _MAX_UPLOADS_PER_RUN = 50
+_DEFAULT_TRANSFER_DELAY_SECONDS = 7.5
 
 
 @dataclass(frozen=True)
@@ -619,13 +621,36 @@ async def _check_candidates(
         body = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         ).encode("utf-8")
-        response = await client.post(
-            url,
-            content=body,
-            headers=_signed_headers(body, secret),
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"migration_check_http_{response.status_code}")
+        delay = 2.0
+        for attempt in range(4):
+            try:
+                response = await client.post(
+                    url,
+                    content=body,
+                    headers=_signed_headers(body, secret),
+                )
+            except httpx.HTTPError as error:
+                if attempt == 3:
+                    raise RuntimeError("migration_check_transport_error") from error
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+                continue
+            if response.status_code == 429:
+                if attempt == 3:
+                    raise RuntimeError("migration_check_rate_limited")
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                await asyncio.sleep(
+                    float(retry_after) if retry_after is not None else delay
+                )
+                delay = min(delay * 2, 30.0)
+                continue
+            if response.status_code >= 500 and attempt < 3:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+                continue
+            if response.status_code != 200:
+                raise RuntimeError(f"migration_check_http_{response.status_code}")
+            break
         decoded = response.json()
         remote = decoded.get("results")
         if not isinstance(remote, list) or len(remote) != len(batch):
@@ -722,7 +747,16 @@ async def _run(args: argparse.Namespace) -> int:
     completed = _load_checkpoint() if is_execute else {}
     if is_execute:
         report["execution_limit"] = args.limit
+        report["execution_scope"] = "all_eligible" if args.all_eligible else "capped"
         report["checkpoint_completed_before_run"] = len(completed)
+        transfer_delay = float(
+            os.getenv(
+                "SCRAPER_IMAGE_TRANSFER_DELAY_SECONDS",
+                str(_DEFAULT_TRANSFER_DELAY_SECONDS),
+            )
+        )
+        if not 6.5 <= transfer_delay <= 60.0:
+            raise RuntimeError("image_transfer_delay_outside_safe_range")
     try:
         with engine.connect() as connection:
             transaction = connection.begin()
@@ -780,6 +814,11 @@ async def _run(args: argparse.Namespace) -> int:
                         if is_execute:
                             outcomes = Counter()
                             attempted = 0
+                            upload_limit = (
+                                len(candidates)
+                                if args.all_eligible
+                                else int(args.limit)
+                            )
                             for candidate, initial in zip(
                                 candidates, checked, strict=True
                             ):
@@ -794,7 +833,7 @@ async def _run(args: argparse.Namespace) -> int:
                                     report["execution_counts"] = dict(outcomes)
                                     _write_report(report)
                                     continue
-                                if attempted >= args.limit:
+                                if attempted >= upload_limit:
                                     break
                                 # Recheck immediately before each write to close
                                 # races with the regular scraper.
@@ -866,7 +905,8 @@ async def _run(args: argparse.Namespace) -> int:
                                 attempted += 1
                                 report["execution_counts"] = dict(outcomes)
                                 _write_report(report)
-                                await asyncio.sleep(0.25)
+                                if attempted < upload_limit:
+                                    await asyncio.sleep(transfer_delay)
                             report["execution_counts"] = dict(outcomes)
                 transaction.rollback()
             except Exception:
@@ -910,13 +950,18 @@ def main() -> int:
             f"{_MAX_UPLOADS_PER_RUN} uploads per invocation."
         ),
     )
+    parser.add_argument(
+        "--all-eligible",
+        action="store_true",
+        help="Process every eligible candidate sequentially with rate-safe pacing.",
+    )
     args = parser.parse_args()
     if args.limit is not None and not 1 <= args.limit <= _MAX_UPLOADS_PER_RUN:
         parser.error(f"--limit must be between 1 and {_MAX_UPLOADS_PER_RUN}")
-    if args.execute and args.limit is None:
-        parser.error(
-            f"--execute requires an explicit --limit (maximum {_MAX_UPLOADS_PER_RUN})"
-        )
+    if args.execute and (args.all_eligible == (args.limit is not None)):
+        parser.error("--execute requires exactly one of --limit or --all-eligible")
+    if not args.execute and (args.limit is not None or args.all_eligible):
+        parser.error("--limit and --all-eligible require --execute")
     try:
         return asyncio.run(_run(args))
     except Exception as error:
