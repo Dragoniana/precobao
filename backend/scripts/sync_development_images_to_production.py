@@ -532,7 +532,7 @@ def _load_scraped_image_candidates(
             )
         )
 
-    selected: dict[tuple[int, bool], Candidate] = {}
+    selected: dict[tuple[int, str, bool], Candidate] = {}
     for image_id, item in records.items():
         identities = item["identities"]
         if not identities:
@@ -630,14 +630,14 @@ def _load_scraped_image_candidates(
             source_size_bytes=item["size_bytes"],
             source_content_type=item["content_type"],
         )
-        key = (catalog_id, generic_fallback)
+        key = (catalog_id, source, generic_fallback)
         if key not in selected:
             selected[key] = candidate
         else:
             counts[f"scraped_{source}_duplicate_catalog"] += 1
 
     counts["scraped_candidate_medicines"] = len(
-        {catalog_id for catalog_id, _ in selected}
+        {catalog_id for catalog_id, _source, _generic in selected}
     )
     counts["scraped_candidate_images"] = len(selected)
     counts["scraped_candidate_bytes"] = sum(
@@ -822,12 +822,21 @@ async def _run(args: argparse.Namespace) -> int:
                     # normalized blob store as a complementary source when the
                     # raw archive has no safe candidate for a local catalog.
                     combined = {
-                        (item.dev_catalog_id, item.is_generic_fallback): item
+                        (
+                            item.dev_catalog_id,
+                            item.source,
+                            item.is_generic_fallback,
+                        ): item
                         for item in scraped_candidates
                     }
                     for item in candidates:
                         combined.setdefault(
-                            (item.dev_catalog_id, item.is_generic_fallback), item
+                            (
+                                item.dev_catalog_id,
+                                item.source,
+                                item.is_generic_fallback,
+                            ),
+                            item,
                         )
                     candidates = list(combined.values())
                     counts["candidate_medicines"] = len(
