@@ -48,6 +48,7 @@ GENERIC_IMAGE_MARKERS = (
     "de-referencia-tarja-vermelha",
     "referencia-tarja-vermelha",
     "tarja-vermelha-em-comprimido",
+    "genericos-tarja",
 )
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 KNOWN_GENERIC_ASSETS = {
