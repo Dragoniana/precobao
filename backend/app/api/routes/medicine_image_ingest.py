@@ -44,7 +44,7 @@ class MedicineImageUploadMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     upload_id: UUID
-    source: Literal["araujo", "pacheco"]
+    source: Literal["araujo", "pacheco", "indiana"]
     sku: str = Field(min_length=3, max_length=80)
     ean: str | None = Field(default=None, max_length=14)
     product_url: str = Field(min_length=1, max_length=500)
@@ -59,7 +59,7 @@ class MedicineImageUploadMetadata(BaseModel):
 class MedicineImageMigrationCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["araujo", "pacheco"]
+    source: Literal["araujo", "pacheco", "indiana"]
     sku: str = Field(min_length=3, max_length=80)
     ean: str = Field(min_length=13, max_length=13)
     product_url: str = Field(min_length=1, max_length=500)
@@ -76,9 +76,12 @@ class MedicineImageMigrationCheckRequest(BaseModel):
 
 
 def _source_enabled(source: str) -> bool:
+    configured = os.getenv("SCRAPER_IMAGE_INGEST_ALLOWED_SOURCES") or os.getenv(
+        "SCRAPER_INGEST_ALLOWED_SOURCES", ""
+    )
     allowed = {
         item.strip().casefold()
-        for item in os.getenv("SCRAPER_INGEST_ALLOWED_SOURCES", "").split(",")
+        for item in configured.split(",")
         if item.strip()
     }
     return source in allowed
@@ -87,7 +90,19 @@ def _source_enabled(source: str) -> bool:
 def _pharmacy_matches_source(name: str, source: str) -> bool:
     normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     normalized = normalized.casefold()
-    return ("araujo" in normalized) if source == "araujo" else ("pacheco" in normalized)
+    return source in normalized
+
+
+def _source_contract(source: str) -> tuple[str, str]:
+    contracts = {
+        "araujo": ("ARJ", "Araujo"),
+        "pacheco": ("PCH", "Pacheco"),
+        "indiana": ("IND", "Indiana"),
+    }
+    try:
+        return contracts[source]
+    except KeyError as error:
+        raise ValueError("unsupported_image_source") from error
 
 
 def _upload_response(
@@ -163,7 +178,7 @@ def _existing_image_response(
 def _migration_target(
     db: Session, candidate: MedicineImageMigrationCheck
 ) -> tuple[CatalogoBase | None, Farmacia | None, OfertaFarmacia | None, str]:
-    prefix = "ARJ" if candidate.source == "araujo" else "PCH"
+    prefix, pharmacy_name = _source_contract(candidate.source)
     if not re.fullmatch(rf"{prefix}\d+", candidate.sku):
         return None, None, None, "INVALID_SOURCE_SKU"
     if not validar_ean13(candidate.ean):
@@ -174,7 +189,7 @@ def _migration_target(
     rejection = offer_image_delivery_rejection_reason(
         candidate.source_image_url,
         candidate.product_url,
-        "Araujo" if candidate.source == "araujo" else "Pacheco",
+        pharmacy_name,
     )
     if rejection:
         return None, None, None, "INVALID_IMAGE_SOURCE"
@@ -352,7 +367,7 @@ async def ingest_medicine_image(
                 detail=f"image_migration_{reason.casefold()}",
             )
     else:
-        prefix = "ARJ" if metadata.source == "araujo" else "PCH"
+        prefix, pharmacy_name = _source_contract(metadata.source)
         if not re.fullmatch(rf"{prefix}\d+", metadata.sku):
             raise HTTPException(status_code=422, detail="image_sku_source_mismatch")
         offers = db.execute(
@@ -391,7 +406,7 @@ async def ingest_medicine_image(
         rejection = offer_image_delivery_rejection_reason(
             metadata.source_image_url,
             metadata.product_url,
-            "Araujo" if metadata.source == "araujo" else "Pacheco",
+            pharmacy_name,
         )
         if rejection:
             raise HTTPException(status_code=422, detail="invalid_image_source")

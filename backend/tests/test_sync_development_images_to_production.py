@@ -365,7 +365,22 @@ def test_invalid_blob_hash_is_not_a_candidate():
     assert counts["invalid_hash_or_size"] == 1
 
 
-def test_scrape_archive_is_read_as_primary_candidate_source():
+@pytest.mark.parametrize(
+    ("image_url", "is_generic"),
+    [
+        (
+            "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1138787/7897705203095.jpg",
+            False,
+        ),
+        (
+            "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1/caixa-medicamento.webp",
+            True,
+        ),
+    ],
+)
+def test_scrape_archive_is_candidate_source_for_specific_and_generic_images(
+    image_url, is_generic
+):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     archive_metadata = MetaData()
@@ -384,9 +399,6 @@ def test_scrape_archive_is_read_as_primary_candidate_source():
     Image.new("RGB", (64, 80), (95, 145, 190)).save(raw_stream, format="PNG")
     raw = raw_stream.getvalue()
     raw_digest = hashlib.sha256(raw).hexdigest()
-    image_url = (
-        "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1138787/7897705203095.jpg"
-    )
     with Session(engine) as db:
         pharmacy = Farmacia(
             cnpj="12345678000200",
@@ -431,6 +443,7 @@ def test_scrape_archive_is_read_as_primary_candidate_source():
         assert candidate.source == "pacheco"
         assert candidate.sku == "PCH155349"
         assert candidate.ean == "7897705203095"
+        assert candidate.is_generic_fallback is is_generic
         assert candidate.content_type in {"image/jpeg", "image/webp"}
         assert (
             hashlib.sha256(_source_image_bytes(db, candidate)).hexdigest()

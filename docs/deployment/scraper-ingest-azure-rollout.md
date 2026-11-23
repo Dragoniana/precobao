@@ -97,3 +97,5 @@ sudo chmod 0440 /opt/preco-bao/secrets/scraper_ingest_hmac
 ```
 
 No `.env.azure`, defina apenas `SCRAPER_INGEST_HMAC_SECRET_FILE=/run/secrets/scraper_ingest_hmac`, `SCRAPER_INGEST_HMAC_SECRET_HOST_FILE=/opt/preco-bao/secrets/scraper_ingest_hmac`, mantenha `SCRAPER_INGEST_HMAC_SECRET` vazio e configure `SCRAPER_INGEST_ALLOWED_SOURCES=araujo,pacheco`. Não use `docker compose config` para imprimir saída não filtrada quando variáveis secretas estiverem configuradas.
+
+The image-only migration endpoint can use the separate `SCRAPER_IMAGE_INGEST_ALLOWED_SOURCES` allowlist. Set it explicitly when enabling a pharmacy's image migration; for example, `araujo,pacheco,indiana` permits image uploads from those sources while leaving the medicine/offer ingestion allowlist unchanged. Do not add Indiana to `SCRAPER_INGEST_ALLOWED_SOURCES` solely for an image migration, because that setting also controls scraper batch ingestion.

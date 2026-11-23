@@ -70,6 +70,9 @@ def image_client(monkeypatch):
     monkeypatch.setenv("SCRAPER_INGEST_HMAC_SECRET", SECRET)
     monkeypatch.delenv("SCRAPER_INGEST_HMAC_SECRET_FILE", raising=False)
     monkeypatch.setenv("SCRAPER_INGEST_ALLOWED_SOURCES", "araujo,pacheco")
+    monkeypatch.setenv(
+        "SCRAPER_IMAGE_INGEST_ALLOWED_SOURCES", "araujo,pacheco,indiana"
+    )
     monkeypatch.setenv("SCRAPER_IMAGE_MAX_BYTES", str(512 * 1024))
     monkeypatch.setenv("SCRAPER_IMAGE_MAX_DIMENSION", "1200")
     with sessions() as db:
@@ -434,6 +437,100 @@ def test_migration_check_treats_legacy_external_url_as_candidate_and_is_read_onl
     )
     assert stored_check.status_code == 200
     assert stored_check.json()["results"][0]["status"] == "IMAGE_ALREADY_EXISTS"
+
+
+def test_indiana_migration_image_requires_its_own_source_identity(
+    image_client, monkeypatch
+):
+    client, sessions, _catalog_id = image_client
+    with sessions() as db:
+        pharmacy = Farmacia(
+            cnpj="12345678000276",
+            razao_social="Farmácia Indiana S.A.",
+            nome_fantasia="Farmácia Indiana",
+            endereco_completo="Governador Valadares - MG",
+        )
+        catalog = CatalogoBase(
+            codigo_barras="7896714231143",
+            name_search="Medicamento Indiana de teste",
+            principio_ativo="Substância teste",
+            laboratorio="Laboratório teste",
+            categorias=[],
+        )
+        db.add_all([pharmacy, catalog])
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno="IND12345",
+                preco=10.25,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem="https://www.farmaciaindiana.com.br/produto/ind12345",
+                imagem_url="https://farmaciaindiana.vteximg.com.br/arquivos/7896714231143.jpg",
+                contexto_chave="global",
+                farmacia_id=pharmacy.id,
+                catalogo_id=catalog.id,
+            )
+        )
+        db.commit()
+
+    content = _image_bytes((55, 130, 210))
+    candidate = {
+        "source": "indiana",
+        "sku": "IND12345",
+        "ean": "7896714231143",
+        "product_url": "https://www.farmaciaindiana.com.br/produto/ind12345",
+        "source_image_url": "https://farmaciaindiana.vteximg.com.br/arquivos/7896714231143.jpg",
+        "content_type": "image/webp",
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+        "is_generic_fallback": False,
+    }
+    check_body = json.dumps({"candidates": [candidate]}, separators=(",", ":")).encode()
+    monkeypatch.setenv("SCRAPER_IMAGE_INGEST_ALLOWED_SOURCES", "araujo,pacheco")
+    checked = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT,
+        content=check_body,
+        headers=_headers(check_body),
+    )
+    assert checked.status_code == 200
+    assert checked.json()["results"][0]["status"] == "SOURCE_NOT_ENABLED"
+
+    monkeypatch.setenv(
+        "SCRAPER_IMAGE_INGEST_ALLOWED_SOURCES", "araujo,pacheco,indiana"
+    )
+    checked = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT,
+        content=check_body,
+        headers=_headers(check_body),
+    )
+    assert checked.status_code == 200
+    assert checked.json()["results"][0]["status"] == "ELIGIBLE"
+
+    upload_body = _request_body(
+        content,
+        source="indiana",
+        sku="IND12345",
+        ean="7896714231143",
+        product_url="https://www.farmaciaindiana.com.br/produto/ind12345",
+        source_image_url="https://farmaciaindiana.vteximg.com.br/arquivos/7896714231143.jpg",
+        migration_mode=True,
+        only_if_missing=True,
+    )
+    uploaded = client.post(
+        IMAGE_UPLOAD_ENDPOINT,
+        content=upload_body,
+        headers=_headers(upload_body),
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["status"] == "STORED"
+    with sessions() as db:
+        link = db.execute(
+            select(MedicineImageLink).where(MedicineImageLink.source == "indiana")
+        ).scalar_one()
+        blob = db.get(MedicineImageBlob, link.blob_id)
+        assert blob is not None and blob.image_data == content
+        assert db.query(OfertaFarmacia).count() == 2
+        assert db.query(CatalogoBase).count() == 2
 
 
 def test_migration_upload_maps_by_ean_without_changing_offer(image_client):

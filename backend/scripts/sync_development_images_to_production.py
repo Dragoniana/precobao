@@ -248,11 +248,11 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
         .outerjoin(OfertaFarmacia, OfertaFarmacia.id == MedicineImageLink.offer_id)
         .join(CatalogoBase, CatalogoBase.id == image_catalog_id)
         .join(Farmacia, Farmacia.id == MedicineImageLink.pharmacy_id)
-        .where(MedicineImageLink.source.in_(("araujo", "pacheco")))
+        .where(MedicineImageLink.source.in_(("araujo", "pacheco", "indiana")))
         .options(load_only(*link_attributes))
     )
 
-    selected: dict[int, Candidate] = {}
+    selected: dict[tuple[int, bool], Candidate] = {}
     invalid_by_catalog: set[int] = set()
     distinct_catalogs: set[int] = set()
     last_link_id = 0
@@ -285,7 +285,14 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
                 counts["divergent_identity_ean"] += 1
                 invalid_by_catalog.add(catalog_id)
                 continue
-            if str(link.sku or "")[:3] != ("ARJ" if source == "araujo" else "PCH"):
+            source_prefix = {
+                "araujo": "ARJ",
+                "pacheco": "PCH",
+                "indiana": "IND",
+            }.get(source)
+            if source_prefix is None or not re.fullmatch(
+                rf"{source_prefix}\d+", str(link.sku or "")
+            ):
                 counts["invalid_source_sku"] += 1
                 invalid_by_catalog.add(catalog_id)
                 continue
@@ -365,13 +372,11 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
                 size_bytes=len(image_data),
                 is_generic_fallback=generic,
             )
-            current = selected.get(catalog_id)
-            # A real, validated image is preferred over a generic fallback.
-            if current is None or (current.is_generic_fallback and not generic):
-                selected[catalog_id] = candidate
+            selected.setdefault((catalog_id, generic), candidate)
 
     counts["development_medicines_with_images"] = len(distinct_catalogs)
-    counts["candidate_medicines"] = len(selected)
+    counts["candidate_medicines"] = len({catalog_id for catalog_id, _ in selected})
+    counts["candidate_images"] = len(selected)
     counts["invalid_medicines"] = len(invalid_by_catalog)
     counts["eligible_source_candidates"] = len(selected)
     counts["candidate_bytes"] = sum(item.size_bytes for item in selected.values())
@@ -527,7 +532,7 @@ def _load_scraped_image_candidates(
             )
         )
 
-    selected: dict[int, Candidate] = {}
+    selected: dict[tuple[int, bool], Candidate] = {}
     for image_id, item in records.items():
         identities = item["identities"]
         if not identities:
@@ -547,6 +552,7 @@ def _load_scraped_image_candidates(
                 ean,
             ) in identities
         }
+        generic_fallback = is_generic_image_url(item["image_url"])
         if len(identity_values) != 1:
             counts["scraped_identity_conflicts"] += 1
             continue
@@ -557,18 +563,17 @@ def _load_scraped_image_candidates(
         if source is None:
             counts["scraped_unsupported_pharmacy"] += 1
             continue
-        if source == "indiana":
-            counts["scraped_indiana_hmac_unsupported"] += 1
-            continue
         counts[f"scraped_{source}_matched"] += 1
-        if not re.fullmatch(r"ARJ\d+" if source == "araujo" else r"PCH\d+", sku):
+        source_prefix = {
+            "araujo": "ARJ",
+            "pacheco": "PCH",
+            "indiana": "IND",
+        }.get(source)
+        if source_prefix is None or not re.fullmatch(rf"{source_prefix}\d+", sku):
             counts[f"scraped_{source}_invalid_sku"] += 1
             continue
         if not validar_ean13(ean):
             counts[f"scraped_{source}_invalid_ean"] += 1
-            continue
-        if is_generic_image_url(item["image_url"]):
-            counts[f"scraped_{source}_generic_excluded"] += 1
             continue
         if image_id in integrity_invalid_ids:
             counts[f"scraped_{source}_invalid_hash_or_size"] += 1
@@ -618,20 +623,23 @@ def _load_scraped_image_candidates(
             content_type=normalized_content_type,
             content_sha256=normalized_sha256,
             size_bytes=normalized_size,
-            is_generic_fallback=False,
+            is_generic_fallback=generic_fallback,
             source_store="imagens_scrape",
             source_image_id=image_id,
             source_content_sha256=item["sha256"],
             source_size_bytes=item["size_bytes"],
             source_content_type=item["content_type"],
         )
-        current = selected.get(catalog_id)
-        if current is None or current.is_generic_fallback:
-            selected[catalog_id] = candidate
+        key = (catalog_id, generic_fallback)
+        if key not in selected:
+            selected[key] = candidate
         else:
             counts[f"scraped_{source}_duplicate_catalog"] += 1
 
-    counts["scraped_candidate_medicines"] = len(selected)
+    counts["scraped_candidate_medicines"] = len(
+        {catalog_id for catalog_id, _ in selected}
+    )
+    counts["scraped_candidate_images"] = len(selected)
     counts["scraped_candidate_bytes"] = sum(
         candidate.size_bytes for candidate in selected.values()
     )
@@ -814,15 +822,18 @@ async def _run(args: argparse.Namespace) -> int:
                     # normalized blob store as a complementary source when the
                     # raw archive has no safe candidate for a local catalog.
                     combined = {
-                        item.dev_catalog_id: item for item in scraped_candidates
+                        (item.dev_catalog_id, item.is_generic_fallback): item
+                        for item in scraped_candidates
                     }
                     for item in candidates:
-                        if item.is_generic_fallback:
-                            counts["development_generic_images_excluded"] += 1
-                            continue
-                        combined.setdefault(item.dev_catalog_id, item)
+                        combined.setdefault(
+                            (item.dev_catalog_id, item.is_generic_fallback), item
+                        )
                     candidates = list(combined.values())
-                    counts["candidate_medicines"] = len(candidates)
+                    counts["candidate_medicines"] = len(
+                        {item.dev_catalog_id for item in candidates}
+                    )
+                    counts["candidate_images"] = len(candidates)
                     counts["eligible_source_candidates"] = len(candidates)
                     counts["candidate_bytes"] = sum(
                         item.size_bytes for item in candidates
