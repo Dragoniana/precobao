@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -61,6 +62,43 @@ def test_migration_status_report_is_grouped_by_source():
         "araujo": {"ELIGIBLE": 1},
         "pacheco": {"IMAGE_ALREADY_EXISTS": 1, "SOURCE_NOT_ENABLED": 1},
     }
+
+
+def test_atomic_state_replace_retries_transient_permission_error(tmp_path, monkeypatch):
+    temporary = tmp_path / "state.tmp"
+    target = tmp_path / "state.json"
+    temporary.write_text("complete", encoding="utf-8")
+    real_replace = Path.replace
+    attempts = 0
+
+    def replace_with_one_transient_lock(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError(13, "temporarily locked")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", replace_with_one_transient_lock)
+
+    image_sync._replace_with_retry(temporary, target)
+
+    assert attempts == 2
+    assert target.read_text(encoding="utf-8") == "complete"
+    assert not temporary.exists()
+
+
+def test_error_diagnostics_omit_exception_text_and_paths():
+    try:
+        raise PermissionError("sensitive-value", "C:\\private\\secret.txt")
+    except PermissionError as error:
+        diagnostics = image_sync._safe_error_diagnostics(error)
+
+    assert diagnostics["error_type"] == "PermissionError"
+    assert diagnostics["frames"][-1]["file"] == Path(__file__).name
+    rendered = repr(diagnostics)
+    assert "sensitive-value" not in rendered
+    assert "private" not in rendered
+    assert "secret.txt" not in rendered
 
 
 def test_catalog_image_delivery_url_removes_only_internal_api_prefix(monkeypatch):

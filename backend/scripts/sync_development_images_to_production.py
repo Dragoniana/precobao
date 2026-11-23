@@ -14,6 +14,8 @@ import json
 import os
 import re
 import sys
+import time
+import traceback
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +50,7 @@ _UPLOAD_NAMESPACE = UUID("bc8517a9-ff04-49f3-8f2a-7b0cb8987d93")
 _BATCH_SIZE = 100
 _MAX_UPLOADS_PER_RUN = 50
 _DEFAULT_TRANSFER_DELAY_SECONDS = 7.5
+_ATOMIC_REPLACE_RETRIES = 8
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,41 @@ def _candidate_key(candidate: Candidate) -> str:
     )
 
 
+def _replace_with_retry(temporary: Path, target: Path) -> None:
+    """Retry transient Windows file locks when atomically replacing state files."""
+    delay = 0.05
+    for attempt in range(_ATOMIC_REPLACE_RETRIES):
+        try:
+            temporary.replace(target)
+            return
+        except PermissionError:
+            if attempt + 1 >= _ATOMIC_REPLACE_RETRIES:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
+def _safe_error_diagnostics(error: Exception) -> dict[str, Any]:
+    """Return code location and OS error numbers without exception text."""
+    frames = traceback.extract_tb(error.__traceback__)
+    diagnostics: dict[str, Any] = {
+        "error_type": type(error).__name__,
+        "frames": [
+            {
+                "file": Path(frame.filename).name,
+                "function": frame.name,
+                "line": frame.lineno,
+            }
+            for frame in frames[-5:]
+        ],
+    }
+    if isinstance(error, OSError):
+        diagnostics["errno"] = error.errno if isinstance(error.errno, int) else None
+        winerror = getattr(error, "winerror", None)
+        diagnostics["winerror"] = winerror if isinstance(winerror, int) else None
+    return diagnostics
+
+
 def _load_checkpoint() -> dict[str, str]:
     path = _checkpoint_path()
     if not path.exists():
@@ -133,7 +171,7 @@ def _write_checkpoint(completed: dict[str, str]) -> None:
         ),
         encoding="utf-8",
     )
-    temporary.replace(path)
+    _replace_with_retry(temporary, path)
 
 
 def _write_report(report: dict[str, Any]) -> None:
@@ -143,7 +181,7 @@ def _write_report(report: dict[str, Any]) -> None:
     temp_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    temp_path.replace(path)
+    _replace_with_retry(temp_path, path)
 
 
 def _migration_check_url() -> str:
@@ -915,6 +953,7 @@ async def _run(args: argparse.Namespace) -> int:
     except Exception as error:
         report["state"] = "ABORTED"
         report["error_type"] = type(error).__name__
+        report["error_diagnostics"] = _safe_error_diagnostics(error)
         _write_report(report)
         raise
     finally:
