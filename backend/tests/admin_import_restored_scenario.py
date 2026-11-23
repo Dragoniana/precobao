@@ -49,6 +49,53 @@ def main():
         for item in accepted:
             with db.begin():
                 assert import_item(db, "real-stage-validation", item) == "CHECKPOINT"
+        concurrent_link_id = None
+        if accepted:
+            concurrent_item = accepted[0]
+            from sqlalchemy import select
+
+            from app.models import OfertaFarmacia
+            from app.models.medicine_image import MedicineImageLink
+
+            with db.begin():
+                offer = db.scalars(
+                    select(OfertaFarmacia).where(
+                        OfertaFarmacia.sku_interno == concurrent_item["sku"]
+                    )
+                ).first()
+                concurrent_link_id = db.scalar(
+                    select(MedicineImageLink.id).where(
+                        MedicineImageLink.offer_id == offer.id,
+                        MedicineImageLink.is_generic.is_(
+                            concurrent_item["is_generic_fallback"]
+                        ),
+                    )
+                )
+            with db.begin():
+                link = db.get(MedicineImageLink, concurrent_link_id)
+                link.source_image_url += "?concurrent=1"
+        with db.begin():
+            assert rollback(db, "real-stage-validation") == len(accepted) - 1
+        with db.begin():
+            assert rollback(db, "real-stage-validation") == len(accepted) - 1
+            current = db.get(MedicineImageLink, concurrent_link_id)
+            assert current.source_image_url.endswith("?concurrent=1")
+            current.source_image_url = current.source_image_url.removesuffix(
+                "?concurrent=1"
+            )
+        with db.begin():
+            # Restoring the exact recorded state is an explicit conflict resolution.
+            journal = db.execute(
+                text(
+                    "SELECT after_state FROM admin_image_import_journal "
+                    "WHERE run_id='real-stage-validation' "
+                    "AND rollback_status='CONFLICT'"
+                )
+            ).scalar_one()
+            from datetime import datetime
+
+            current = db.get(MedicineImageLink, concurrent_link_id)
+            current.updated_at = datetime.fromisoformat(journal["updated_at"])
         with db.begin():
             assert rollback(db, "real-stage-validation") == len(accepted)
             assert fingerprint(db, "medicine_image_links") == links_before

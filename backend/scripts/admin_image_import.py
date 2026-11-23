@@ -59,6 +59,12 @@ def initialize(connection):
         rolled_back boolean NOT NULL DEFAULT false,
         PRIMARY KEY(run_id,item_key))""")
     )
+    connection.execute(
+        text(
+            "ALTER TABLE admin_image_import_journal ADD COLUMN IF NOT EXISTS "
+            "rollback_status text NOT NULL DEFAULT 'PENDING'"
+        )
+    )
 
 
 def import_item(db, run_id, item):
@@ -178,15 +184,16 @@ def import_item(db, run_id, item):
     )
 
 
-def rollback(db, run_id):
+def rollback(db, run_id, item_key=None):
     rows = (
         db.execute(
             text(
                 "SELECT item_key,link_id,before_state,after_state "
                 "FROM admin_image_import_journal WHERE run_id=:r "
-                "AND NOT rolled_back ORDER BY created_at DESC"
+                "AND NOT rolled_back AND (:k IS NULL OR item_key=:k) "
+                "ORDER BY created_at DESC FOR UPDATE"
             ),
-            {"r": run_id},
+            {"r": run_id, "k": item_key},
         )
         .mappings()
         .all()
@@ -198,7 +205,14 @@ def rollback(db, run_id):
             .with_for_update(of=MedicineImageLink)
         ).scalar_one_or_none()
         if link is None or snapshot(link) != row["after_state"]:
-            raise RuntimeError("rollback_conflict")
+            db.execute(
+                text(
+                    "UPDATE admin_image_import_journal SET rollback_status='CONFLICT' "
+                    "WHERE run_id=:r AND item_key=:k"
+                ),
+                {"r": run_id, "k": row["item_key"]},
+            )
+            continue
         if row["before_state"] is None:
             db.delete(link)
         else:
@@ -213,12 +227,61 @@ def rollback(db, run_id):
         db.flush()
         db.execute(
             text(
-                "UPDATE admin_image_import_journal SET rolled_back=true "
+                "UPDATE admin_image_import_journal SET rolled_back=true, "
+                "rollback_status='ROLLED_BACK' "
                 "WHERE run_id=:r AND item_key=:k"
             ),
             {"r": run_id, "k": row["item_key"]},
         )
-    return len(rows)
+    return db.execute(
+        text(
+            "SELECT count(*) FROM admin_image_import_journal "
+            "WHERE run_id=:r AND rolled_back"
+        ),
+        {"r": run_id},
+    ).scalar_one()
+
+
+def rollback_transactions(connection, run_id):
+    """Commit each journal entry independently; durable conflicts remain retryable."""
+    keys = (
+        connection.execute(
+            text(
+                "SELECT item_key FROM admin_image_import_journal "
+                "WHERE run_id=:r AND NOT rolled_back ORDER BY created_at DESC"
+            ),
+            {"r": run_id},
+        )
+        .scalars()
+        .all()
+    )
+    connection.commit()
+    for key in keys:
+        try:
+            with Session(bind=connection) as db, db.begin():
+                rollback(db, run_id, key)
+        except Exception:
+            with connection.begin():
+                connection.execute(
+                    text(
+                        "UPDATE admin_image_import_journal "
+                        "SET rollback_status='FAILED' "
+                        "WHERE run_id=:r AND item_key=:k AND NOT rolled_back"
+                    ),
+                    {"r": run_id, "k": key},
+                )
+            raise
+    result = dict(
+        connection.execute(
+            text(
+                "SELECT rollback_status,count(*) FROM admin_image_import_journal "
+                "WHERE run_id=:r GROUP BY rollback_status"
+            ),
+            {"r": run_id},
+        ).all()
+    )
+    connection.commit()
+    return result
 
 
 def main():
@@ -249,8 +312,7 @@ def main():
         counts = {}
         with Session(bind=connection) as db:
             if args.rollback:
-                with db.begin():
-                    print(json.dumps({"rolled_back": rollback(db, args.run_id)}))
+                print(json.dumps(rollback_transactions(connection, args.run_id)))
             else:
                 with open(args.manifest, encoding="utf-8") as stream:
                     for line in stream:
