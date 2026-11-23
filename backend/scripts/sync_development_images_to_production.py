@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid5
 
 import httpx
-from sqlalchemy import create_engine, func, inspect, select
+from sqlalchemy import MetaData, Table, create_engine, func, inspect, select
 from sqlalchemy.orm import Session, load_only
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -38,17 +39,19 @@ from app.scrapers.scraper_batch_client import (
 from app.services.imagens import is_generic_image_url
 from app.services.medicine_images import (
     InvalidMedicineImage,
+    normalize_medicine_image,
     validate_normalized_medicine_image,
 )
 
 _UPLOAD_NAMESPACE = UUID("bc8517a9-ff04-49f3-8f2a-7b0cb8987d93")
 _BATCH_SIZE = 100
+_MAX_UPLOADS_PER_RUN = 50
 
 
 @dataclass(frozen=True)
 class Candidate:
     dev_catalog_id: int
-    blob_id: int
+    blob_id: int | None
     source: str
     sku: str
     ean: str
@@ -58,6 +61,11 @@ class Candidate:
     content_sha256: str
     size_bytes: int
     is_generic_fallback: bool
+    source_store: str = "medicine_image_blobs"
+    source_image_id: int | None = None
+    source_content_sha256: str | None = None
+    source_size_bytes: int | None = None
+    source_content_type: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -72,6 +80,58 @@ class Candidate:
 def _report_path() -> Path:
     state = Path(os.getenv("SCRAPER_COLLECTOR_STATE_DIR", "data/scraper_collector"))
     return state.resolve() / "development-image-migration-report.json"
+
+
+def _checkpoint_path() -> Path:
+    return _report_path().with_name("development-image-migration-checkpoint.json")
+
+
+def _candidate_key(candidate: Candidate) -> str:
+    return (
+        f"{candidate.source}:{candidate.sku}:{candidate.ean}:{candidate.content_sha256}"
+    )
+
+
+def _load_checkpoint() -> dict[str, str]:
+    path = _checkpoint_path()
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("image_migration_checkpoint_invalid") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "preco-bao.image-migration-checkpoint"
+        or value.get("version") != 1
+        or not isinstance(value.get("completed"), dict)
+        or any(
+            not isinstance(key, str) or not isinstance(status, str)
+            for key, status in value["completed"].items()
+        )
+    ):
+        raise RuntimeError("image_migration_checkpoint_invalid")
+    return value["completed"]
+
+
+def _write_checkpoint(completed: dict[str, str]) -> None:
+    path = _checkpoint_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "schema": "preco-bao.image-migration-checkpoint",
+                "version": 1,
+                "updated_at": datetime.now(UTC).isoformat(),
+                "completed": completed,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def _write_report(report: dict[str, Any]) -> None:
@@ -97,6 +157,8 @@ def _migration_check_url() -> str:
 
 def _source_from_name(name: str) -> str | None:
     normalized = name.casefold()
+    if "indiana" in normalized:
+        return "indiana"
     if "araujo" in normalized or "araújo" in normalized:
         return "araujo"
     if "pacheco" in normalized:
@@ -277,6 +339,32 @@ def _load_descriptors(db: Session) -> tuple[list[Candidate], Counter[str], int]:
 
 
 def _source_image_bytes(db: Session, candidate: Candidate) -> bytes:
+    if candidate.source_store == "imagens_scrape":
+        image_table = Table("imagens_scrape", MetaData(), autoload_with=db.get_bind())
+        content = db.execute(
+            select(image_table.c.content).where(
+                image_table.c.id == candidate.source_image_id
+            )
+        ).scalar_one()
+        if (
+            len(content) != candidate.source_size_bytes
+            or hashlib.sha256(content).hexdigest() != candidate.source_content_sha256
+        ):
+            raise RuntimeError("source_image_changed_during_migration")
+        normalized = normalize_medicine_image(
+            content,
+            declared_content_type=candidate.source_content_type,
+            max_bytes=int(os.getenv("SCRAPER_IMAGE_MAX_BYTES", str(512 * 1024))),
+            max_dimension=int(os.getenv("SCRAPER_IMAGE_MAX_DIMENSION", "1200")),
+        )
+        if (
+            normalized.sha256 != candidate.content_sha256
+            or len(normalized.content) != candidate.size_bytes
+            or normalized.content_type != candidate.content_type
+        ):
+            raise RuntimeError("source_image_changed_during_migration")
+        return normalized.content
+
     content = db.execute(
         select(MedicineImageBlob.image_data).where(
             MedicineImageBlob.id == candidate.blob_id
@@ -285,6 +373,229 @@ def _source_image_bytes(db: Session, candidate: Candidate) -> bytes:
     if hashlib.sha256(content).hexdigest() != candidate.content_sha256:
         raise RuntimeError("source_image_changed_during_migration")
     return content
+
+
+def _load_scraped_image_candidates(
+    db: Session,
+) -> tuple[list[Candidate], Counter[str]]:
+    """Read the legacy raw-byte archive without changing its schema or rows."""
+    counts: Counter[str] = Counter()
+    inspector = inspect(db.get_bind())
+    if not inspector.has_table("imagens_scrape"):
+        counts["scraped_image_table_missing"] = 1
+        return [], counts
+
+    image_table = Table("imagens_scrape", MetaData(), autoload_with=db.get_bind())
+    required = {"id", "image_url", "content_type", "sha256", "size_bytes", "content"}
+    if not required.issubset(
+        {column["name"] for column in inspector.get_columns("imagens_scrape")}
+    ):
+        counts["scraped_image_schema_unsupported"] = 1
+        return [], counts
+
+    counts["scraped_image_records"] = int(
+        db.execute(select(func.count()).select_from(image_table)).scalar_one()
+    )
+    counts["scraped_image_bytes"] = int(
+        db.execute(
+            select(func.coalesce(func.sum(image_table.c.size_bytes), 0))
+        ).scalar_one()
+    )
+    counts["scraped_unique_hashes"] = int(
+        db.execute(select(func.count(func.distinct(image_table.c.sha256)))).scalar_one()
+    )
+    counts["scraped_size_mismatches"] = int(
+        db.execute(
+            select(func.count())
+            .select_from(image_table)
+            .where(func.length(image_table.c.content) != image_table.c.size_bytes)
+        ).scalar_one()
+    )
+
+    # PostgreSQL's built-in SHA-256 permits a read-only integrity pass over all
+    # archived BYTEA values without sending them to the client or logging bytes.
+    integrity_invalid_ids: set[int] = set()
+    if db.get_bind().dialect.name == "postgresql":
+        counts["scraped_hash_mismatches"] = int(
+            db.execute(
+                select(func.count())
+                .select_from(image_table)
+                .where(
+                    image_table.c.sha256
+                    != func.encode(func.sha256(image_table.c.content), "hex")
+                )
+            ).scalar_one()
+        )
+        integrity_invalid_ids = {
+            int(image_id)
+            for image_id in db.execute(
+                select(image_table.c.id).where(
+                    (func.length(image_table.c.content) != image_table.c.size_bytes)
+                    | (
+                        image_table.c.sha256
+                        != func.encode(func.sha256(image_table.c.content), "hex")
+                    )
+                )
+            ).scalars()
+        }
+    normalized_by_source_hash: dict[tuple[str, str], tuple[str, str, int]] = {}
+
+    joined = (
+        select(
+            image_table.c.id,
+            image_table.c.image_url,
+            image_table.c.content_type,
+            image_table.c.sha256,
+            image_table.c.size_bytes,
+            OfertaFarmacia.id.label("offer_id"),
+            OfertaFarmacia.catalogo_id,
+            OfertaFarmacia.farmacia_id,
+            OfertaFarmacia.sku_interno,
+            OfertaFarmacia.url_origem,
+            Farmacia.nome_fantasia,
+            CatalogoBase.codigo_barras,
+        )
+        .select_from(image_table)
+        .outerjoin(OfertaFarmacia, OfertaFarmacia.imagem_url == image_table.c.image_url)
+        .outerjoin(Farmacia, Farmacia.id == OfertaFarmacia.farmacia_id)
+        .outerjoin(CatalogoBase, CatalogoBase.id == OfertaFarmacia.catalogo_id)
+        .order_by(image_table.c.id, OfertaFarmacia.id)
+    )
+    records: dict[int, dict[str, Any]] = {}
+    for row in db.execute(joined).yield_per(200):
+        item = records.setdefault(
+            int(row.id),
+            {
+                "image_url": str(row.image_url),
+                "content_type": str(row.content_type),
+                "sha256": str(row.sha256),
+                "size_bytes": int(row.size_bytes),
+                "identities": set(),
+            },
+        )
+        if row.offer_id is None:
+            continue
+        item["identities"].add(
+            (
+                int(row.offer_id),
+                int(row.catalogo_id),
+                int(row.farmacia_id),
+                str(row.nome_fantasia or ""),
+                str(row.sku_interno or ""),
+                str(row.url_origem or ""),
+                str(row.codigo_barras or ""),
+            )
+        )
+
+    selected: dict[int, Candidate] = {}
+    for image_id, item in records.items():
+        identities = item["identities"]
+        if not identities:
+            counts["scraped_unmatched_offer"] += 1
+            continue
+        # Identical image URLs reused by contexts of the same offer identity are
+        # safe; a URL shared across different products or sources is ambiguous.
+        identity_values = {
+            (catalog_id, pharmacy_id, name, sku, product_url, ean)
+            for (
+                _offer_id,
+                catalog_id,
+                pharmacy_id,
+                name,
+                sku,
+                product_url,
+                ean,
+            ) in identities
+        }
+        if len(identity_values) != 1:
+            counts["scraped_identity_conflicts"] += 1
+            continue
+        catalog_id, _pharmacy_id, pharmacy_name, sku, product_url, ean = next(
+            iter(identity_values)
+        )
+        source = _source_from_name(pharmacy_name)
+        if source is None:
+            counts["scraped_unsupported_pharmacy"] += 1
+            continue
+        if source == "indiana":
+            counts["scraped_indiana_hmac_unsupported"] += 1
+            continue
+        counts[f"scraped_{source}_matched"] += 1
+        if not re.fullmatch(r"ARJ\d+" if source == "araujo" else r"PCH\d+", sku):
+            counts[f"scraped_{source}_invalid_sku"] += 1
+            continue
+        if not validar_ean13(ean):
+            counts[f"scraped_{source}_invalid_ean"] += 1
+            continue
+        if is_generic_image_url(item["image_url"]):
+            counts[f"scraped_{source}_generic_excluded"] += 1
+            continue
+        if image_id in integrity_invalid_ids:
+            counts[f"scraped_{source}_invalid_hash_or_size"] += 1
+            continue
+        cache_key = (item["sha256"], item["content_type"])
+        normalized_metadata = normalized_by_source_hash.get(cache_key)
+        if normalized_metadata is None:
+            raw = db.execute(
+                select(image_table.c.content).where(image_table.c.id == image_id)
+            ).scalar_one()
+            if (
+                len(raw) != item["size_bytes"]
+                or hashlib.sha256(raw).hexdigest() != item["sha256"]
+            ):
+                counts[f"scraped_{source}_invalid_hash_or_size"] += 1
+                continue
+            try:
+                normalized = normalize_medicine_image(
+                    raw,
+                    declared_content_type=item["content_type"],
+                    max_bytes=int(
+                        os.getenv("SCRAPER_IMAGE_MAX_BYTES", str(512 * 1024))
+                    ),
+                    max_dimension=int(os.getenv("SCRAPER_IMAGE_MAX_DIMENSION", "1200")),
+                )
+            except (InvalidMedicineImage, ValueError):
+                counts[f"scraped_{source}_invalid_image"] += 1
+                continue
+            normalized_metadata = (
+                normalized.content_type,
+                normalized.sha256,
+                len(normalized.content),
+            )
+            normalized_by_source_hash[cache_key] = normalized_metadata
+        normalized_content_type, normalized_sha256, normalized_size = (
+            normalized_metadata
+        )
+        counts[f"scraped_{source}_valid_images"] += 1
+        candidate = Candidate(
+            dev_catalog_id=catalog_id,
+            blob_id=None,
+            source=source,
+            sku=sku,
+            ean=ean,
+            product_url=product_url,
+            source_image_url=item["image_url"],
+            content_type=normalized_content_type,
+            content_sha256=normalized_sha256,
+            size_bytes=normalized_size,
+            is_generic_fallback=False,
+            source_store="imagens_scrape",
+            source_image_id=image_id,
+            source_content_sha256=item["sha256"],
+            source_size_bytes=item["size_bytes"],
+            source_content_type=item["content_type"],
+        )
+        current = selected.get(catalog_id)
+        if current is None or current.is_generic_fallback:
+            selected[catalog_id] = candidate
+        else:
+            counts[f"scraped_{source}_duplicate_catalog"] += 1
+
+    counts["scraped_candidate_medicines"] = len(selected)
+    counts["scraped_candidate_bytes"] = sum(
+        candidate.size_bytes for candidate in selected.values()
+    )
+    return list(selected.values()), counts
 
 
 async def _check_candidates(
@@ -346,6 +657,36 @@ def _status_counts_by_source(
     }
 
 
+def _catalog_image_url(catalog_id: int) -> str:
+    endpoint = _image_endpoint()
+    parsed = urlsplit(endpoint)
+    suffix = "/api/v1/internal/medicine-images"
+    path = parsed.path.rstrip("/")
+    if not path.endswith(suffix):
+        raise RuntimeError("production_image_api_path_invalid")
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"{path[: -len(suffix)]}/catalogo/medicamentos/{catalog_id}/imagem",
+            "",
+            "",
+        )
+    )
+
+
+async def _verify_image_delivery(
+    client: httpx.AsyncClient, *, catalog_id: int, expected_sha256: str
+) -> None:
+    response = await client.get(_catalog_image_url(catalog_id))
+    if response.status_code != 200:
+        raise RuntimeError(f"production_image_delivery_http_{response.status_code}")
+    if response.headers.get("etag", "").strip('"') != expected_sha256:
+        raise RuntimeError("production_image_delivery_etag_mismatch")
+    if hashlib.sha256(response.content).hexdigest() != expected_sha256:
+        raise RuntimeError("production_image_delivery_hash_mismatch")
+
+
 async def _run(args: argparse.Namespace) -> int:
     source_url = os.getenv("PRECOBAO_DEVELOPMENT_DATABASE_URL", "").strip()
     if not source_url:
@@ -378,15 +719,42 @@ async def _run(args: argparse.Namespace) -> int:
         "created_at": datetime.now(UTC).isoformat(),
         "mode": "execute" if is_execute else "dry_run",
     }
+    completed = _load_checkpoint() if is_execute else {}
+    if is_execute:
+        report["execution_limit"] = args.limit
+        report["checkpoint_completed_before_run"] = len(completed)
     try:
         with engine.connect() as connection:
             transaction = connection.begin()
             try:
-                connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                connection.exec_driver_sql(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
                 with Session(
                     bind=connection, join_transaction_mode="create_savepoint"
                 ) as db:
                     candidates, counts, _distinct = _load_descriptors(db)
+                    scraped_candidates, scraped_counts = _load_scraped_image_candidates(
+                        db
+                    )
+                    counts.update(scraped_counts)
+                    # The raw archive is the primary source. Keep the previous
+                    # normalized blob store as a complementary source when the
+                    # raw archive has no safe candidate for a local catalog.
+                    combined = {
+                        item.dev_catalog_id: item for item in scraped_candidates
+                    }
+                    for item in candidates:
+                        if item.is_generic_fallback:
+                            counts["development_generic_images_excluded"] += 1
+                            continue
+                        combined.setdefault(item.dev_catalog_id, item)
+                    candidates = list(combined.values())
+                    counts["candidate_medicines"] = len(candidates)
+                    counts["eligible_source_candidates"] = len(candidates)
+                    counts["candidate_bytes"] = sum(
+                        item.size_bytes for item in candidates
+                    )
                     report["source_counts"] = dict(counts)
                     # Do not log full URLs, database DSNs, hashes or credentials.
                     async with httpx.AsyncClient(
@@ -411,6 +779,7 @@ async def _run(args: argparse.Namespace) -> int:
                         _write_report(report)
                         if is_execute:
                             outcomes = Counter()
+                            attempted = 0
                             for candidate, initial in zip(
                                 candidates, checked, strict=True
                             ):
@@ -419,6 +788,14 @@ async def _run(args: argparse.Namespace) -> int:
                                     report["execution_counts"] = dict(outcomes)
                                     _write_report(report)
                                     continue
+                                candidate_key = _candidate_key(candidate)
+                                if candidate_key in completed:
+                                    outcomes["CHECKPOINT_ALREADY_CONFIRMED"] += 1
+                                    report["execution_counts"] = dict(outcomes)
+                                    _write_report(report)
+                                    continue
+                                if attempted >= args.limit:
+                                    break
                                 # Recheck immediately before each write to close
                                 # races with the regular scraper.
                                 fresh = (
@@ -429,6 +806,10 @@ async def _run(args: argparse.Namespace) -> int:
                                     report["execution_counts"] = dict(outcomes)
                                     _write_report(report)
                                     continue
+                                if not isinstance(fresh.get("catalog_id"), int):
+                                    raise RuntimeError(
+                                        "migration_check_catalog_id_missing"
+                                    )
                                 image_bytes = _source_image_bytes(db, candidate)
                                 upload_id = str(
                                     uuid5(
@@ -454,6 +835,23 @@ async def _run(args: argparse.Namespace) -> int:
                                 response = await post_image_upload(
                                     client, metadata, image_bytes
                                 )
+                                production_catalog_id = response.get("catalog_id")
+                                if production_catalog_id != fresh["catalog_id"]:
+                                    raise RuntimeError(
+                                        "production_image_catalog_id_mismatch"
+                                    )
+                                expected_sha256 = str(response.get("sha256", ""))
+                                if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                                    raise RuntimeError(
+                                        "production_image_upload_hash_missing"
+                                    )
+                                await _verify_image_delivery(
+                                    client,
+                                    catalog_id=production_catalog_id,
+                                    expected_sha256=expected_sha256,
+                                )
+                                completed[candidate_key] = str(response["status"])
+                                _write_checkpoint(completed)
                                 report.setdefault("confirmed", []).append(
                                     {
                                         "source": candidate.source,
@@ -465,6 +863,7 @@ async def _run(args: argparse.Namespace) -> int:
                                     }
                                 )
                                 outcomes[str(response["status"])] += 1
+                                attempted += 1
                                 report["execution_counts"] = dict(outcomes)
                                 _write_report(report)
                                 await asyncio.sleep(0.25)
@@ -473,6 +872,11 @@ async def _run(args: argparse.Namespace) -> int:
             except Exception:
                 transaction.rollback()
                 raise
+    except Exception as error:
+        report["state"] = "ABORTED"
+        report["error_type"] = type(error).__name__
+        _write_report(report)
+        raise
     finally:
         engine.dispose()
 
@@ -496,24 +900,27 @@ def main() -> int:
     mode.add_argument(
         "--execute",
         action="store_true",
-        help="Transfer eligible images after backup verification.",
+        help="Transfer a capped number of eligible images after backup verification.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help=(
+            "Required for execution; maximum "
+            f"{_MAX_UPLOADS_PER_RUN} uploads per invocation."
+        ),
     )
     args = parser.parse_args()
+    if args.limit is not None and not 1 <= args.limit <= _MAX_UPLOADS_PER_RUN:
+        parser.error(f"--limit must be between 1 and {_MAX_UPLOADS_PER_RUN}")
+    if args.execute and args.limit is None:
+        parser.error(
+            f"--execute requires an explicit --limit (maximum {_MAX_UPLOADS_PER_RUN})"
+        )
     try:
         return asyncio.run(_run(args))
     except Exception as error:
         # Avoid leaking DSNs or request details from driver/library exceptions.
-        try:
-            _write_report(
-                {
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "mode": "execute" if args.execute else "dry_run",
-                    "state": "ABORTED",
-                    "error_type": type(error).__name__,
-                }
-            )
-        except OSError:
-            pass
         print(
             "image migration stopped "
             f"({type(error).__name__}); credentials and URLs were not logged",

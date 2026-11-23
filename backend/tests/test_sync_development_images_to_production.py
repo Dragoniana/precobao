@@ -4,8 +4,18 @@ import hashlib
 from io import BytesIO
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
-from sqlalchemy import create_engine
+from sqlalchemy import (
+    Column,
+    Integer,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+)
 from sqlalchemy.orm import Session
 
 import scripts.sync_development_images_to_production as image_sync
@@ -13,8 +23,14 @@ from app.models import Base, CatalogoBase, Farmacia, OfertaFarmacia
 from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.services.medicine_images import normalize_medicine_image
 from scripts.sync_development_images_to_production import (
+    _candidate_key,
+    _catalog_image_url,
+    _load_checkpoint,
     _load_descriptors,
+    _load_scraped_image_candidates,
+    _source_image_bytes,
     _status_counts_by_source,
+    _write_checkpoint,
 )
 
 
@@ -43,6 +59,43 @@ def test_migration_status_report_is_grouped_by_source():
         "araujo": {"ELIGIBLE": 1},
         "pacheco": {"IMAGE_ALREADY_EXISTS": 1, "SOURCE_NOT_ENABLED": 1},
     }
+
+
+def test_catalog_image_delivery_url_removes_only_internal_api_prefix(monkeypatch):
+    monkeypatch.setenv(
+        "SCRAPER_IMAGE_INGEST_URL",
+        "https://precobao.app/backend/api/v1/internal/medicine-images",
+    )
+    assert (
+        _catalog_image_url(12345)
+        == "https://precobao.app/backend/catalogo/medicamentos/12345/imagem"
+    )
+
+
+def test_execute_requires_a_small_explicit_limit(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["image-sync", "--execute"])
+    with pytest.raises(SystemExit):
+        image_sync.main()
+
+    monkeypatch.setattr("sys.argv", ["image-sync", "--execute", "--limit", "51"])
+    with pytest.raises(SystemExit):
+        image_sync.main()
+
+
+def test_migration_checkpoint_is_atomic_and_reusable(tmp_path, monkeypatch):
+    report = tmp_path / "development-image-migration-report.json"
+    monkeypatch.setattr(image_sync, "_report_path", lambda: report)
+    candidate = SimpleNamespace(
+        source="pacheco",
+        sku="PCH155349",
+        ean="7897705203095",
+        content_sha256="a" * 64,
+    )
+    key = _candidate_key(candidate)
+    _write_checkpoint({key: "STORED"})
+
+    assert _load_checkpoint() == {key: "STORED"}
+    assert not report.with_name("development-image-migration-checkpoint.tmp").exists()
 
 
 def test_candidate_uses_development_ean_and_real_image_priority(monkeypatch):
@@ -216,3 +269,81 @@ def test_invalid_blob_hash_is_not_a_candidate():
     engine.dispose()
     assert candidates == []
     assert counts["invalid_hash_or_size"] == 1
+
+
+def test_scrape_archive_is_read_as_primary_candidate_source():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    archive_metadata = MetaData()
+    archive = Table(
+        "imagens_scrape",
+        archive_metadata,
+        Column("id", Integer, primary_key=True),
+        Column("image_url", Text, nullable=False),
+        Column("content_type", String(100), nullable=False),
+        Column("sha256", String(64), nullable=False),
+        Column("size_bytes", Integer, nullable=False),
+        Column("content", LargeBinary, nullable=False),
+    )
+    archive_metadata.create_all(engine)
+    raw_stream = BytesIO()
+    Image.new("RGB", (64, 80), (95, 145, 190)).save(raw_stream, format="PNG")
+    raw = raw_stream.getvalue()
+    raw_digest = hashlib.sha256(raw).hexdigest()
+    image_url = (
+        "https://drogariaspacheco.vteximg.com.br/arquivos/ids/1138787/7897705203095.jpg"
+    )
+    with Session(engine) as db:
+        pharmacy = Farmacia(
+            cnpj="12345678000200",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Drogarias Pacheco",
+            endereco_completo="Rio de Janeiro - RJ",
+        )
+        catalog = CatalogoBase(
+            codigo_barras="7897705203095",
+            name_search="Medicamento de teste Pacheco",
+            categorias=[],
+        )
+        db.add_all([pharmacy, catalog])
+        db.flush()
+        offer = OfertaFarmacia(
+            sku_interno="PCH155349",
+            preco=15.25,
+            quantidade_estoque=1,
+            disponivel=True,
+            url_origem="https://www.drogariaspacheco.com.br/produto/155349/p",
+            imagem_url=image_url,
+            contexto_chave="global",
+            farmacia_id=pharmacy.id,
+            catalogo_id=catalog.id,
+        )
+        db.add(offer)
+        db.execute(
+            archive.insert().values(
+                image_url=image_url,
+                content_type="image/png",
+                sha256=raw_digest,
+                size_bytes=len(raw),
+                content=raw,
+            )
+        )
+        db.commit()
+
+        candidates, counts = _load_scraped_image_candidates(db)
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.source_store == "imagens_scrape"
+        assert candidate.source == "pacheco"
+        assert candidate.sku == "PCH155349"
+        assert candidate.ean == "7897705203095"
+        assert candidate.content_type in {"image/jpeg", "image/webp"}
+        assert (
+            hashlib.sha256(_source_image_bytes(db, candidate)).hexdigest()
+            == candidate.content_sha256
+        )
+        assert counts["scraped_image_records"] == 1
+        assert counts["scraped_size_mismatches"] == 0
+        assert counts["scraped_pacheco_valid_images"] == 1
+
+    engine.dispose()

@@ -1,6 +1,7 @@
 param(
     [switch]$Execute,
-    [switch]$BackupVerified
+    [switch]$BackupVerified,
+    [int]$Limit = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,12 @@ if ([string]::IsNullOrWhiteSpace($env:PRECOBAO_DEVELOPMENT_DATABASE_URL)) {
 }
 if ($Execute -and -not $BackupVerified) {
     throw 'A execução exige -BackupVerified após a confirmação do backup recuperável da produção.'
+}
+if ($Execute -and ($Limit -lt 1 -or $Limit -gt 50)) {
+    throw 'A execução exige -Limit entre 1 e 50 para limitar cada lote.'
+}
+if (-not $Execute -and $Limit -ne 0) {
+    throw '-Limit só pode ser usado junto com -Execute.'
 }
 
 $secretPath = Join-Path $StateRoot 'hmac-secret.dpapi'
@@ -54,7 +61,7 @@ try {
     Push-Location (Join-Path $settings.repository_root 'backend')
     try {
         if ($Execute) {
-            & $python -m 'scripts.sync_development_images_to_production' --execute
+            & $python -m 'scripts.sync_development_images_to_production' --execute --limit $Limit
         } else {
             & $python -m 'scripts.sync_development_images_to_production' --dry-run
         }

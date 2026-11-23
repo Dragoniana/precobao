@@ -460,6 +460,84 @@ def test_migration_upload_maps_by_ean_without_changing_offer(image_client):
         assert link.catalog_id == catalog_id
 
 
+def test_migration_allows_real_photo_when_only_generic_fallback_exists(image_client):
+    client, sessions, catalog_id = image_client
+    generic_content = _image_bytes((90, 150, 210))
+    generic_url = (
+        "https://www.araujo.com.br/on/demandware.static/Sites-Araujo-Site/"
+        "-/default/dw4f56ef98/images/generico.webp"
+    )
+    with sessions() as db:
+        offer = db.execute(select(OfertaFarmacia)).scalar_one()
+        pharmacy = db.execute(select(Farmacia)).scalar_one()
+        generic_blob = MedicineImageBlob(
+            sha256=hashlib.sha256(generic_content).hexdigest(),
+            content_type="image/webp"
+            if generic_content.startswith(b"RIFF")
+            else "image/jpeg",
+            image_data=generic_content,
+            size_bytes=len(generic_content),
+            width=480,
+            height=640,
+        )
+        db.add(generic_blob)
+        db.flush()
+        db.add(
+            MedicineImageLink(
+                blob_id=generic_blob.id,
+                catalog_id=None,
+                pharmacy_id=pharmacy.id,
+                offer_id=offer.id,
+                sku="ARJ101392",
+                ean="7897705203095",
+                source="araujo",
+                source_image_url=generic_url,
+                is_primary=False,
+                is_generic=True,
+            )
+        )
+        db.commit()
+
+    content = _image_bytes((230, 220, 200))
+    upload_body = _request_body(content, migration_mode=True, only_if_missing=True)
+    metadata = json.loads(upload_body.split(b"\n", 1)[0])
+    candidate = {
+        key: metadata[key]
+        for key in (
+            "source",
+            "sku",
+            "ean",
+            "product_url",
+            "source_image_url",
+            "content_type",
+            "content_sha256",
+            "is_generic_fallback",
+        )
+    }
+    check_body = json.dumps(
+        {"candidates": [candidate]}, separators=(",", ":"), sort_keys=True
+    ).encode()
+    checked = client.post(
+        IMAGE_MIGRATION_CHECK_ENDPOINT,
+        content=check_body,
+        headers=_headers(check_body),
+    )
+    assert checked.status_code == 200
+    assert checked.json()["results"][0]["status"] == "ELIGIBLE"
+
+    uploaded = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=upload_body, headers=_headers(upload_body)
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["status"] == "STORED"
+    assert uploaded.json()["catalog_id"] == catalog_id
+    with sessions() as db:
+        links = db.execute(select(MedicineImageLink)).scalars().all()
+        assert len(links) == 2
+        assert sum(link.is_generic for link in links) == 1
+        assert sum(link.catalog_id == catalog_id for link in links) == 1
+
+
 def test_image_upload_rejects_bad_hmac_and_non_image_content(image_client):
     client, sessions, _catalog_id = image_client
     content = _image_bytes()

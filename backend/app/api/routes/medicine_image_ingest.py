@@ -135,24 +135,9 @@ def _catalog_image_state(
     if specific is not None:
         link, blob = specific
         return {"link": link, "blob": blob, "kind": "stored"}
-
-    generic = db.execute(
-        select(MedicineImageLink, MedicineImageBlob)
-        .join(MedicineImageBlob, MedicineImageBlob.id == MedicineImageLink.blob_id)
-        .join(OfertaFarmacia, OfertaFarmacia.id == MedicineImageLink.offer_id)
-        .where(
-            OfertaFarmacia.catalogo_id == catalog.id,
-            MedicineImageLink.is_generic.is_(True),
-        )
-        .order_by(MedicineImageLink.id)
-        .limit(1)
-    ).first()
-    if generic is not None:
-        link, blob = generic
-        return {"link": link, "blob": blob, "kind": "stored"}
-
-    # Legacy URLs are candidates to validate and materialize as BYTEA; they do
-    # not count as an existing stored image for migration or only-if-missing.
+    # A generic offer fallback is not a real medicine photograph. It must not
+    # block a validated specific image from being attached to the catalog.
+    # Legacy URLs likewise do not count as a stored real photo.
     return None
 
 

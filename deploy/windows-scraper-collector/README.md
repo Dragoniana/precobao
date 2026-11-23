@@ -71,12 +71,15 @@ coletor. Configure `PRECOBAO_DEVELOPMENT_DATABASE_URL` no processo chamador sem
 colocá-la em argumentos, arquivos versionados ou logs.
 
 Após revisar o relatório e confirmar um backup recuperável da produção, a
-execução real exige ambos os parâmetros `-Execute -BackupVerified`. O script
-revalida cada medicamento imediatamente antes do upload, envia uma imagem por
-medicamento via HTTPS/HMAC e mantém o PostgreSQL de desenvolvimento em transação
-somente de leitura. Produção não recebe escrita direta do computador Windows.
+execução real exige `-Execute -BackupVerified -Limit N`, com `N` entre 1 e 50.
+O limite obrigatório impede que uma chamada execute toda a fila por acidente.
+O script revalida cada medicamento imediatamente antes do upload, envia uma
+imagem por medicamento via HTTPS/HMAC, verifica a entrega pela API e mantém o
+PostgreSQL de desenvolvimento em transação somente de leitura. Produção não
+recebe escrita direta do computador Windows.
 Um EAN inválido, associação ambígua, fonte incompatível ou imagem existente em
 produção causa uma rejeição/ignoragem sem alterar catálogo, ofertas ou preços.
+O checkpoint local registra cada entrega conferida e permite retomar após falha.
 Reexecutar é seguro: o servidor verifica novamente a imagem e a associação.
 
 Os scrapers removem os arquivos temporários `.bin` e o manifesto somente após a
