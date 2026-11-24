@@ -21,8 +21,8 @@
 - Forged ingestion: HMAC, timestamp window, body limits, source validation; current production key is shared between sources, so per-source rotation is still needed.
 - Malicious image delivery: HTTPS source allowlists, redirects revalidated, byte/MIME/signature limits, image normalization.
 - Artifact substitution: HTTPS and a declared SHA-256; Android release signing must use a private dedicated keystore, never the shared debug key.
-- Data loss: encrypted PostgreSQL and image-registry backups with hash and restore checks; off-VM copy and independent key custody remain unverified.
+- Data loss: encrypted PostgreSQL and image-registry backups with hash and restore checks; isolated restore succeeded, while off-VM copy and independent key custody remain unverified.
 
 ## Out of scope
 
-No testing was performed against pharmacy infrastructure or other third parties. Production checks were limited to low-volume read-only probes. Azure subscription/NSG control-plane settings were not available to this audit.
+No testing was performed against pharmacy infrastructure or other third parties. Production checks were limited to low-volume, non-destructive probes. Azure Portal confirmed restrictive NSG rules and private TLS-enforced PostgreSQL access; no paid Azure resource was created.
