@@ -92,7 +92,7 @@ it('uses a pharmacy-scoped generic image after specific catalog images', () => {
   expect(isGenericOfferImage(medicine, images[1])).toBe(true);
 });
 
-it('uses only the selected offer fallback and never substitutes another pharmacy', () => {
+it('tries the selected pharmacy generic image before generic images from other pharmacies', () => {
   const medicine = {
     ...item,
     id: 72,
@@ -112,12 +112,57 @@ it('uses only the selected offer fallback and never substitutes another pharmacy
   } as Medicamento;
 
   const images = resolveMedicineImages(medicine, 923);
-  expect(images).toHaveLength(4);
+  expect(images).toHaveLength(6);
   expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
   expect(images[3]).toContain('/catalogo/ofertas/923/imagem');
-  expect(images.some((url) => url.includes('/catalogo/ofertas/921/imagem'))).toBe(false);
-  expect(images.some((url) => url.includes('/catalogo/ofertas/922/imagem'))).toBe(false);
-  expect(resolveMedicineImages(medicine, 999)).toEqual(medicine.imagem_urls!.slice(0, 3));
+  expect(images[4]).toContain('/catalogo/ofertas/921/imagem');
+  expect(images[5]).toContain('/catalogo/ofertas/922/imagem');
+  expect(resolveMedicineImages(medicine, 999)).toHaveLength(6);
+});
+
+it('prioritizes a verified photo from the card pharmacy, then cross-pharmacy photos, then generic art', () => {
+  const medicine = {
+    ...item,
+    id: 73,
+    nome: 'Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+    codigo_barras: '7899095202412',
+    imagem_urls: [],
+    imagem_candidatos: [
+      { url: '/catalogo/medicamentos/73/imagem?link_id=701&v=indiana', pharmacy_id: 3, generic: false },
+      { url: '/catalogo/medicamentos/73/imagem?link_id=702&v=pacheco', pharmacy_id: 2, generic: false },
+    ],
+    ofertas: [
+      { id: 731, farmacia_id: 2, catalogo_id: 73, preco: 12.1, quantidade_estoque: 1, disponivel: true, url_origem: 'https://www.drogariaspacheco.com.br/p/731', imagem_generica: true, imagem_ref: '/catalogo/ofertas/731/imagem' },
+      { id: 732, farmacia_id: 3, catalogo_id: 73, preco: 13.5, quantidade_estoque: 1, disponivel: true, url_origem: 'https://www.farmaciaindiana.com.br/p/732', imagem_generica: true, imagem_ref: '/catalogo/ofertas/732/imagem' },
+    ],
+  } as Medicamento;
+  const images = resolveMedicineImages(medicine, 731);
+  expect(images[0]).toContain('link_id=702');
+  expect(images[1]).toContain('link_id=701');
+  expect(images[2]).toContain('/catalogo/ofertas/731/imagem');
+  expect(images[3]).toContain('/catalogo/ofertas/732/imagem');
+});
+
+it('uses the Indiana generic image on a Pacheco-scoped card when no Pacheco image exists', () => {
+  const medicine = {
+    ...item,
+    id: 331,
+    nome: 'Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+    codigo_barras: '7899095202412',
+    imagem_urls: [],
+    imagem_candidatos: [
+      { url: '/catalogo/ofertas/331/imagem?v=eba652fa5442', pharmacy_id: 1, generic: true },
+    ],
+    ofertas: [{
+      id: 4342, farmacia_id: 3, catalogo_id: 331, preco: 12.10,
+      quantidade_estoque: 1, disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/clonazepam/p',
+      imagem_generica: false,
+    }],
+  } as Medicamento;
+  const image = resolveMedicineImages(medicine, 4342)[0];
+  expect(image).toContain('/catalogo/ofertas/331/imagem');
+  expect(isGenericOfferImage(medicine, image)).toBe(true);
 });
 
 it('chooses the cheapest available offer as a deterministic card reference', () => {

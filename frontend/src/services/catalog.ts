@@ -48,6 +48,7 @@ export function normalizeText(value: unknown) {
 
 export function resolveMedicineImages(medicine: Medicamento, preferredOfferId?: number): string[] {
   const urls = Array.isArray(medicine.imagem_urls) ? medicine.imagem_urls : [];
+  const candidates = Array.isArray(medicine.imagem_candidatos) ? medicine.imagem_candidatos : [];
   const legacyRef = medicine.imagem_ref?.startsWith('/catalogo/medicamentos/')
     ? `${API_URL.replace(/\/+$/, '')}${medicine.imagem_ref}` : undefined;
   const specificCandidates = medicine.imagem_armazenada && legacyRef
@@ -58,26 +59,52 @@ export function resolveMedicineImages(medicine: Medicamento, preferredOfferId?: 
     : [...medicine.ofertas]
       .filter((offer) => offer.disponivel !== false)
       .sort((a, b) => Number(a.preco) - Number(b.preco) || a.id - b.id)[0];
-  const selectedFallback = selectedOffer?.imagem_generica && selectedOffer.imagem_ref
-    ? selectedOffer.imagem_ref.startsWith('/')
-      ? `${API_URL.replace(/\/+$/, '')}${selectedOffer.imagem_ref}`
-      : selectedOffer.imagem_ref
-    : undefined;
   const validHttps = (ordered: (string | null | undefined)[]) => [...new Set(ordered
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
 
   // Bound failed network attempts while still reserving slots for offer images.
   // Catalog-specific images always get tried before pharmacy generic fallbacks.
-  const specific = validHttps(specificCandidates).slice(0, 3);
-  // Never fall through to another pharmacy's image. Without an explicitly
-  // selected offer, the deterministic reference is the cheapest available one.
-  const generic = validHttps([selectedFallback]);
+  const selectedPharmacyId = selectedOffer?.farmacia_id;
+  const ownFirst = <T extends { pharmacy_id: number }>(items: T[]) => [...items].sort((a, b) =>
+    Number(b.pharmacy_id === selectedPharmacyId) - Number(a.pharmacy_id === selectedPharmacyId));
+  const storedSpecific = ownFirst(candidates.filter((candidate) => !candidate.generic))
+    .map((candidate) => candidate.url.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${candidate.url}`
+      : candidate.url);
+  const specific = validHttps([...storedSpecific, ...specificCandidates]).slice(0, 3);
+  const storedGeneric = ownFirst(candidates.filter((candidate) => candidate.generic))
+    .map((candidate) => candidate.url.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${candidate.url}`
+      : candidate.url);
+  const orderedGenericOffers = ownFirst(medicine.ofertas
+    .filter((offer) => offer.imagem_generica && offer.imagem_ref)
+    .map((offer) => ({ offer, pharmacy_id: offer.farmacia_id })));
+  const seenGenericPharmacies = new Set<number>();
+  const genericOffers = orderedGenericOffers
+    .filter(({ pharmacy_id }) => {
+      if (seenGenericPharmacies.has(pharmacy_id)) return false;
+      seenGenericPharmacies.add(pharmacy_id);
+      return true;
+    })
+    .map(({ offer }) => offer.imagem_ref!.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${offer.imagem_ref}`
+      : offer.imagem_ref);
+  const generic = validHttps([...storedGeneric, ...genericOffers]);
   return [...new Set([...specific, ...generic])];
 }
 
 export function isGenericOfferImage(medicine: Medicamento, url: string | undefined): boolean {
   if (!url) return false;
+  const normalizedUrl = url.startsWith('/')
+    ? `${API_URL.replace(/\/+$/, '')}${url}`
+    : url;
+  if (medicine.imagem_candidatos?.some((candidate) => {
+    const resolved = candidate.url.startsWith('/')
+      ? `${API_URL.replace(/\/+$/, '')}${candidate.url}`
+      : candidate.url;
+    return candidate.generic && resolved === normalizedUrl;
+  })) return true;
   return medicine.ofertas.some((offer) => {
     if (!offer.imagem_generica || !offer.imagem_ref) return false;
     const resolved = offer.imagem_ref.startsWith('/')

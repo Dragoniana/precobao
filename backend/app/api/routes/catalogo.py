@@ -13,7 +13,11 @@ from app.models.farmacia import Farmacia
 from app.models.medicine_image import MedicineImageBlob, MedicineImageLink
 from app.schemas import CatalogoFiltrosOut, CatalogoPageOut
 from app.schemas.farmacia import FarmaciaOut
-from app.services.catalog_response import with_registry_images
+from app.services.catalog_response import (
+    with_registry_images,
+    with_registry_images_for_products,
+)
+from app.services.imagens import gtin_matches
 
 router = APIRouter(prefix="/catalogo", tags=["Catálogo de Produtos"])
 
@@ -103,7 +107,7 @@ def listar_mais_baratos(
         .scalars()
         .all()
     )
-    return [with_registry_images(product) for product in products]
+    return with_registry_images_for_products(products, db)
 
 
 @router.get(
@@ -120,14 +124,17 @@ def obter_medicamento(medicamento_id: int, db: Session = Depends(get_db)):
     ).scalar_one_or_none()
     if medicamento is None:
         raise HTTPException(status_code=404, detail="Medicamento não encontrado.")
-    return with_registry_images(medicamento)
+    return with_registry_images_for_products([medicamento], db)[0]
 
 
 @router.get("/medicamentos/{medicamento_id}/imagem", include_in_schema=False)
 def servir_imagem_catalogo(
-    medicamento_id: int, request: Request, db: Session = Depends(get_db)
+    medicamento_id: int,
+    request: Request,
+    link_id: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
 ):
-    return _servir_imagem_catalogo(medicamento_id, db, request)
+    return _servir_imagem_catalogo(medicamento_id, db, request, link_id=link_id)
 
 
 def redirecionar_imagem_catalogo(medicamento_id: int, db: Session):
@@ -169,7 +176,13 @@ def servir_imagem_fallback_oferta(
     )
 
 
-def _servir_imagem_catalogo(medicamento_id: int, db: Session, request: Request | None):
+def _servir_imagem_catalogo(
+    medicamento_id: int,
+    db: Session,
+    request: Request | None,
+    *,
+    link_id: int | None = None,
+):
     medicamento = db.execute(
         select(CatalogoBase)
         .where(CatalogoBase.id == medicamento_id)
@@ -180,17 +193,32 @@ def _servir_imagem_catalogo(medicamento_id: int, db: Session, request: Request |
     if medicamento is None:
         raise HTTPException(status_code=404, detail="Imagem nao encontrada.")
 
-    stored = db.execute(
-        select(MedicineImageBlob)
+    stored_query = (
+        select(MedicineImageBlob, MedicineImageLink.ean)
         .join(MedicineImageLink, MedicineImageLink.blob_id == MedicineImageBlob.id)
         .where(
             MedicineImageLink.catalog_id == medicamento_id,
-            MedicineImageLink.is_primary.is_(True),
+            MedicineImageLink.is_generic.is_(False),
         )
-        .order_by(MedicineImageLink.updated_at.desc(), MedicineImageLink.id.desc())
         .options(undefer(MedicineImageBlob.image_data))
-        .limit(1)
-    ).scalar_one_or_none()
+    )
+    if link_id is not None:
+        stored_query = stored_query.where(MedicineImageLink.id == link_id)
+    else:
+        stored_query = (
+            stored_query.where(MedicineImageLink.is_primary.is_(True))
+            .order_by(MedicineImageLink.updated_at.desc(), MedicineImageLink.id.desc())
+        )
+    stored_row = db.execute(stored_query.limit(1)).first()
+    stored = None
+    if stored_row is not None:
+        candidate, image_ean = stored_row
+        if (
+            not medicamento.codigo_barras
+            or not image_ean
+            or gtin_matches(medicamento.codigo_barras, image_ean)
+        ):
+            stored = candidate
     if stored is not None:
         etag = f'"{stored.sha256}"'
         cache_headers = {
@@ -349,7 +377,7 @@ def listar_catalogo_completo(
         total=total,
         limit=limit,
         offset=offset,
-        items=[with_registry_images(product) for product in resultados],
+        items=with_registry_images_for_products(resultados, db),
     )
 
 

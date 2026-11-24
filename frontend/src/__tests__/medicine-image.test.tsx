@@ -74,6 +74,40 @@ it('labels a pharmacy generic fallback as illustrative rather than exact packagi
   expect(screen.getByLabelText('Imagem ilustrativa fornecida pela farmácia para Medicamento de teste')).toBeTruthy();
 });
 
+it('labels a cross-pharmacy generic candidate on a pharmacy-scoped card', async () => {
+  const medicine = {
+    id: 331,
+    nome: 'Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+    codigo_barras: '7899095202412',
+    principio_ativo: '',
+    laboratorio: '',
+    exige_receita: false,
+    categorias: [],
+    imagem_candidatos: [
+      { url: '/catalogo/ofertas/331/imagem?v=eba652fa5442', pharmacy_id: 1, generic: true },
+    ],
+    ofertas: [{
+      id: 4342,
+      farmacia_id: 3,
+      catalogo_id: 331,
+      preco: 12.1,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/clonazepam/p',
+      farmacia_nome: 'Pacheco',
+      imagem_generica: false,
+    }],
+  } as Medicamento;
+  const screen = await render(
+    <MedicineImage medicine={medicine} preferredOfferId={4342} />,
+  );
+  await fireEvent(screen.getByTestId('medicine-image'), 'load');
+  expect(screen.getByText('Imagem ilustrativa')).toBeTruthy();
+  expect(screen.getByLabelText(
+    'Imagem ilustrativa fornecida pela farmácia para Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+  )).toBeTruthy();
+});
+
 it('falls through failed specific images to a pharmacy fallback and then the placeholder', async () => {
   const medicine = {
     id: 13,

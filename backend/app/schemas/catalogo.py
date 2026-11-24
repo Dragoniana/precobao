@@ -35,6 +35,12 @@ class CatalogoBaseSchema(BaseModel):
     classificacao_fonte: str | None = None
 
 
+class CatalogImageCandidate(BaseModel):
+    url: str
+    pharmacy_id: int
+    generic: bool = False
+
+
 class CatalogoOut(CatalogoBaseSchema):
     """
     Schema de saída (Response) para a entidade de Catálogo.
@@ -46,6 +52,7 @@ class CatalogoOut(CatalogoBaseSchema):
     atualizado_em: datetime | None = None
     imagem_url: str | None = None
     imagem_urls: list[str] = Field(default_factory=list)
+    imagem_candidatos: list[CatalogImageCandidate] = Field(default_factory=list)
     imagem_fonte: str | None = None
     imagem_status: str | None = None
     imagem_motivo_rejeicao: str | None = None

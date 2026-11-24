@@ -31,7 +31,7 @@ from app.schemas.catalogo import CatalogoComOfertasOut
 from app.schemas.farmacia import FarmaciaOut
 from app.schemas.password_recovery import PasswordResetConfirm, PasswordResetRequest
 from app.schemas.usuario import UsuarioCreate, UsuarioRead, UsuarioUpdate
-from app.services.catalog_response import with_registry_images
+from app.services.catalog_response import with_registry_images_for_products
 from app.services.password_reset_email import deliver_password_reset_email
 
 router = APIRouter(tags=["Usuários e Autenticação"])
@@ -263,7 +263,7 @@ def list_medicamentos_favoritos(
         .scalars()
         .all()
     )
-    return [with_registry_images(product) for product in products]
+    return with_registry_images_for_products(products, db)
 
 
 @router.post(

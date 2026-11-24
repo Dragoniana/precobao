@@ -96,6 +96,11 @@ export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem ind
           style={[styles.image, imageStyle]}
         />
       ) : null}
+      {visibleUrl && imageLoaded && genericFallback ? (
+        <View pointerEvents="none" style={styles.genericBadge}>
+          <Text style={styles.genericBadgeText}>Imagem ilustrativa</Text>
+        </View>
+      ) : null}
       {(!visibleUrl || !imageLoaded) && (
         <View
           pointerEvents="none"
@@ -136,6 +141,8 @@ export function MedicineImage({ medicine, style, imageStyle, label = 'Imagem ind
 const useStyles = createThemedStyles((palette) => ({
   container: { overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: palette.imageSurface },
   image: { width: '100%', height: '100%' },
+  genericBadge: { position: 'absolute', right: 5, bottom: 5, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 3, backgroundColor: palette.surface, opacity: 0.88 },
+  genericBadgeText: { color: palette.muted, fontSize: 9, lineHeight: 12, fontWeight: '600' },
   placeholder: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center', gap: 6, padding: 8, backgroundColor: palette.imageSurface },
   pharmacyPlaceholder: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center', gap: 2, padding: 3, backgroundColor: palette.imageSurface },
   pharmacyPlaceholderLarge: { gap: 8, padding: 12 },

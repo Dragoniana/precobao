@@ -218,6 +218,14 @@ def test_hmac_binary_upload_persists_bytea_deduplicates_and_serves_with_etag(
     assert catalog.json()["imagem_ref"].startswith(
         f"/catalogo/medicamentos/{catalog_id}/imagem?v="
     )
+    assert catalog.json()["imagem_candidatos"] == [
+        {
+            "url": catalog.json()["imagem_candidatos"][0]["url"],
+            "pharmacy_id": link.pharmacy_id,
+            "generic": False,
+        }
+    ]
+    assert f"link_id={link.id}" in catalog.json()["imagem_candidatos"][0]["url"]
     assert "image_data" not in catalog.json()
 
     image_response = client.get(f"/catalogo/medicamentos/{catalog_id}/imagem")
@@ -322,6 +330,155 @@ def test_hmac_binary_upload_persists_bytea_deduplicates_and_serves_with_etag(
         assert restored_bytes == stored_content
         assert hashlib.sha256(restored_bytes).hexdigest() == stored_sha256
 
+
+def test_card_can_serve_verified_photo_from_another_pharmacy(image_client):
+    client, sessions, catalog_id = image_client
+    content = _image_bytes((110, 170, 220))
+    body = _request_body(content)
+    uploaded = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
+    assert uploaded.status_code == 200
+
+    with sessions() as db:
+        blob = db.execute(select(MedicineImageBlob)).scalar_one()
+        indiana = Farmacia(
+            cnpj="98765432000195",
+            razao_social="Farmácia Indiana S.A.",
+            nome_fantasia="Farmácia Indiana",
+            endereco_completo="Governador Valadares - MG",
+        )
+        pacheco = Farmacia(
+            cnpj="98765432000196",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Drogarias Pacheco",
+            endereco_completo="Rio de Janeiro - RJ",
+        )
+        db.add_all([indiana, pacheco])
+        db.flush()
+        offer = OfertaFarmacia(
+            sku_interno="PCH-TEST-2412",
+            preco=12.10,
+            quantidade_estoque=1,
+            disponivel=True,
+            url_origem="https://www.drogariaspacheco.com.br/produto/teste-2412",
+            contexto_chave="global",
+            farmacia_id=pacheco.id,
+            catalogo_id=catalog_id,
+        )
+        link = MedicineImageLink(
+            blob_id=blob.id,
+            catalog_id=catalog_id,
+            pharmacy_id=indiana.id,
+            offer_id=None,
+            sku="IND-TEST-2412",
+            ean="7897705203095",
+            source="indiana",
+            source_image_url="https://www.farmaciaindiana.com.br/images/medicine.jpg",
+            is_primary=False,
+            is_generic=False,
+        )
+        db.add_all([offer, link])
+        db.commit()
+        link_id = link.id
+        indiana_id = indiana.id
+
+    response = client.get(f"/catalogo/medicamentos/{catalog_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(item["farmacia_id"] != indiana_id for item in payload["ofertas"])
+    candidate = next(
+        item
+        for item in payload["imagem_candidatos"]
+        if f"link_id={link_id}" in item["url"]
+    )
+    assert candidate["pharmacy_id"] == indiana_id
+    assert candidate["generic"] is False
+    image = client.get(candidate["url"])
+    assert image.status_code == 200
+    assert image.content == content
+
+
+def test_cross_pharmacy_image_candidate_rejects_conflicting_ean(image_client):
+    client, sessions, catalog_id = image_client
+    body = _request_body(_image_bytes())
+    uploaded = client.post(
+        IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body)
+    )
+    assert uploaded.status_code == 200
+    with sessions() as db:
+        blob = db.execute(select(MedicineImageBlob)).scalar_one()
+        link = MedicineImageLink(
+            blob_id=blob.id,
+            catalog_id=catalog_id,
+            pharmacy_id=1,
+            offer_id=None,
+            sku="ARJ-CONFLICT",
+            ean="7891234567895",
+            source="araujo",
+            source_image_url="https://i3-imagens-prd.araujo.com.br/conflict.jpg",
+            is_primary=False,
+            is_generic=False,
+        )
+        db.add(link)
+        db.commit()
+        link_id = link.id
+    payload = client.get(f"/catalogo/medicamentos/{catalog_id}").json()
+    assert all(
+        f"link_id={link_id}" not in item["url"]
+        for item in payload["imagem_candidatos"]
+    )
+    rejected = client.get(
+        f"/catalogo/medicamentos/{catalog_id}/imagem?link_id={link_id}"
+    )
+    assert rejected.status_code == 404
+
+
+def test_pharmacy_scoped_search_includes_other_pharmacy_generic_fallback(image_client):
+    client, sessions, catalog_id = image_client
+    body = _request_body(
+        _image_bytes(),
+        is_generic_fallback=True,
+        source_image_url="https://i3-imagens-prd.araujo.com.br/generic-placeholder.jpg",
+    )
+    uploaded = client.post(IMAGE_UPLOAD_ENDPOINT, content=body, headers=_headers(body))
+    assert uploaded.status_code == 200
+    with sessions() as db:
+        pacheco = Farmacia(
+            cnpj="98765432000196",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Drogarias Pacheco",
+            endereco_completo="Rio de Janeiro - RJ",
+        )
+        db.add(pacheco)
+        db.flush()
+        db.add(
+            OfertaFarmacia(
+                sku_interno="PCH-TEST-CROSS",
+                preco=12.10,
+                quantidade_estoque=1,
+                disponivel=True,
+                url_origem="https://www.drogariaspacheco.com.br/produto/teste-cross",
+                contexto_chave="global",
+                farmacia_id=pacheco.id,
+                catalogo_id=catalog_id,
+            )
+        )
+        db.commit()
+        pacheco_id = pacheco.id
+
+    response = client.get(
+        "/catalogo",
+        params={"farmacia_id": pacheco_id, "termo_busca": "Medicamento de teste"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert len(item["ofertas"]) == 1
+    assert item["ofertas"][0]["farmacia_id"] == pacheco_id
+    candidate = next(
+        image for image in item["imagem_candidatos"] if image["generic"]
+    )
+    assert candidate["pharmacy_id"] == 1
+    image = client.get(candidate["url"])
+    assert image.status_code == 200
 
 def test_image_endpoint_uses_the_shared_secret_file(
     image_client, monkeypatch, tmp_path
