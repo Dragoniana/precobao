@@ -8,14 +8,13 @@ import email.utils
 import hashlib
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
-
-import httpx
 
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import (
@@ -23,6 +22,7 @@ from app.scrapers.partner_feed import (
     PartnerFeedRateLimited,
     load_authorized_partner_feed,
 )
+from app.scrapers.source_http_client import open_source_http_client, source_http_config
 from app.scrapers.source_modes import (
     SourceMode,
     direct_access_ready,
@@ -30,6 +30,7 @@ from app.scrapers.source_modes import (
 from app.scrapers.source_modes import (
     source_mode as configured_source_mode,
 )
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -92,6 +93,7 @@ class PachecoScraper(BasePharmacyScraper):
         )
         self.max_items = max_items
         self.request_delay = request_delay
+        self.http_timeout = source_http_config("pacheco").timeout
         self.source_mode = (
             SourceMode(source_mode.upper())
             if isinstance(source_mode, str)
@@ -102,9 +104,27 @@ class PachecoScraper(BasePharmacyScraper):
         self.stats: dict[str, Any] = self._new_stats({})
         self.items_enqueued = 0
         self._seen_source_ids: set[str] = set()
+        self.products_callback: (
+            Callable[[list[dict[str, Any]]], Awaitable[int | None]] | None
+        ) = None
+        self.stop_requested_callback: Callable[[], bool] | None = None
+        self.stop_reason_callback: Callable[[], str | None] | None = None
+        self.collector_delivery_failed = False
 
     @staticmethod
     def _new_stats(previous: dict[str, Any]) -> dict[str, Any]:
+        cursor = previous.get("scan_cursor")
+        if not isinstance(cursor, dict):
+            legacy_offset = previous.get("last_completed_offset")
+            legacy_status = str(previous.get("status", "")).casefold()
+            if (
+                legacy_offset is not None
+                and legacy_status in {"limited", "partial", "running"}
+                and not previous.get("brands_processed")
+            ):
+                cursor = {"stage": "root", "offset": int(legacy_offset) + 50}
+            else:
+                cursor = {"stage": "root", "offset": 0}
         return {
             "run_id": datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ"),
             "started_at": datetime.now(UTC).isoformat(),
@@ -113,7 +133,8 @@ class PachecoScraper(BasePharmacyScraper):
             "complete": False,
             "resumed_after_interruption": previous.get("status") == "running",
             "previous_run_id": previous.get("run_id"),
-            "resume_strategy": "replay_from_first_page",
+            "resume_strategy": "durable_partition_and_offset_cursor",
+            "scan_cursor": cursor,
             "last_completed_offset": None,
             "pages_requested": 0,
             "pages_succeeded": 0,
@@ -137,6 +158,7 @@ class PachecoScraper(BasePharmacyScraper):
             "root_search_capped": False,
             "retryable": False,
             "last_http_status": None,
+            "failure_category": None,
             "retry_after_seconds": None,
             "partition_errors": [],
             "partition_discrepancies": [],
@@ -148,6 +170,13 @@ class PachecoScraper(BasePharmacyScraper):
     def _start_run(self) -> None:
         previous = self._read_checkpoint()
         self.stats = self._new_stats(previous)
+        self.stats.update(
+            {
+                key: value
+                for key, value in previous.items()
+                if key.startswith("http_403_")
+            }
+        )
         self.items_enqueued = 0
         self.persistence_stats = {key: 0 for key in self.persistence_stats}
         self._seen_source_ids.clear()
@@ -156,8 +185,10 @@ class PachecoScraper(BasePharmacyScraper):
     def _read_checkpoint(self) -> dict[str, Any]:
         try:
             return json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("PACHECO_CHECKPOINT_INVALID") from error
 
     def _write_checkpoint(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -221,13 +252,23 @@ class PachecoScraper(BasePharmacyScraper):
                 raise
             finally:
                 self.stats["persistence"] = self.persistence_stats.copy()
+                if any(
+                    self.persistence_stats[key]
+                    for key in ("persistence_errors", "image_errors")
+                ):
+                    self.stats["failure_category"] = "database_persistence_error"
                 self.stats["finished_at"] = datetime.now(UTC).isoformat()
                 if self.stats["status"] == "running":
                     persistence_ok = not any(
                         self.persistence_stats[key]
                         for key in ("persistence_errors", "image_errors")
                     )
-                    if self.stats["complete"] and persistence_ok:
+                    if self.stats.get("stop_reason") in {
+                        "HTTP_BUDGET_EXHAUSTED",
+                        "MEDICINE_BUDGET_EXHAUSTED",
+                    }:
+                        self.stats["status"] = self.stats["stop_reason"]
+                    elif self.stats["complete"] and persistence_ok:
                         self.stats["status"] = "complete"
                     elif self.stats["stop_reason"] == "configured_item_limit":
                         self.stats["status"] = "limited"
@@ -299,29 +340,38 @@ class PachecoScraper(BasePharmacyScraper):
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
 
-        async with httpx.AsyncClient(
-            headers=headers,
-            verify=True,
-            follow_redirects=False,
-            timeout=30.0,
-        ) as session:
-            root_complete = await self._scan_partition(
-                session,
-                self.API_BASE,
-                partition="medicamentos",
-                max_offset=self.MAX_BROAD_SEARCH_OFFSET,
-            )
+        async with open_source_http_client("pacheco", headers=headers) as session:
+            cursor = self.stats.get("scan_cursor") or {"stage": "root", "offset": 0}
+            root_complete = True
+            if cursor.get("stage", "root") == "root":
+                root_complete = await self._scan_partition(
+                    session,
+                    self.API_BASE,
+                    partition="medicamentos",
+                    max_offset=self.MAX_BROAD_SEARCH_OFFSET,
+                    initial_offset=max(0, int(cursor.get("offset", 0))),
+                    cursor_stage="root",
+                )
+            if self.stats.get("stop_reason") in {
+                "safe_stop_requested",
+                "HTTP_BUDGET_EXHAUSTED",
+                "MEDICINE_BUDGET_EXHAUSTED",
+            }:
+                return
             if self._limit_reached():
                 return
             if not root_complete:
                 self.stats["partition_errors"].append("medicamentos")
-                if self.stats.get("last_http_status") in {403, 429}:
+                if (
+                    self.stats.get("last_http_status") in {403, 429}
+                    or self.collector_delivery_failed
+                ):
                     return
 
             self.stats["facet_requests"] = self.stats.get("facet_requests", 0) + 1
             try:
                 facets_response = await self.executar_com_backoff(
-                    session.get, self.FACETS_API, timeout=30.0
+                    session.get, self.FACETS_API, timeout=self.http_timeout
                 )
                 if facets_response.status_code not in (200, 206):
                     self._record_http_failure(
@@ -341,6 +391,11 @@ class PachecoScraper(BasePharmacyScraper):
                     int(brand.get("Quantity", 0)) for brand in brands
                 )
                 self._write_checkpoint()
+            except ExternalRequestDeferred as deferred:
+                self.stats["stop_reason"] = deferred.reason
+                self.stats["status"] = deferred.reason
+                self._write_checkpoint()
+                raise
             except Exception as error:
                 self._page_failed(
                     f"Facet request failed: {type(error).__name__}: {error}"
@@ -352,7 +407,33 @@ class PachecoScraper(BasePharmacyScraper):
                 return
 
             seen_brand_paths: set[str] = set()
-            for brand in brands:
+            cursor = self.stats.get("scan_cursor") or {
+                "stage": "brand",
+                "brand_index": 0,
+            }
+            if cursor.get("stage") == "root":
+                cursor = {"stage": "brand", "brand_index": 0, "offset": 0}
+                self.stats["scan_cursor"] = cursor
+                self._write_checkpoint()
+            start_brand_index = max(0, int(cursor.get("brand_index", 0)))
+            saved_path = cursor.get("brand_path")
+            if saved_path:
+                matching_index = next(
+                    (
+                        index
+                        for index, item in enumerate(brands)
+                        if urlsplit(item.get("Link") or "").path == saved_path
+                    ),
+                    None,
+                )
+                if matching_index is not None:
+                    start_brand_index = matching_index
+                else:
+                    cursor = {"stage": "brand", "brand_index": 0, "offset": 0}
+                    self.stats["scan_cursor"] = cursor
+                    start_brand_index = 0
+                    self._write_checkpoint()
+            for brand_index, brand in enumerate(brands):
                 if self._limit_reached():
                     break
                 link = brand.get("Link") or ""
@@ -362,6 +443,8 @@ class PachecoScraper(BasePharmacyScraper):
                     self.stats["duplicate_brand_facets_skipped"] += 1
                     continue
                 seen_brand_paths.add(path)
+                if brand_index < start_brand_index:
+                    continue
                 if not path.startswith("/medicamentos/") or quantity <= 0:
                     self._page_failed(
                         f"Invalid brand partition link or quantity: {brand.get('Name')}"
@@ -377,18 +460,46 @@ class PachecoScraper(BasePharmacyScraper):
                     expected_count=quantity,
                     max_offset=self.MAX_BROAD_SEARCH_OFFSET,
                     query_map="c,b",
+                    initial_offset=(
+                        max(0, int(cursor.get("offset", 0)))
+                        if brand_index == start_brand_index
+                        and cursor.get("stage") == "brand"
+                        else 0
+                    ),
+                    cursor_stage="brand",
+                    cursor_brand_index=brand_index,
+                    cursor_brand_path=path,
                 )
+                if self.stats.get("stop_reason") in {
+                    "safe_stop_requested",
+                    "HTTP_BUDGET_EXHAUSTED",
+                    "MEDICINE_BUDGET_EXHAUSTED",
+                }:
+                    break
                 if succeeded:
                     self.stats["brands_processed"] += 1
+                    if not self._limit_reached():
+                        self.stats["scan_cursor"] = {
+                            "stage": "brand",
+                            "brand_index": brand_index + 1,
+                            "offset": 0,
+                        }
                 else:
                     self.stats["partition_errors"].append(str(brand.get("Name")))
-                    if self.stats.get("last_http_status") in {403, 429}:
+                    if (
+                        self.stats.get("last_http_status") in {403, 429}
+                        or self.collector_delivery_failed
+                    ):
                         break
                 self._write_checkpoint()
 
             if self._limit_reached():
                 return
             self.stats["brands_unique_partitions"] = len(seen_brand_paths)
+            if start_brand_index >= len(brands) or (
+                self.stats.get("scan_cursor", {}).get("brand_index", 0) >= len(brands)
+            ):
+                self.stats["scan_cursor"] = {"stage": "root", "offset": 0}
 
             expected_total = self.stats["facet_reported_total"]
             found_total = self.stats["unique_source_products"]
@@ -419,9 +530,17 @@ class PachecoScraper(BasePharmacyScraper):
         expected_count: int | None = None,
         max_offset: int | None = None,
         query_map: str = "c",
+        initial_offset: int = 0,
+        cursor_stage: str = "root",
+        cursor_brand_index: int | None = None,
+        cursor_brand_path: str | None = None,
     ) -> bool:
         """Read a VTEX partition using its advertised item count when available."""
-        offset = 0
+        offset = initial_offset
+        resume_item_index = max(
+            0,
+            int((self.stats.get("scan_cursor") or {}).get("item_index", 0)),
+        )
         while True:
             if self._limit_reached():
                 return True
@@ -441,7 +560,7 @@ class PachecoScraper(BasePharmacyScraper):
             print(f"Pacheco {partition}: items {offset}-{end}")
             try:
                 response = await self.executar_com_backoff(
-                    session.get, url, timeout=30.0
+                    session.get, url, timeout=self.http_timeout
                 )
                 if response.status_code not in (200, 206):
                     self._record_http_failure(
@@ -453,6 +572,38 @@ class PachecoScraper(BasePharmacyScraper):
                 if not isinstance(raw_products, list):
                     self._page_failed(f"Non-list JSON at {partition} offset {offset}")
                     return False
+                range_header = getattr(response, "headers", {}).get(
+                    "resources"
+                ) or getattr(response, "headers", {}).get("Content-Range")
+                if response.status_code == 206 and range_header:
+                    match = re.search(r"(\d+)-(\d+)/(\d+|\*)", range_header)
+                    if not match:
+                        self._page_failed(
+                            "Invalid partial-content range at "
+                            f"{partition} offset {offset}"
+                        )
+                        return False
+                    range_start, range_end = int(match.group(1)), int(match.group(2))
+                    range_total = int(match.group(3)) if match.group(3) != "*" else None
+                    if (
+                        range_start != offset
+                        or range_end < range_start
+                        or range_end - range_start + 1 != len(raw_products)
+                        or range_end > end
+                        or (range_total is not None and range_end >= range_total)
+                        or (
+                            expected_count is not None
+                            and range_total is not None
+                            and expected_count != range_total
+                        )
+                    ):
+                        self._page_failed(
+                            "Incomplete partial-content page at "
+                            f"{partition} offset {offset}"
+                        )
+                        return False
+                    if expected_count is None and range_total is not None:
+                        expected_count = range_total
                 if not raw_products:
                     if expected_count is not None and offset < expected_count:
                         self.stats["partition_discrepancies"].append(
@@ -461,12 +612,28 @@ class PachecoScraper(BasePharmacyScraper):
                         )
                         return True
                     if expected_count is None:
+                        if response.status_code == 206:
+                            self._page_failed(
+                                "HTTP 206 empty page has no advertised total: "
+                                f"{partition} offset {offset}"
+                            )
+                            return False
                         self.stats["complete"] = True
                         self.stats["stop_reason"] = "empty_page"
                     return True
                 if len(raw_products) > self.ITEMS_PER_PAGE:
                     self._page_failed(
                         f"Page exceeded {self.ITEMS_PER_PAGE} items at {partition}"
+                    )
+                    return False
+                if (
+                    expected_count is None
+                    and len(raw_products) < self.ITEMS_PER_PAGE
+                    and response.status_code == 206
+                ):
+                    self._page_failed(
+                        "HTTP 206 short page has no advertised total: "
+                        f"{partition} offset {offset}"
                     )
                     return False
 
@@ -480,10 +647,49 @@ class PachecoScraper(BasePharmacyScraper):
                     return False
                 previous.append(signature)
 
-                self.stats["pages_succeeded"] += 1
-                self.stats["last_completed_offset"] = offset
                 self.stats["products_seen"] += len(raw_products)
-                self._queue_source_products(raw_products)
+                page_products = self._queue_source_products(raw_products)
+                parsed_count = len(page_products)
+                page_products = page_products[resume_item_index:]
+                if self.products_callback is not None and page_products:
+                    try:
+                        delivered = await self.products_callback(page_products)
+                    except Exception:
+                        self.collector_delivery_failed = True
+                        raise
+                else:
+                    delivered = len(page_products)
+                delivered = len(page_products) if delivered is None else int(delivered)
+                if delivered < 0 or delivered > len(page_products):
+                    self._page_failed("Invalid delivered medicine count")
+                    return False
+                self.stats["products_enqueued"] = max(
+                    0,
+                    self.stats["products_enqueued"]
+                    - parsed_count
+                    + delivered,
+                )
+                self.items_enqueued = max(
+                    0, self.items_enqueued - parsed_count + delivered
+                )
+                self.stats["pages_succeeded"] += 1
+                page_is_partial = delivered < len(page_products)
+                if page_is_partial:
+                    cursor = {
+                        "stage": cursor_stage,
+                        "offset": offset,
+                        "item_index": resume_item_index + delivered,
+                    }
+                else:
+                    self.stats["last_completed_offset"] = offset
+                    cursor = {
+                        "stage": cursor_stage,
+                        "offset": offset + self.ITEMS_PER_PAGE,
+                    }
+                if cursor_stage == "brand":
+                    cursor["brand_index"] = cursor_brand_index
+                    cursor["brand_path"] = cursor_brand_path
+                self.stats["scan_cursor"] = cursor
                 self._write_checkpoint()
                 print(
                     f"Pacheco {partition}: {len(raw_products)} source rows; "
@@ -491,6 +697,25 @@ class PachecoScraper(BasePharmacyScraper):
                 )
                 if self.request_delay:
                     await asyncio.sleep(self.request_delay)
+
+                stop_reason = (
+                    self.stop_reason_callback()
+                    if self.stop_reason_callback
+                    else None
+                )
+                if stop_reason is None and self.stop_requested_callback:
+                    if self.stop_requested_callback():
+                        stop_reason = "safe_stop_requested"
+                if stop_reason:
+                    self.stats["stop_reason"] = stop_reason
+                    self._write_checkpoint()
+                    return True
+
+                if page_is_partial:
+                    self.stats["stop_reason"] = "configured_product_budget_exhausted"
+                    self._write_checkpoint()
+                    return True
+                resume_item_index = 0
 
                 if self._limit_reached():
                     return True
@@ -516,14 +741,36 @@ class PachecoScraper(BasePharmacyScraper):
                         self.stats["stop_reason"] = "short_page_end_of_partition"
                     return True
                 offset += self.ITEMS_PER_PAGE
+            except ExternalRequestDeferred as deferred:
+                self.stats["stop_reason"] = deferred.reason
+                self.stats["status"] = deferred.reason
+                self._write_checkpoint()
+                raise
             except Exception as error:
+                error_name = type(error).__name__.casefold()
+                if any(
+                    marker in error_name for marker in ("ssl", "tls", "certificate")
+                ):
+                    self.stats["failure_category"] = "tls_certificate_error"
+                elif "timeout" in error_name:
+                    self.stats["failure_category"] = "network_timeout"
+                elif any(
+                    marker in error_name
+                    for marker in ("jsondecode", "validation", "parse")
+                ):
+                    self.stats["failure_category"] = "parser_error"
+                else:
+                    self.stats["failure_category"] = "transient_network_error"
                 self._page_failed(
                     f"{type(error).__name__} at {partition} offset {offset}: {error}"
                 )
                 return False
         return True
 
-    def _queue_source_products(self, raw_products: list[dict[str, Any]]) -> None:
+    def _queue_source_products(
+        self, raw_products: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        parsed_products: list[dict[str, Any]] = []
         for item in raw_products:
             source_id = str(item.get("productId") or "")
             items = item.get("items") or []
@@ -544,8 +791,10 @@ class PachecoScraper(BasePharmacyScraper):
                 if self.max_items is not None and (
                     self.stats["products_enqueued"] >= self.max_items
                 ):
-                    return
-                self.fila.put_nowait(product)
+                    break
+                if self.products_callback is None:
+                    self.fila.put_nowait(product)
+                parsed_products.append(product)
                 self.stats["products_enqueued"] += 1
                 self.items_enqueued += 1
                 if product.get("imagem_url"):
@@ -564,6 +813,7 @@ class PachecoScraper(BasePharmacyScraper):
                 )
         self.stats["valid_eans"] = sorted(set(self.stats["valid_eans"]))
         self.stats["unique_skus"] = sorted(set(self.stats["unique_skus"]))
+        return parsed_products
 
     def _limit_reached(self) -> bool:
         if self.max_items is None or self.stats["products_enqueued"] < self.max_items:
@@ -573,14 +823,24 @@ class PachecoScraper(BasePharmacyScraper):
 
     def _record_http_failure(self, response: Any, reason: str) -> None:
         status = int(response.status_code)
+        self.stats["failure_category"] = (
+            "source_access_blocked"
+            if status == 403
+            else "rate_limited"
+            if status == 429
+            else "authentication_error"
+            if status in {401, 407}
+            else "transient_server_error"
+            if status in {500, 502, 503, 504}
+            else "source_http_error"
+        )
         if status in {403, 429}:
             self.stats["last_http_status"] = status
             self.stats["retryable"] = False
             self.stats["stop_reason"] = f"http_{status}"
-            if status == 429:
-                self.stats["retry_after_seconds"] = _retry_after_seconds(
-                    getattr(response, "headers", {}).get("Retry-After")
-                )
+            self.stats["retry_after_seconds"] = _retry_after_seconds(
+                getattr(response, "headers", {}).get("Retry-After")
+            )
             self.stats["pages_failed"] += 1
             self.stats["errors"].append(reason)
             self._write_checkpoint()
@@ -593,6 +853,8 @@ class PachecoScraper(BasePharmacyScraper):
     def _page_failed(self, reason: str, *, retryable: bool = True) -> None:
         self.stats["pages_failed"] += 1
         self.stats["retryable"] = retryable
+        if self.stats.get("failure_category") is None:
+            self.stats["failure_category"] = "parser_or_source_data_error"
         self.stats["errors"].append(reason)
         self.stats["stop_reason"] = reason
         self._write_checkpoint()
@@ -683,6 +945,7 @@ class PachecoScraper(BasePharmacyScraper):
             "quantidade_estoque": quantity,
             "link": product_url,
             "imagem_url": self._extrair_imagem(sku_data),
+            "fonte_observado_em": datetime.now(UTC),
         }
 
     @staticmethod

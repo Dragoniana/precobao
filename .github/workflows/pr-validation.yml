@@ -56,6 +56,12 @@ jobs:
         run: npm test -- --runInBand
       - name: TypeScript
         run: npx tsc --noEmit --project tsconfig.json
+      - name: Production web configuration guard
+        run: npm run test:web-build-validation
+      - name: Android release signing guard
+        run: npm run test:android-signing
+      - name: APK download delivery guard
+        run: npm run test:apk-delivery
       - name: Static web build
         env:
           EXPO_PUBLIC_API_URL: https://precobao.app/backend
@@ -70,3 +76,16 @@ jobs:
           persist-credentials: false
       - name: Validate Compose and complete preflight with non-production fixtures
         run: bash deploy/azure/test-preflight.sh
+      - name: Validate PostgreSQL backup client configuration
+        run: python deploy/azure/test_backup_tools.py
+
+  windows-collector-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate Windows PowerShell 5.1 collector scripts and UTF-8 paths
+        shell: powershell
+        run: .\deploy\windows-scraper-collector\Test-CollectorEncoding.ps1

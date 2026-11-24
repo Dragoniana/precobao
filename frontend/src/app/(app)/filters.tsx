@@ -17,7 +17,12 @@ import { FilterChip } from '../../components/FilterChip';
 import { Screen } from '../../components/Screen';
 import { FilterOption, useCatalogContext } from '../../context/AppContext';
 import { api } from '../../services/api';
-import { formatLaboratoryLabel, normalizeText } from '../../services/catalog';
+import {
+  formatLaboratoryLabel,
+  isSaleTypeFilter,
+  normalizeText,
+  toggleFilterSelection,
+} from '../../services/catalog';
 import { radius, spacing } from '../../theme';
 import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
@@ -86,7 +91,7 @@ export default function FiltersScreen() {
         if (['similar', 'generico'].includes(normalizeText(option.value))) groups.categoria.push(option);
         return;
       }
-      if (option.type === 'receita' || option.type === 'controle_especial') groups.tipo_venda.push(option);
+      if (isSaleTypeFilter(option)) groups.tipo_venda.push(option);
     });
     return groups;
   }, [filteredOptions]);
@@ -103,9 +108,7 @@ export default function FiltersScreen() {
   ));
 
   const isSelected = (option: FilterOption) => temporaryFilters.some((item) => item.id === option.id);
-  const toggleFilter = (option: FilterOption) => setTemporaryFilters((current) => current.some((item) => item.id === option.id)
-    ? current.filter((item) => item.id !== option.id)
-    : [...current, option]);
+  const toggleFilter = (option: FilterOption) => setTemporaryFilters((current) => toggleFilterSelection(current, option));
   const toggleSection = (section: SectionKind) => setExpanded((current) => current.includes(section)
     ? current.filter((item) => item !== section) : [...current, section]);
   const handleApply = () => {
@@ -177,7 +180,7 @@ export default function FiltersScreen() {
             const options = groupedOptions[section];
             if (!options.length) return null;
             const selected = section === 'tipo_venda'
-              ? temporaryFilters.filter((item) => item.type === 'receita' || item.type === 'controle_especial')
+              ? temporaryFilters.filter(isSaleTypeFilter)
               : temporaryFilters.filter((item) => item.type === section);
             const open = expanded.includes(section) || Boolean(search.trim());
             return (

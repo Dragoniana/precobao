@@ -5,6 +5,7 @@ from app.scrapers.pacheco import PachecoScraper
 from app.services import image_registry
 from app.services.image_registry import (
     normalize_image_url,
+    resolve_catalog_image_candidates,
     resolve_catalog_images,
     upsert_image_reference,
     upsert_image_references,
@@ -95,10 +96,29 @@ def test_catalog_images_follow_the_filtered_pharmacy(monkeypatch, tmp_path):
             offer_id=None,
         )
 
-    indiana = SimpleNamespace(id=10, farmacia_id=1)
-    pacheco = SimpleNamespace(id=20, farmacia_id=4)
+    indiana = SimpleNamespace(id=10, farmacia_id=1, sku_interno="IND-1")
+    pacheco = SimpleNamespace(id=20, farmacia_id=4, sku_interno="PCH-1")
     assert resolve_catalog_images(15, [indiana]) == ["https://cdn.example/indiana.jpg"]
     assert resolve_catalog_images(15, [pacheco]) == ["https://cdn.example/pacheco.jpg"]
+
+    candidates = resolve_catalog_image_candidates(
+        15,
+        [indiana, pacheco],
+        catalog_ean="7891721201806",
+        require_offer_match=True,
+    )
+    assert candidates == [
+        {
+            "url": "https://cdn.example/indiana.jpg",
+            "pharmacy_id": 1,
+            "generic": False,
+        },
+        {
+            "url": "https://cdn.example/pacheco.jpg",
+            "pharmacy_id": 4,
+            "generic": False,
+        },
+    ]
 
 
 def test_exact_catalog_identity_can_deliver_allowed_generic_image(

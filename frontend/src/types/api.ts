@@ -22,6 +22,7 @@ export interface Oferta {
   fonte_observado_em?: string | null;
   imagem_rejeitada?: boolean;
   imagem_generica?: boolean;
+  imagem_ref?: string | null;
   criado_em?: string;
   atualizado_em?: string | null;
   observado_em?: string | null;
@@ -49,7 +50,9 @@ export interface Medicamento {
   classificacao_fonte?: string | null;
   imagem_url?: string | null;
   imagem_urls?: string[];
+  imagem_candidatos?: { url: string; pharmacy_id: number; generic: boolean }[];
   imagem_ref?: string | null;
+  imagem_armazenada?: boolean;
   imagem_fonte?: string | null;
   imagem_status?: string | null;
   imagem_motivo_rejeicao?: string | null;

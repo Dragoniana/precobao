@@ -3,16 +3,20 @@ import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-import { resolveApiUrl } from './apiConfig';
+import { getConfiguredApiUrl, resolveApiUrl } from './apiConfig';
 
 export const API_URL = resolveApiUrl(
-  process.env.EXPO_PUBLIC_API_URL,
+  getConfiguredApiUrl(
+    process.env.EXPO_PUBLIC_API_URL,
+    Constants.expoConfig?.extra?.apiUrl,
+  ),
   Platform.OS,
   __DEV__,
   Constants.expoConfig?.hostUri,
   process.env.EXPO_PUBLIC_ALLOW_INSECURE_LAN_API === 'true',
 );
 export const TOKEN_KEY = 'auth_token';
+export const GUEST_SESSION_KEY = 'guest_session';
 
 /**
  * Platform-aware storage engine to prevent runtime crashes on the Web platform.
@@ -38,6 +42,27 @@ export const tokenStorage = {
       return;
     }
     return SecureStore.deleteItemAsync(TOKEN_KEY);
+  },
+};
+
+export const guestSessionStorage = {
+  get: async (): Promise<boolean> => {
+    if (Platform.OS === 'web') return localStorage.getItem(GUEST_SESSION_KEY) === 'true';
+    return (await SecureStore.getItemAsync(GUEST_SESSION_KEY)) === 'true';
+  },
+  set: async (): Promise<void> => {
+    if (Platform.OS === 'web') {
+      localStorage.setItem(GUEST_SESSION_KEY, 'true');
+      return;
+    }
+    return SecureStore.setItemAsync(GUEST_SESSION_KEY, 'true');
+  },
+  delete: async (): Promise<void> => {
+    if (Platform.OS === 'web') {
+      localStorage.removeItem(GUEST_SESSION_KEY);
+      return;
+    }
+    return SecureStore.deleteItemAsync(GUEST_SESSION_KEY);
   },
 };
 

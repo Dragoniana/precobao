@@ -8,13 +8,15 @@ import {
   fetchFilterOptions,
   fetchMedicine,
   FilterOption,
+  isSaleTypeFilter,
   mergeCatalogMedicine,
+  toggleFilterSelection,
 } from '../services/catalog';
 import { markMedicineOpenTrace } from '../services/medicineOpenPerformance';
 
 const DEFAULT_FILTERS: FilterOption[] = [];
 const isSupportedFilter = (filter: FilterOption) =>
-  ['receita', 'categoria', 'controle_especial', 'laboratorio'].includes(String(filter.type));
+  ['tipo_venda', 'receita', 'categoria', 'controle_especial', 'laboratorio'].includes(String(filter.type));
 
 const CACHE_LIMIT = 180;
 
@@ -90,12 +92,17 @@ export function useCatalogState() {
 
   const toggleFilter = useCallback((filter: FilterOption) => {
     if (!isSupportedFilter(filter)) return;
-    setSelectedFilters((current) => current.some((item) => item.id === filter.id)
-      ? current.filter((item) => item.id !== filter.id)
-      : [...current, filter]);
+    setSelectedFilters((current) => toggleFilterSelection(current, filter));
   }, []);
 
-  const applyFilters = useCallback((filters: FilterOption[]) => setSelectedFilters(filters.filter(isSupportedFilter)), []);
+  const applyFilters = useCallback((filters: FilterOption[]) => {
+    const supported = filters.filter(isSupportedFilter);
+    const selectedSaleType = supported.filter(isSaleTypeFilter).at(-1);
+    setSelectedFilters([
+      ...supported.filter((filter) => !isSaleTypeFilter(filter)),
+      ...(selectedSaleType ? [selectedSaleType] : []),
+    ]);
+  }, []);
   const clearFilters = useCallback(() => setSelectedFilters([]), []);
 
   useEffect(() => {

@@ -233,13 +233,13 @@ def upsert_image_references(references: list[dict[str, Any]]) -> list[bool]:
     return [record is not None for record in prepared]
 
 
-def resolve_catalog_images(
+def resolve_catalog_image_candidates(
     catalog_id: int,
     offers: list[Any] | None = None,
     catalog_ean: str | None = None,
     require_offer_match: bool = False,
-) -> list[str]:
-    """Resolve images with matching offer or exact catalog identity."""
+) -> list[dict[str, Any]]:
+    """Resolve safe image candidates, retaining pharmacy and generic metadata."""
     linked = {
         int(o.id): o for o in (offers or []) if getattr(o, "id", None) is not None
     }
@@ -250,7 +250,8 @@ def resolve_catalog_images(
         if getattr(o, "farmacia_id", None) is not None
     }
     records = _read_records()
-    found: list[str] = []
+    found: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
     for record in records:
         offer_id = record.get("offer_id")
         exact_offer_identity = False
@@ -320,7 +321,7 @@ def resolve_catalog_images(
             exact_offer_identity or exact_catalog_identity
         )
         generic_art = bool(url and is_generic_image_url(url))
-        if not url or url in found or (generic_art and not allow_generic):
+        if not url or url in seen_urls or (generic_art and not allow_generic):
             continue
 
         record_ean = record.get("ean")
@@ -336,8 +337,54 @@ def resolve_catalog_images(
             and not (generic_art and allow_generic)
         ):
             continue
-        found.append(url)
+        pharmacy_id = record.get("pharmacy_id")
+        if pharmacy_id is None and offer_id is not None:
+            offer = linked.get(int(offer_id))
+            pharmacy_id = getattr(offer, "farmacia_id", None)
+        if pharmacy_id is None and linked_offers:
+            pharmacy_id = next(
+                (
+                    getattr(offer, "farmacia_id", None)
+                    for offer in linked_offers
+                    if (
+                        record.get("pharmacy_id") is None
+                        or int(record["pharmacy_id"])
+                        == int(getattr(offer, "farmacia_id", -1))
+                    )
+                    and (
+                        not record.get("sku")
+                        or record.get("sku") == getattr(offer, "sku_interno", None)
+                    )
+                ),
+                None,
+            )
+        seen_urls.add(url)
+        found.append(
+            {
+                "url": url,
+                "pharmacy_id": pharmacy_id,
+                "generic": bool(generic_art or allow_generic),
+            }
+        )
     return found
+
+
+def resolve_catalog_images(
+    catalog_id: int,
+    offers: list[Any] | None = None,
+    catalog_ean: str | None = None,
+    require_offer_match: bool = False,
+) -> list[str]:
+    """Resolve image URLs with matching offer or exact catalog identity."""
+    return [
+        candidate["url"]
+        for candidate in resolve_catalog_image_candidates(
+            catalog_id,
+            offers=offers,
+            catalog_ean=catalog_ean,
+            require_offer_match=require_offer_match,
+        )
+    ]
 
 
 def has_offer_image_reference(*, offer_id: int, catalog_id: int, sku: str) -> bool:

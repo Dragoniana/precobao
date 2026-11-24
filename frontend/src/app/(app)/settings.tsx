@@ -4,6 +4,7 @@ import React from 'react';
 import { Platform, Pressable, Text, View } from 'react-native';
 
 import { Screen } from '../../components/Screen';
+import { MobileAppDownloadSettings } from '../../components/MobileAppDownload';
 import { radius, spacing } from '../../theme';
 import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 
@@ -73,6 +74,8 @@ export default function SettingsScreen() {
           </Text>
         ) : null}
       </View>
+
+      <MobileAppDownloadSettings />
       </View>
     </Screen>
   );

@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { api } from '../services/api';
-import { fetchCatalogPage, fetchFilterOptions, FilterOption, resolveMedicineImage, resolveMedicineImages } from '../services/catalog';
+import { fetchCatalogPage, fetchFilterOptions, FilterOption, isGenericOfferImage, mergeCatalogMedicine, normalizeMedicine, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
 
@@ -11,6 +11,36 @@ const item = {
 };
 
 beforeEach(() => jest.clearAllMocks());
+
+it('preserves cross-pharmacy image candidates while normalizing and refreshing catalog cache entries', () => {
+  const candidate = { url: '/catalogo/medicamentos/18/imagem?link_id=4', pharmacy_id: 1, generic: false };
+  const normalized = normalizeMedicine({ ...item, imagem_candidatos: [candidate] });
+  expect(normalized.imagem_candidatos).toEqual([candidate]);
+
+  const refreshed = normalizeMedicine({ ...item, imagem_candidatos: [] });
+  expect(mergeCatalogMedicine(normalized, refreshed).imagem_candidatos).toEqual([]);
+
+  const partialRefresh = normalizeMedicine({ ...item, imagem_url: 'https://cdn.test/new.webp' });
+  expect(mergeCatalogMedicine(normalized, partialRefresh).imagem_candidatos).toEqual([candidate]);
+
+  const malformed = normalizeMedicine({
+    ...item,
+    imagem_candidatos: [candidate, { url: '/unsafe', pharmacy_id: 'wrong', generic: false }, null],
+  } as unknown as Partial<Medicamento>);
+  expect(malformed.imagem_candidatos).toEqual([candidate]);
+});
+
+it('keeps sale type exclusive while allowing category and laboratory filters together', () => {
+  const saleFree: FilterOption = { id: 'tipo_venda:venda_livre', type: 'tipo_venda', label: 'Venda livre', value: 'venda_livre' };
+  const withPrescription: FilterOption = { id: 'tipo_venda:com_receita', type: 'tipo_venda', label: 'Com receita', value: 'com_receita' };
+  const specialControl: FilterOption = { id: 'tipo_venda:controle_especial', type: 'tipo_venda', label: 'Controle especial', value: 'controle_especial' };
+  const category: FilterOption = { id: 'categoria:similar', type: 'categoria', label: 'Similar', value: 'similar' };
+  const lab: FilterOption = { id: 'laboratorio:cimed', type: 'laboratorio', label: 'Cimed', value: 'Cimed' };
+  const selected = [saleFree, category, lab];
+
+  expect(toggleFilterSelection(selected, specialControl)).toEqual([category, lab, specialControl]);
+  expect(toggleFilterSelection([withPrescription, category], withPrescription)).toEqual([category]);
+});
 
 it('renders only API-resolved registry URLs without pharmacy-specific rules', () => {
   const medicine = {
@@ -36,6 +66,135 @@ it('renders only API-resolved registry URLs without pharmacy-specific rules', ()
   expect(resolveMedicineImages(medicine)).toEqual(medicine.imagem_urls ?? []);
   expect(resolveMedicineImage(medicine)).toBe(medicine.imagem_urls?.[0]);
   expect(resolveMedicineImages({ ...medicine, imagem_urls: [] })).toEqual([]);
+});
+
+it('prefers the API-served database image while keeping legacy URLs as fallback', () => {
+  const medicine = {
+    ...item,
+    id: 42,
+    nome: 'Paracetamol',
+    imagem_armazenada: true,
+    imagem_ref: '/catalogo/medicamentos/42/imagem?v=abc123',
+    imagem_urls: ['https://cdn.example.test/legacy-pack.jpg'],
+    imagem_url: 'https://shop.example.test/older-pack.jpg',
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toContain('/catalogo/medicamentos/42/imagem?v=abc123');
+  expect(images).toContain('https://cdn.example.test/legacy-pack.jpg');
+  expect(images).toContain('https://shop.example.test/older-pack.jpg');
+});
+
+it('uses a pharmacy-scoped generic image after specific catalog images', () => {
+  const medicine = {
+    ...item,
+    id: 71,
+    nome: 'Medicamento de teste',
+    imagem_urls: ['https://cdn.example.test/specific-pack.webp'],
+    ofertas: [{
+      id: 915,
+      farmacia_id: 2,
+      catalogo_id: 71,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/produto/915/p',
+      imagem_generica: true,
+      imagem_ref: '/catalogo/ofertas/915/imagem?v=abc123',
+    }],
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine);
+  expect(images[0]).toBe('https://cdn.example.test/specific-pack.webp');
+  expect(images[1]).toContain('/catalogo/ofertas/915/imagem?v=abc123');
+  expect(isGenericOfferImage(medicine, images[1])).toBe(true);
+});
+
+it('tries the selected pharmacy generic image before generic images from other pharmacies', () => {
+  const medicine = {
+    ...item,
+    id: 72,
+    nome: 'Catálogo com muitos fallbacks',
+    imagem_urls: Array.from({ length: 8 }, (_, index) => `https://cdn.example.test/specific-${index}.webp`),
+    ofertas: [1, 2, 3].map((id) => ({
+      id: 920 + id,
+      farmacia_id: id,
+      catalogo_id: 72,
+      preco: 9.99,
+      quantidade_estoque: 1,
+      disponivel: true,
+      url_origem: `https://www.drogariaspacheco.com.br/produto/${id}/p`,
+      imagem_generica: true,
+      imagem_ref: `/catalogo/ofertas/${920 + id}/imagem?v=generic-${id}`,
+    })),
+  } as Medicamento;
+
+  const images = resolveMedicineImages(medicine, 923);
+  expect(images).toHaveLength(9);
+  expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
+  expect(images.slice(3, 6)).toEqual(medicine.imagem_urls!.slice(3, 6));
+  expect(images[6]).toContain('/catalogo/ofertas/923/imagem');
+  expect(images[7]).toContain('/catalogo/ofertas/921/imagem');
+  expect(images[8]).toContain('/catalogo/ofertas/922/imagem');
+  expect(resolveMedicineImages(medicine, 999)).toHaveLength(9);
+});
+
+it('prioritizes a verified photo from the card pharmacy, then cross-pharmacy photos, then generic art', () => {
+  const medicine = {
+    ...item,
+    id: 73,
+    nome: 'Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+    codigo_barras: '7899095202412',
+    imagem_urls: [],
+    imagem_candidatos: [
+      { url: '/catalogo/medicamentos/73/imagem?link_id=701&v=indiana', pharmacy_id: 3, generic: false },
+      { url: '/catalogo/medicamentos/73/imagem?link_id=702&v=pacheco', pharmacy_id: 2, generic: false },
+    ],
+    ofertas: [
+      { id: 731, farmacia_id: 2, catalogo_id: 73, preco: 12.1, quantidade_estoque: 1, disponivel: true, url_origem: 'https://www.drogariaspacheco.com.br/p/731', imagem_generica: true, imagem_ref: '/catalogo/ofertas/731/imagem' },
+      { id: 732, farmacia_id: 3, catalogo_id: 73, preco: 13.5, quantidade_estoque: 1, disponivel: true, url_origem: 'https://www.farmaciaindiana.com.br/p/732', imagem_generica: true, imagem_ref: '/catalogo/ofertas/732/imagem' },
+    ],
+  } as Medicamento;
+  const images = resolveMedicineImages(medicine, 731);
+  expect(images[0]).toContain('link_id=702');
+  expect(images[1]).toContain('link_id=701');
+  expect(images[2]).toContain('/catalogo/ofertas/731/imagem');
+  expect(images[3]).toContain('/catalogo/ofertas/732/imagem');
+});
+
+it('uses the Indiana generic image on a Pacheco-scoped card when no Pacheco image exists', () => {
+  const medicine = {
+    ...item,
+    id: 331,
+    nome: 'Clonazepam 2,5mg/ml Genérico Geolab 20ml Gotas',
+    codigo_barras: '7899095202412',
+    imagem_urls: [],
+    imagem_candidatos: [
+      { url: '/catalogo/ofertas/331/imagem?v=eba652fa5442', pharmacy_id: 1, generic: true },
+    ],
+    ofertas: [{
+      id: 4342, farmacia_id: 3, catalogo_id: 331, preco: 12.10,
+      quantidade_estoque: 1, disponivel: true,
+      url_origem: 'https://www.drogariaspacheco.com.br/clonazepam/p',
+      imagem_generica: false,
+    }],
+  } as Medicamento;
+  const image = resolveMedicineImages(medicine, 4342)[0];
+  expect(image).toContain('/catalogo/ofertas/331/imagem');
+  expect(isGenericOfferImage(medicine, image)).toBe(true);
+});
+
+it('chooses the cheapest available offer as a deterministic card reference', () => {
+  const medicine = {
+    ...item,
+    nome: 'Teste',
+    imagem_urls: [],
+    ofertas: [
+      { id: 11, farmacia_id: 1, catalogo_id: 18, preco: 15, quantidade_estoque: 1, disponivel: true, url_origem: 'https://araujo.test/p/11', imagem_generica: true, imagem_ref: '/catalogo/ofertas/11/imagem' },
+      { id: 12, farmacia_id: 2, catalogo_id: 18, preco: 9, quantidade_estoque: 1, disponivel: true, url_origem: 'https://pacheco.test/p/12', imagem_generica: true, imagem_ref: '/catalogo/ofertas/12/imagem' },
+    ],
+  } as Medicamento;
+  expect(resolveMedicineImages(medicine)[0]).toContain('/catalogo/ofertas/12/imagem');
 });
 
 it('uses API-resolved primary image and ordered fallbacks for every screen', () => {
@@ -69,8 +228,8 @@ it('requests only the selected server page and serializes combined filters and s
     filters: [
       { id: 'categoria:similar', label: 'Similar', value: 'similar', type: 'categoria' },
       { id: 'laboratorio:lab-a', label: 'Lab A', value: 'Lab A', type: 'laboratorio' },
-      { id: 'receita:com_receita', label: 'Com receita', value: 'com_receita', type: 'receita' },
-      { id: 'controle_especial:sim', label: 'Controle especial', value: 'sim', type: 'controle_especial' },
+      { id: 'tipo_venda:com_receita', label: 'Com receita', value: 'com_receita', type: 'tipo_venda' },
+      { id: 'tipo_venda:controle_especial', label: 'Controle especial', value: 'controle_especial', type: 'tipo_venda' },
       staleReference,
       staleClassification,
     ],
@@ -81,9 +240,9 @@ it('requests only the selected server page and serializes combined filters and s
   expect(requestedUrl).toContain('termo_busca=paracetamol');
   expect(requestedUrl).toContain('farmacia_id=3');
   expect(requestedUrl).toContain('ordenar=menor_preco');
-  expect(requestedUrl.match(/filtros=/g)).toHaveLength(4);
-  expect(requestedUrl).toContain('filtros=receita%3Acom_receita');
-  expect(requestedUrl).toContain('filtros=controle_especial%3Asim');
+  expect(requestedUrl.match(/filtros=/g)).toHaveLength(3);
+  expect(requestedUrl).not.toContain('filtros=tipo_venda%3Acom_receita');
+  expect(requestedUrl).toContain('filtros=tipo_venda%3Acontrole_especial');
   expect(requestedUrl).not.toContain('referencia%3A');
   expect(requestedUrl).not.toContain('classificacao%3A');
   expect(page.total).toBe(37);
@@ -110,7 +269,7 @@ it('does not expose or serialize legacy active-ingredient filters while preservi
   expect(page.items[0].principio_ativo).toBe('Paracetamol');
 });
 
-it('exposes only confirmed sale filters and omits unavailable or retired classifications', async () => {
+it('exposes all sale type filters even when counts are zero and omits retired classifications', async () => {
   (api.get as jest.Mock).mockResolvedValue({ data: {
     categorias: ['Similar', 'Genérico', 'Biológico'],
     laboratorios: [],
@@ -119,11 +278,12 @@ it('exposes only confirmed sale filters and omits unavailable or retired classif
 
   const options = await fetchFilterOptions();
 
-  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Com receita', 'Controle especial']));
+  expect(options.map(({ label }) => label)).toEqual(expect.arrayContaining(['Venda livre', 'Com receita', 'Controle especial']));
   expect(options.map(({ label }) => label)).not.toEqual(expect.arrayContaining([
-    'Venda livre', 'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
+    'Medicamento de referência (ANVISA)', 'Categoria não confirmada', 'Biológico',
   ]));
-  expect(options.filter(({ type }) => type === 'receita' || type === 'controle_especial')).toHaveLength(2);
+  expect(options.filter(({ type }) => type === 'tipo_venda')).toHaveLength(3);
+  expect(options.find(({ value }) => value === 'venda_livre')?.count).toBe(0);
 });
 
 it('keeps a bounded item cache and requests detail by identifier on demand', async () => {

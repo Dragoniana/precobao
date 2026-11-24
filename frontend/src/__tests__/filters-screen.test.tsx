@@ -9,8 +9,9 @@ const mockCatalog = {
   filterOptions: [
     { id: 'categoria:similar', type: 'categoria', label: 'Similar', value: 'similar' },
     { id: 'categoria:biologico', type: 'categoria', label: 'Biológico', value: 'biologico' },
-    { id: 'receita:com_receita', type: 'receita', label: 'Com receita', value: 'com_receita' },
-    { id: 'controle_especial:sim', type: 'controle_especial', label: 'Controle especial', value: 'sim' },
+    { id: 'tipo_venda:venda_livre', type: 'tipo_venda', label: 'Venda livre', value: 'venda_livre', count: 0 },
+    { id: 'tipo_venda:com_receita', type: 'tipo_venda', label: 'Com receita', value: 'com_receita', count: 2 },
+    { id: 'tipo_venda:controle_especial', type: 'tipo_venda', label: 'Controle especial', value: 'controle_especial', count: 1 },
     { id: 'referencia:sim', type: 'referencia', label: 'Medicamento de referência (ANVISA)', value: 'sim' },
     { id: 'classificacao:desconhecida', type: 'classificacao', label: 'Categoria não confirmada', value: 'desconhecida' },
     { id: 'laboratorio:cimed', type: 'laboratorio', label: 'Cimed', value: 'CIMED' },
@@ -42,20 +43,20 @@ it('omits active ingredient filtering and only lists supported medicine categori
   expect(ui.queryByText('Categoria não confirmada')).toBeNull();
 });
 
-it('shows one combined sale section and preserves the API semantics for the two selections', async () => {
+it('shows the sale type options without the removed explanation and allows only one at a time', async () => {
   const ui = await render(<FiltersScreen />);
 
+  expect(ui.getByText('Venda livre')).toBeTruthy();
   expect(ui.getByText('Com receita')).toBeTruthy();
   expect(ui.getByText('Controle especial')).toBeTruthy();
   expect(ui.getAllByText('Controle especial')).toHaveLength(1);
-  expect(ui.queryByText('Venda livre')).toBeNull();
+  expect(ui.queryByText(/sem controle especial/i)).toBeNull();
 
   await fireEvent.press(ui.getByRole('button', { name: 'Com receita' }));
   await fireEvent.press(ui.getByRole('button', { name: 'Controle especial' }));
   await fireEvent.press(ui.getByRole('button', { name: 'Aplicar filtros' }));
 
-  expect(mockCatalog.applyFilters).toHaveBeenCalledWith(expect.arrayContaining([
-    expect.objectContaining({ type: 'receita', value: 'com_receita' }),
-    expect.objectContaining({ type: 'controle_especial', value: 'sim' }),
-  ]));
+  expect(mockCatalog.applyFilters).toHaveBeenCalledWith([
+    expect.objectContaining({ type: 'tipo_venda', value: 'controle_especial' }),
+  ]);
 });

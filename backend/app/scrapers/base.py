@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -16,10 +17,14 @@ from app.models.catalogo import CatalogoBase
 from app.models.farmacia import Farmacia
 from app.models.oferta_farmacia import OfertaFarmacia
 from app.schemas.oferta import ProdutoExtraidoSchema
+from app.scrapers.source_modes import retry_after_seconds
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.enriquecimento import ServicoEnriquecimentoFarmacologico
 from app.services.image_registry import upsert_image_references
 from app.services.imagens import is_generic_image_url
 from app.services.preco_observacoes import registrar_observacao_preco
+
+_TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
 
 
 class BasePharmacyScraper(ABC):
@@ -431,13 +436,26 @@ class BasePharmacyScraper(ABC):
 
                 # Avalia o status no objeto de resposta se existir
                 status = getattr(response, "status_code", 200)
-                if status in {403, 429}:
+                if status == 403:
                     print(
-                        f"HTTP {status} recebido; encerrando a consulta "
-                        "sem retry automático."
+                        "HTTP 403 recebido; encerrando a consulta sem retry "
+                        "dentro da coleta atual."
                     )
                     return response
-                if status >= 500:
+                if status == 429:
+                    retries += 1
+                    if retries > min(max_retries, 2):
+                        print("Limite de três tentativas atingido para HTTP 429.")
+                        return response
+                    wait = retry_after_seconds(
+                        getattr(response, "headers", {}).get("Retry-After")
+                    )
+                    wait = delay if wait is None else wait
+                    print(f"HTTP 429; aguardando Retry-After/backoff por {wait}s.")
+                    await asyncio.sleep(wait)
+                    delay *= 2
+                    continue
+                if status in _TRANSIENT_HTTP_STATUSES:
                     retries += 1
                     if retries > max_retries:
                         print(f"Max retries excedido para o status HTTP {status}.")
@@ -451,18 +469,32 @@ class BasePharmacyScraper(ABC):
 
                 return response
 
+            except ExternalRequestDeferred:
+                raise
             except Exception as e:
                 # Avalia atributos encadeados de exceção (para libraries como httpx)
                 status_obj = getattr(e, "response", None)
                 if status_obj is not None:
                     status_code = getattr(status_obj, "status_code", 0)
-                    if status_code in {403, 429}:
+                    if status_code == 403:
                         print(
-                            f"HTTP {status_code} recebido; encerrando a consulta "
-                            "sem retry automático."
+                            "HTTP 403 recebido; encerrando a consulta sem retry "
+                            "dentro da coleta atual."
                         )
                         raise
-                    if status_code >= 500:
+                    if status_code == 429:
+                        retries += 1
+                        if retries > min(max_retries, 2):
+                            raise
+                        response = status_obj
+                        wait = retry_after_seconds(
+                            getattr(response, "headers", {}).get("Retry-After")
+                        )
+                        wait = delay if wait is None else wait
+                        await asyncio.sleep(wait)
+                        delay *= 2
+                        continue
+                    if status_code in _TRANSIENT_HTTP_STATUSES:
                         retries += 1
                         if retries > max_retries:
                             print(
@@ -477,7 +509,36 @@ class BasePharmacyScraper(ABC):
                         delay *= 2
                         continue
 
-                # Outras falhas de conexão/timeout
+                # Certificado/TLS e erros de configuração não são transitórios.
+                current = e
+                tls_failure = False
+                while current is not None:
+                    if isinstance(current, ssl.SSLError) or any(
+                        marker in type(current).__name__.casefold()
+                        for marker in ("ssl", "tls", "certificate")
+                    ):
+                        tls_failure = True
+                        break
+                    current = current.__cause__ or current.__context__
+                if tls_failure:
+                    print("Falha TLS/certificado; sem repetição automática.")
+                    raise
+
+                error_name = type(e).__name__.casefold()
+                transient_network = isinstance(
+                    e, (TimeoutError, ConnectionError, OSError)
+                ) or any(
+                    marker in error_name
+                    for marker in ("timeout", "connect", "network", "requesterror")
+                )
+                if not transient_network:
+                    print(
+                        "Falha não transitória do cliente/parser; "
+                        "sem repetição automática."
+                    )
+                    raise
+
+                # Falhas temporárias de conexão/timeout usam backoff limitado.
                 retries += 1
                 if retries > max_retries:
                     print(f"Max retries excedido para erro de rede: {e}")

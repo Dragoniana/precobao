@@ -48,9 +48,13 @@ GENERIC_IMAGE_MARKERS = (
     "de-referencia-tarja-vermelha",
     "referencia-tarja-vermelha",
     "tarja-vermelha-em-comprimido",
+    "genericos-tarja",
 )
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 KNOWN_GENERIC_ASSETS = {
+    # Araújo's neutral prescription-medicine illustration, verified from the
+    # owner-provided WebP asset. This is an offer-scoped fallback, not a photo.
+    "tarjado.webp",
     # Semavy asset is a pricing promotion rendered at multiple CDN sizes.
     "239046_7891142985217_1.webp",
     # Browser review: Indiana prescription template, not the Prati package.

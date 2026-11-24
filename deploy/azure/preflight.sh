@@ -19,6 +19,7 @@ docker compose --project-name preco-bao-azure --project-directory "$script_dir" 
   --env-file "$env_file" -f "$compose_file" config --format json |
   python3 -c '
 import json
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -33,6 +34,28 @@ if set(services) != required_services:
     raise SystemExit("Azure Compose services do not match the reviewed production set.")
 api, web, caddy = services["api"], services["web"], services["caddy"]
 environment = api.get("environment", {})
+smtp_starttls = str(environment.get("SMTP_STARTTLS", "")).casefold()
+try:
+    smtp_port = int(environment.get("SMTP_PORT", ""))
+except (TypeError, ValueError):
+    raise SystemExit("SMTP_PORT must be a valid port number.")
+reset_url = urlsplit(str(environment.get("PASSWORD_RESET_URL", "")))
+if (
+    not environment.get("SMTP_HOST")
+    or not environment.get("SMTP_USERNAME")
+    or not environment.get("SMTP_PASSWORD")
+    or not environment.get("SMTP_FROM_EMAIL")
+    or smtp_port != 587
+    or smtp_starttls not in {"1", "true", "yes", "on"}
+    or reset_url.scheme != "https"
+    or reset_url.hostname != "precobao.app"
+    or reset_url.path != "/reset-password"
+    or reset_url.username
+    or reset_url.password
+    or reset_url.query
+    or reset_url.fragment
+):
+    raise SystemExit("SMTP password recovery settings must remain configured with HTTPS STARTTLS.")
 api_image_mount = next(
     (m for m in api.get("volumes", []) if m.get("target") == "/app/data/image_references"),
     None,
@@ -164,6 +187,34 @@ if not origins or any(
     for origin in origins
 ):
     raise SystemExit("BACKEND_CORS_ORIGINS must contain exact HTTPS origins only.")
+
+hmac_file = environment.get("SCRAPER_INGEST_HMAC_SECRET_FILE", "").strip()
+legacy_hmac = environment.get("SCRAPER_INGEST_HMAC_SECRET", "").encode("utf-8")
+if hmac_file:
+    if legacy_hmac:
+        raise SystemExit("When a protected HMAC file is configured, the legacy secret environment value must be empty.")
+    secret_mount = next(
+        (m for m in api.get("volumes", []) if m.get("target") == hmac_file), None
+    )
+    if not secret_mount or secret_mount.get("type") != "bind" or not secret_mount.get("read_only"):
+        raise SystemExit("The configured HMAC file must be a read-only bind mount.")
+    secret_path = Path(secret_mount.get("source", ""))
+    if not secret_path.is_file() or secret_path.is_symlink():
+        raise SystemExit("The configured HMAC secret file is missing or invalid.")
+    secret_stat = secret_path.stat()
+    secret_mode = stat.S_IMODE(secret_stat.st_mode)
+    if (
+        secret_stat.st_uid != 0
+        or secret_stat.st_gid != 20000
+        or secret_mode != 0o440
+        or "20000" not in {str(group) for group in api.get("group_add", [])}
+    ):
+        raise SystemExit("The HMAC file must be root-owned, mode 0440, and readable only by the API group.")
+    if len(secret_path.read_bytes().rstrip(b"\r\n")) < 32:
+        raise SystemExit("The configured HMAC secret file is empty or too short.")
+elif len(legacy_hmac) < 32:
+    raise SystemExit("Configure a 32-byte HMAC secret using a protected file or legacy environment value.")
+
 api_url = urlsplit(f"https://{api_domain}")
 if (
     not api_domain

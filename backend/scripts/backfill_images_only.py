@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from email.utils import parsedate_to_datetime
 import json
 import os
 import tempfile
 import time
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -197,7 +197,8 @@ async def _fetch_product(
             continue
         if response.status_code in {400, 401, 403}:
             raise RuntimeError(
-                f"Pacheco recusou a consulta por produto (HTTP {response.status_code}); "
+                "Pacheco recusou a consulta por produto "
+                f"(HTTP {response.status_code}); "
                 "coleta interrompida sem tentar outra rota."
             )
         if response.status_code == 404:
@@ -314,7 +315,8 @@ async def run(limit: int | None, delay_seconds: float, max_retries: int) -> None
                     _atomic_json(checkpoint_path, state)
                     print(
                         f"progress={state['next_index']}/{len(items)} "
-                        f"matched={state['products_matched']} saved={state['images_saved']} "
+                        f"matched={state['products_matched']} "
+                        f"saved={state['images_saved']} "
                         f"no_image={state['no_image']} errors={state['errors']}",
                         flush=True,
                     )
@@ -329,7 +331,8 @@ async def run(limit: int | None, delay_seconds: float, max_retries: int) -> None
         state["updated_at"] = _now()
         _atomic_json(checkpoint_path, state)
         print(
-            f"finished status={state['status']} next={state['next_index']}/{len(items)} "
+            f"finished status={state['status']} "
+            f"next={state['next_index']}/{len(items)} "
             f"saved={state['images_saved']} no_image={state['no_image']} "
             f"invalid={state['invalid_images']} errors={state['errors']}",
             flush=True,
@@ -338,7 +341,10 @@ async def run(limit: int | None, delay_seconds: float, max_retries: int) -> None
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Preenche apenas referências de imagem Pacheco; não atualiza ofertas."
+        description=(
+            "Preenche apenas referências de imagem Pacheco; "
+            "não atualiza ofertas."
+        )
     )
     parser.add_argument("--limit", type=int, help="limita este lote controlado")
     parser.add_argument(

@@ -1,4 +1,3 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
@@ -7,6 +6,7 @@ import { CatalogFiltersSidebar } from '../../components/CatalogFiltersSidebar';
 import { MedicineCard } from '../../components/MedicineCard';
 import { OfferRow } from '../../components/OfferRow';
 import { Screen } from '../../components/Screen';
+import { SortSelector } from '../../components/SortSelector';
 import { markMedicineOpenTrace, startMedicineOpenTrace } from '../../services/medicineOpenPerformance';
 import { SearchBar } from '../../components/SearchBar';
 import { useCatalogContext } from '../../context/AppContext';
@@ -15,7 +15,7 @@ import { radius, spacing } from '../../theme';
 import { createThemedStyles, useAppTheme } from '../../context/ThemeContext';
 import { Medicamento } from '../../types/api';
 
-type SearchRow = { medicine: Medicamento; medicineId: number; medicineName: string; pharmacyId: number; pharmacyName: string; price: number };
+type SearchRow = { medicine: Medicamento; medicineId: number; medicineName: string; offerId: number; pharmacyId: number; pharmacyName: string; price: number };
 
 export default function SearchScreen() {
   const styles = useStyles();
@@ -33,7 +33,6 @@ export default function SearchScreen() {
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [sortBy, setSortBy] = useState<CatalogSort>('menor_preco');
-  const [sortMenuVisible, setSortMenuVisible] = useState(false);
   const hasDesktopSidebar = Platform.OS === 'web' && width >= 1120;
   const desktopColumns = hasDesktopSidebar ? (width >= 1640 ? 4 : width >= 1280 ? 3 : 2) : undefined;
   const limit = 20;
@@ -75,6 +74,7 @@ export default function SearchScreen() {
         medicine,
         medicineId: medicine.id,
         medicineName: medicine.nome,
+        offerId: offer.id,
         pharmacyId: offer.farmacia_id,
         pharmacyName: `${offer.farmacia_nome || offer.farmacia?.nome_fantasia || `Farmácia ${offer.farmacia_id}`}${offer.contexto_local === 'online_sem_localizacao_confirmada' ? ' — Online' : ''}${offer.cep ? ` — Entrega para ${offer.cidade || 'localidade'}${offer.uf ? `/${offer.uf}` : ''} ${offer.cep}` : ''}${offer.contexto_local === 'retirada_loja_confirmada' ? ` — Retirada · ${offer.loja_nome || offer.loja_id || 'unidade confirmada'}` : ''}`,
         price: Number(offer.preco),
@@ -92,7 +92,6 @@ export default function SearchScreen() {
     { value: 'nome', label: 'Nome (A–Z)' },
     { value: 'relevancia', label: 'Relevância' },
   ];
-  const selectedSortLabel = sortOptions.find((option) => option.value === sortBy)?.label ?? 'Menor preço';
   const showCheapestSuggestions = !query && selectedFilters.length === 0 && selectedPharmacyId === null;
 
   const openDetail = (id: number) => {
@@ -116,22 +115,10 @@ export default function SearchScreen() {
       <View style={[styles.catalogLayout, hasDesktopSidebar && styles.catalogLayoutDesktop]}>
       {hasDesktopSidebar && <CatalogFiltersSidebar />}
       <View style={[styles.catalogResults, hasDesktopSidebar && styles.catalogResultsDesktop]}>
-      <View style={styles.resultHeader}>
+      <View style={[styles.resultHeader, width < 520 && styles.resultHeaderMobile]}>
         <Text style={styles.resultCount}>{total.toLocaleString('pt-BR')} resultados</Text>
         <View style={styles.resultActions}>
-          {hasDesktopSidebar && <View style={styles.sortWrap}>
-            <Pressable onPress={() => setSortMenuVisible((visible) => !visible)} accessibilityRole="button" accessibilityLabel={`Ordenar: ${selectedSortLabel}`} accessibilityState={{ expanded: sortMenuVisible }} style={styles.sortButton}>
-              <Ionicons name="swap-vertical-outline" size={16} color={palette.primaryDark} />
-              <Text style={styles.sortButtonText}>{selectedSortLabel}</Text>
-              <Ionicons name={sortMenuVisible ? 'chevron-up' : 'chevron-down'} size={14} color={palette.textSoft} />
-            </Pressable>
-            {sortMenuVisible && <View style={styles.sortMenu}>
-              {sortOptions.map((option) => <Pressable key={option.value} onPress={() => { setSortBy(option.value); setPage(1); setSortMenuVisible(false); }} accessibilityRole="button" accessibilityState={{ selected: sortBy === option.value }} style={[styles.sortOption, sortBy === option.value && styles.sortOptionActive]}>
-                <Text style={[styles.sortOptionText, sortBy === option.value && styles.sortOptionTextActive]}>{option.label}</Text>
-                {sortBy === option.value && <Ionicons name="checkmark" size={16} color={palette.primaryDark} />}
-              </Pressable>)}
-            </View>}
-          </View>}
+          <SortSelector value={sortBy} options={sortOptions} onChange={(value) => { setSortBy(value); setPage(1); }} />
           {loading && <ActivityIndicator size="small" color={palette.primary} />}
         </View>
       </View>
@@ -146,7 +133,7 @@ export default function SearchScreen() {
         <View style={[styles.rows, hasDesktopSidebar && styles.rowsDesktop]}>
           {rows.map((row) => (
             <View key={`${row.medicineId}-${row.pharmacyId}`} style={hasDesktopSidebar && (width >= 1640 ? styles.offerGridItemThree : styles.offerGridItemTwo)}>
-              <OfferRow medicine={row.medicine} medicineName={row.medicineName} laboratory={getLaboratoryDisplayName(row.medicine.laboratorio)} pharmacy={row.pharmacyName} price={row.price} color={palette.primary} onPress={() => openDetail(row.medicineId)} />
+              <OfferRow medicine={row.medicine} medicineName={row.medicineName} offerId={row.offerId} laboratory={getLaboratoryDisplayName(row.medicine.laboratorio)} pharmacy={row.pharmacyName} price={row.price} color={palette.primary} onPress={() => openDetail(row.medicineId)} />
             </View>
           ))}
         </View>
@@ -181,15 +168,8 @@ const useStyles = createThemedStyles((palette) => ({
   eyebrow: { color: palette.primaryDark, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
   title: { color: palette.text, fontSize: 25, fontWeight: '800', marginVertical: spacing.sm },
   resultHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.md, zIndex: 2 },
+  resultHeaderMobile: { flexWrap: 'wrap', gap: spacing.sm },
   resultActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  sortWrap: { position: 'relative', zIndex: 3 },
-  sortButton: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface },
-  sortButtonText: { color: palette.text, fontSize: 13, fontWeight: '600' },
-  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: palette.shadow, shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
-  sortOption: { minHeight: 38, paddingHorizontal: spacing.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderRadius: radius.sm },
-  sortOptionActive: { backgroundColor: palette.primarySoft },
-  sortOptionText: { color: palette.text, fontSize: 13 },
-  sortOptionTextActive: { color: palette.primaryDark, fontWeight: '700' },
   resultCount: { color: palette.textSoft, fontSize: 13 },
   rows: { marginTop: spacing.sm },
   rowsDesktop: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', columnGap: spacing.md },

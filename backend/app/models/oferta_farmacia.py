@@ -23,6 +23,7 @@ from .base import Base
 if TYPE_CHECKING:
     from .catalogo import CatalogoBase
     from .farmacia import Farmacia
+    from .medicine_image import MedicineImageLink
 
 
 class OfertaFarmacia(Base):
@@ -101,6 +102,9 @@ class OfertaFarmacia(Base):
     farmacia: Mapped["Farmacia"] = relationship("Farmacia", back_populates="ofertas")
     produto_catalogo: Mapped["CatalogoBase"] = relationship(
         "CatalogoBase", back_populates="ofertas"
+    )
+    image_links: Mapped[list["MedicineImageLink"]] = relationship(
+        "MedicineImageLink", back_populates="offer", cascade="all, delete-orphan"
     )
 
     @property

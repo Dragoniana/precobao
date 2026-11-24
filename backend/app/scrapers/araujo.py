@@ -10,14 +10,14 @@ import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List
 from urllib.parse import urljoin, urlsplit
 
-import httpx
 from bs4 import BeautifulSoup
 
 from app.scrapers.base import BasePharmacyScraper
 from app.scrapers.partner_feed import load_authorized_partner_feed
+from app.scrapers.source_http_client import open_source_http_client, source_http_config
 from app.scrapers.source_modes import (
     SourceHTTPError,
     SourceMode,
@@ -27,6 +27,7 @@ from app.scrapers.source_modes import (
 from app.scrapers.source_modes import (
     source_mode as configured_source_mode,
 )
+from app.scrapers.source_rate_limiter import ExternalRequestDeferred
 from app.services.imagens import image_delivery_rejection_reason
 
 
@@ -42,6 +43,9 @@ class AraujoScraper(BasePharmacyScraper):
         source_mode: SourceMode | str | None = None,
         request_delay: float | None = None,
         max_pages: int | None = None,
+        allow_page_limit: bool = False,
+        stop_requested_callback: Callable[[], bool] | None = None,
+        stop_reason_callback: Callable[[], str | None] | None = None,
     ):
         super().__init__(
             farmacia_cnpj="17256512000116",
@@ -67,9 +71,16 @@ class AraujoScraper(BasePharmacyScraper):
         self.max_pages = int(
             os.getenv("ARAUJO_MAX_PAGES", "200") if max_pages is None else max_pages
         )
+        self.allow_page_limit = allow_page_limit
+        self.stop_requested_callback = stop_requested_callback
+        self.stop_reason_callback = stop_reason_callback
+        self.http_timeout = source_http_config("araujo").timeout
         if self.request_delay < 0 or self.max_pages < 1:
             raise ValueError("Invalid Araújo request delay or page limit")
         self.products_queued = 0
+        self.products_callback: (
+            Callable[[list[dict[str, Any]]], Awaitable[None]] | None
+        ) = None
 
     @contextlib.contextmanager
     def _run_lock(self):
@@ -143,16 +154,42 @@ class AraujoScraper(BasePharmacyScraper):
                 os.unlink(temporary)
 
     async def _extract_direct_catalog(self) -> None:
-        """Page the current public catalog using normal TLS-verified HTTP."""
+        """Page the current public catalog with the configured source client."""
         state: dict[str, Any] = {
             "source": "araujo",
             "mode": SourceMode.DIRECT.value,
             "status": "RUNNING",
             "started_at": datetime.now(UTC).isoformat(),
-            "resume_strategy": "replay_from_first_page",
+            "resume_strategy": "durable_page_and_item_cursor",
             "last_completed_page": 0,
+            "next_page": 1,
+            "next_item_index": 0,
             "products_queued": 0,
         }
+        try:
+            previous = json.loads(
+                self.source_checkpoint_path.read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            previous = {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("ARAUJO_SOURCE_CHECKPOINT_INVALID") from error
+        if isinstance(previous, dict):
+            previous_status = str(previous.get("status", "")).upper()
+            if previous_status != "COMPLETE":
+                legacy_page = previous.get("last_completed_page", 0)
+                fallback_page = int(legacy_page) if legacy_page else 1
+                state["next_page"] = max(
+                    1, int(previous.get("next_page", fallback_page))
+                )
+                state["next_item_index"] = max(
+                    0, int(previous.get("next_item_index", 0))
+                )
+        if state["next_page"] > self.max_pages:
+            state["next_page"] = 1
+            state["next_item_index"] = 0
+        start_page = state["next_page"]
+        start_item_index = state["next_item_index"]
         self._write_direct_checkpoint(state)
         headers = {
             "Accept": "text/html,application/xhtml+xml",
@@ -160,15 +197,13 @@ class AraujoScraper(BasePharmacyScraper):
             "User-Agent": "PrecoBao authorized catalog client/1.0",
         }
         try:
-            async with httpx.AsyncClient(
-                headers=headers, verify=True, follow_redirects=False, timeout=30.0
-            ) as client:
-                for page in range(1, self.max_pages + 1):
+            async with open_source_http_client("araujo", headers=headers) as client:
+                for page in range(start_page, self.max_pages + 1):
                     response = await self.executar_com_backoff(
                         client.get,
                         self.CATALOG_URL,
                         params={"page": page},
-                        timeout=30.0,
+                        timeout=self.http_timeout,
                     )
                     validate_source_response(response, accepted={200})
                     source_cards = self._catalog_card_count(response.text)
@@ -179,25 +214,109 @@ class AraujoScraper(BasePharmacyScraper):
                     products = self.adaptar_parser_araujo_html(response.text)
                     if not products:
                         raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
-                    for product in products:
-                        await self.fila.put(product)
-                    self.products_queued += len(products)
+                    page_item_start = start_item_index if page == start_page else 0
+                    if page_item_start >= len(products):
+                        raise RuntimeError("ARAUJO_CHECKPOINT_ITEM_CURSOR_INVALID")
+                    products = products[page_item_start:]
+                    if not products:
+                        raise RuntimeError("ARAUJO_CATALOG_PRODUCTS_UNPARSEABLE")
+                    if self.products_callback is not None:
+                        delivered = await self.products_callback(products)
+                        delivered = (
+                            len(products) if delivered is None else int(delivered)
+                        )
+                    else:
+                        for product in products:
+                            await self.fila.put(product)
+                        delivered = len(products)
+                    if delivered < 0 or delivered > len(products):
+                        raise RuntimeError("ARAUJO_INVALID_DELIVERED_PRODUCT_COUNT")
+                    self.products_queued += delivered
+                    next_page = page + 1
+                    next_item_index = 0
+                    if delivered < len(products):
+                        next_page = page
+                        next_item_index = page_item_start + delivered
                     state.update(
                         last_completed_page=page,
+                        next_page=next_page,
+                        next_item_index=next_item_index,
                         products_queued=self.products_queued,
                         updated_at=datetime.now(UTC).isoformat(),
                     )
                     self._write_direct_checkpoint(state)
+                    if delivered < len(products):
+                        stop_reason = (
+                            self.stop_reason_callback()
+                            if self.stop_reason_callback
+                            else None
+                        )
+                        if stop_reason is None and self.stop_requested_callback:
+                            if self.stop_requested_callback():
+                                stop_reason = "safe_stop_requested"
+                        is_safe_stop = stop_reason == "safe_stop_requested"
+                        state.update(
+                            status=(
+                                "STOPPED"
+                                if is_safe_stop
+                                else stop_reason
+                                if stop_reason
+                                else "PARTIAL"
+                            ),
+                            stop_reason=(
+                                stop_reason
+                                if is_safe_stop
+                                else stop_reason.casefold()
+                                if stop_reason
+                                else "configured_product_limit_within_page"
+                            ),
+                            finished_at=datetime.now(UTC).isoformat(),
+                        )
+                        self._write_direct_checkpoint(state)
+                        return
+                    stop_reason = (
+                        self.stop_reason_callback()
+                        if self.stop_reason_callback
+                        else None
+                    )
+                    if stop_reason is None and self.stop_requested_callback:
+                        if self.stop_requested_callback():
+                            stop_reason = "safe_stop_requested"
+                    if stop_reason:
+                        is_safe_stop = stop_reason == "safe_stop_requested"
+                        state.update(
+                            status="STOPPED" if is_safe_stop else stop_reason,
+                            stop_reason=(
+                                stop_reason
+                                if is_safe_stop
+                                else stop_reason.casefold()
+                            ),
+                            finished_at=datetime.now(UTC).isoformat(),
+                        )
+                        self._write_direct_checkpoint(state)
+                        return
                     if source_cards < self.PAGE_SIZE:
+                        state.update(next_page=1, next_item_index=0)
                         break
                     if self.request_delay:
                         await asyncio.sleep(self.request_delay)
                 else:
-                    raise RuntimeError("ARAUJO_MAX_PAGES_REACHED")
+                    if not self.allow_page_limit:
+                        raise RuntimeError("ARAUJO_MAX_PAGES_REACHED")
+                    state.update(
+                        status="PARTIAL",
+                        stop_reason="configured_page_limit",
+                        next_page=1,
+                        next_item_index=0,
+                        finished_at=datetime.now(UTC).isoformat(),
+                    )
+                    self._write_direct_checkpoint(state)
+                    return
             state.update(
                 status="COMPLETE",
                 finished_at=datetime.now(UTC).isoformat(),
-                next_run_replays_from_page=1,
+                next_page=1,
+                next_item_index=0,
             )
             self._write_direct_checkpoint(state)
             print(
@@ -215,6 +334,14 @@ class AraujoScraper(BasePharmacyScraper):
                 ),
                 stop_reason=f"http_{error.status_code}",
                 retry_after_seconds=error.retry_after_seconds,
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            self._write_direct_checkpoint(state)
+            raise
+        except ExternalRequestDeferred as deferred:
+            state.update(
+                status=deferred.reason,
+                stop_reason=deferred.reason.casefold(),
                 finished_at=datetime.now(UTC).isoformat(),
             )
             self._write_direct_checkpoint(state)
@@ -358,6 +485,7 @@ class AraujoScraper(BasePharmacyScraper):
                             "quantidade_estoque": 1 if is_available else 0,
                             "link": link,
                             "imagem_url": imagem_url,
+                            "fonte_observado_em": datetime.now(UTC),
                         }
                     )
             except Exception as e:

@@ -7,10 +7,9 @@ RUN npm ci
 COPY . .
 ARG EXPO_PUBLIC_API_URL
 ENV EXPO_PUBLIC_API_URL=${EXPO_PUBLIC_API_URL}
-RUN node -e "if (!process.env.EXPO_PUBLIC_API_URL?.startsWith('https://')) process.exit(1)" \
-    && npx expo export --platform web
+RUN npm run export:web
 
-FROM nginx:1.27-alpine
+FROM nginx:1.30.8-alpine
 COPY nginx.production.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
