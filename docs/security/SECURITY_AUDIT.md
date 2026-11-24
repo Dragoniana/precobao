@@ -79,7 +79,7 @@ Backup set `/var/backups/preco-bao/preco-bao-20261124T012615Z` was hash-checked 
 
 - Published the previously missing APK at `/opt/preco-bao/downloads/preco-bao-1.0.1-internal.apk`; SHA-256 `bd9ba1288e00b1ce2b141e41aa30ba5538d1dd4f88509f120750d6d98622bacb`, 40,846,969 bytes. It is exposed by the web container through a read-only bind mount and the public route forces attachment download. Production web now uses `preco-bao-web:security-20261124` with NGINX 1.30.8; previous image remains present.
 - Recreated only the `web` container to add that read-only mount and only the `caddy` container to load the validated security headers. API, PostgreSQL, schedulers, Indiana, Pacheco, Araújo, and offer-refresh were not restarted or modified. No migration or database write was performed.
-- Previous web image `preco-bao-web:favicon-title-4d0d5ac` remains the current version and is available for rollback. Caddy configuration backup is `Caddyfile.before-audit-20261124` beside the active deployment file. To remove the APK mount, recreate only `web` with its prior Compose file set (without `/tmp/preco-bao-web-downloads-override.yml`); keep the APK file until rollback is verified.
+- Previous web image `preco-bao-web:favicon-title-4d0d5ac` remains available for rollback; current image is `preco-bao-web:security-20261124`. To roll back the web image while retaining APK downloads, recreate only `web` with the existing read-only volume and an image override pointing to the previous tag. Caddy configuration backup `Caddyfile.before-audit-20261124` is beside the active deployment file; restoring it requires recreating only Caddy. No database or API rollback is needed for these changes.
 
 ## Tests and production verification
 
