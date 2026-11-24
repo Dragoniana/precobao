@@ -4,13 +4,15 @@ from collections import defaultdict
 from typing import Iterable
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, load_only
 
 from app.models.catalogo import CatalogoBase
 from app.models.medicine_image import MedicineImageLink
 from app.models.oferta_farmacia import OfertaFarmacia
 from app.schemas.catalogo import CatalogImageCandidate, CatalogoComOfertasOut
-from app.services.image_registry import resolve_catalog_images
+from app.services.image_registry import (
+    resolve_catalog_image_candidates,
+)
 from app.services.imagens import (
     catalog_image_matches_record,
     embedded_eans,
@@ -22,15 +24,22 @@ from app.services.imagens import (
 def with_registry_images(
     medicine: CatalogoBase,
     generic_image_links: list[MedicineImageLink] | None = None,
+    image_source_offers: list[OfertaFarmacia] | None = None,
 ) -> CatalogoComOfertasOut:
     offers = getattr(medicine, "ofertas", [])
-    urls = resolve_catalog_images(
+    registry_candidates = resolve_catalog_image_candidates(
         medicine.id,
-        offers,
+        offers=image_source_offers or offers,
         catalog_ean=medicine.codigo_barras,
         require_offer_match=True,
     )
-    urls = [url for url in urls if not is_generic_image_url(url)]
+    urls = list(
+        dict.fromkeys(
+            candidate["url"]
+            for candidate in registry_candidates
+            if not candidate["generic"]
+        )
+    )
     stored_url = medicine.imagem_url
     if (
         medicine.imagem_status == "verificada"
@@ -91,6 +100,21 @@ def with_registry_images(
         )
         for item in links_by_pharmacy.values()
     ]
+    registry_specific_by_pharmacy = {}
+    for candidate in registry_candidates:
+        if candidate["generic"] or candidate["pharmacy_id"] is None:
+            continue
+        registry_specific_by_pharmacy.setdefault(candidate["pharmacy_id"], candidate)
+    existing_specific_urls = {candidate.url for candidate in image_candidates}
+    image_candidates.extend(
+        CatalogImageCandidate(
+            url=candidate["url"],
+            pharmacy_id=pharmacy_id,
+            generic=False,
+        )
+        for pharmacy_id, candidate in registry_specific_by_pharmacy.items()
+        if candidate["url"] not in existing_specific_urls
+    )
     generic_by_pharmacy = {}
     for item in generic_image_links or []:
         if item.offer_id is None:
@@ -111,6 +135,18 @@ def with_registry_images(
             generic=True,
         )
         for item in generic_by_pharmacy.values()
+    )
+    registry_generic_by_pharmacy = {}
+    for candidate in registry_candidates:
+        if not candidate["generic"] or candidate["pharmacy_id"] is None:
+            continue
+        registry_generic_by_pharmacy.setdefault(candidate["pharmacy_id"], candidate)
+    image_candidates.extend(
+        CatalogImageCandidate(
+            url=candidate["url"], pharmacy_id=pharmacy_id, generic=True
+        )
+        for pharmacy_id, candidate in registry_generic_by_pharmacy.items()
+        if pharmacy_id not in generic_by_pharmacy
     )
     offers = []
     for offer in result.ofertas:
@@ -157,6 +193,7 @@ def with_registry_images_for_products(
     products = list(medicines)
     catalog_ids = [product.id for product in products]
     generic_by_catalog: dict[int, list[MedicineImageLink]] = defaultdict(list)
+    offers_by_catalog: dict[int, list[OfertaFarmacia]] = defaultdict(list)
     if catalog_ids:
         rows = db.execute(
             select(MedicineImageLink, OfertaFarmacia.catalogo_id)
@@ -170,7 +207,25 @@ def with_registry_images_for_products(
         ).all()
         for link, catalog_id in rows:
             generic_by_catalog[catalog_id].append(link)
+        offers = db.execute(
+            select(OfertaFarmacia)
+            .where(OfertaFarmacia.catalogo_id.in_(catalog_ids))
+            .options(
+                load_only(
+                    OfertaFarmacia.id,
+                    OfertaFarmacia.catalogo_id,
+                    OfertaFarmacia.farmacia_id,
+                    OfertaFarmacia.sku_interno,
+                )
+            )
+        ).scalars()
+        for offer in offers:
+            offers_by_catalog[offer.catalogo_id].append(offer)
     return [
-        with_registry_images(product, generic_by_catalog.get(product.id, []))
+        with_registry_images(
+            product,
+            generic_by_catalog.get(product.id, []),
+            image_source_offers=offers_by_catalog.get(product.id, []),
+        )
         for product in products
     ]

@@ -25,6 +25,7 @@ from app.models.medicine_image import (
     MedicineImageLink,
     MedicineImageUpload,
 )
+from app.services.image_registry import upsert_image_reference
 from app.services.medicine_images import normalize_medicine_image
 
 SECRET = "test-collector-hmac-secret-with-more-than-32-bytes"
@@ -877,6 +878,74 @@ def test_generic_image_with_divergent_ean_is_offer_scoped_and_served_as_fallback
         ).status_code
         == 304
     )
+
+
+def test_filtered_catalog_keeps_external_specific_images_from_other_pharmacies(
+    image_client, monkeypatch, tmp_path
+):
+    client, sessions, catalog_id = image_client
+    monkeypatch.setenv("IMAGE_REFERENCE_STORE_PATH", str(tmp_path / "refs.json"))
+    external_image = "https://cdn.example.test/verified-pack-7897705203095.webp"
+    with sessions() as db:
+        araujo_offer = db.execute(
+            select(OfertaFarmacia).where(OfertaFarmacia.catalogo_id == catalog_id)
+        ).scalar_one()
+        pacheco = Farmacia(
+            cnpj="98765432000196",
+            razao_social="Drogarias Pacheco S.A.",
+            nome_fantasia="Drogarias Pacheco",
+            endereco_completo="Rio de Janeiro - RJ",
+        )
+        db.add(pacheco)
+        db.flush()
+        pacheco_offer = OfertaFarmacia(
+            sku_interno="PCH-TEST-CROSS-IMAGE",
+            preco=12.10,
+            quantidade_estoque=1,
+            disponivel=True,
+            url_origem="https://www.drogariaspacheco.com.br/produto/teste-cross-image",
+            contexto_chave="global",
+            farmacia_id=pacheco.id,
+            catalogo_id=catalog_id,
+        )
+        db.add(pacheco_offer)
+        db.commit()
+        araujo_id = araujo_offer.farmacia_id
+        pacheco_id = pacheco.id
+
+    assert upsert_image_reference(
+        image_url=external_image,
+        pharmacy_id=araujo_id,
+        pharmacy="Araujo",
+        sku=araujo_offer.sku_interno,
+        ean="7897705203095",
+        product_id=araujo_offer.sku_interno,
+        product_url=araujo_offer.url_origem,
+        catalog_id=catalog_id,
+        offer_id=araujo_offer.id,
+        identity_confirmed=True,
+    )
+
+    listing = client.get(
+        "/catalogo",
+        params={"farmacia_id": pacheco_id, "termo_busca": "Medicamento de teste"},
+    )
+    detail = client.get(f"/catalogo/medicamentos/{catalog_id}")
+    assert listing.status_code == detail.status_code == 200
+    list_item = listing.json()["items"][0]
+    detail_item = detail.json()
+    assert [offer["farmacia_id"] for offer in list_item["ofertas"]] == [pacheco_id]
+    assert external_image in list_item["imagem_urls"]
+    assert external_image in detail_item["imagem_urls"]
+    assert list_item["imagem_urls"] == detail_item["imagem_urls"]
+    list_candidates = list_item["imagem_candidatos"]
+    detail_candidates = detail_item["imagem_candidatos"]
+    assert list_candidates == detail_candidates
+    assert {
+        "url": external_image,
+        "pharmacy_id": araujo_id,
+        "generic": False,
+    } in list_candidates
 
 
 def test_pacheco_generic_upload_allows_ean_conflict_without_catalog_association(

@@ -130,12 +130,13 @@ it('tries the selected pharmacy generic image before generic images from other p
   } as Medicamento;
 
   const images = resolveMedicineImages(medicine, 923);
-  expect(images).toHaveLength(6);
+  expect(images).toHaveLength(9);
   expect(images.slice(0, 3)).toEqual(medicine.imagem_urls!.slice(0, 3));
-  expect(images[3]).toContain('/catalogo/ofertas/923/imagem');
-  expect(images[4]).toContain('/catalogo/ofertas/921/imagem');
-  expect(images[5]).toContain('/catalogo/ofertas/922/imagem');
-  expect(resolveMedicineImages(medicine, 999)).toHaveLength(6);
+  expect(images.slice(3, 6)).toEqual(medicine.imagem_urls!.slice(3, 6));
+  expect(images[6]).toContain('/catalogo/ofertas/923/imagem');
+  expect(images[7]).toContain('/catalogo/ofertas/921/imagem');
+  expect(images[8]).toContain('/catalogo/ofertas/922/imagem');
+  expect(resolveMedicineImages(medicine, 999)).toHaveLength(9);
 });
 
 it('prioritizes a verified photo from the card pharmacy, then cross-pharmacy photos, then generic art', () => {

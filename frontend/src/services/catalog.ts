@@ -63,8 +63,8 @@ export function resolveMedicineImages(medicine: Medicamento, preferredOfferId?: 
     .filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url.trim()))
     .map((url) => url.trim()))];
 
-  // Bound failed network attempts while still reserving slots for offer images.
-  // Catalog-specific images always get tried before pharmacy generic fallbacks.
+  // Keep several fallbacks while allowing one direct or registry image from
+  // each source; all specific photos still precede generic pharmacy artwork.
   const selectedPharmacyId = selectedOffer?.farmacia_id;
   const ownFirst = <T extends { pharmacy_id: number }>(items: T[]) => [...items].sort((a, b) =>
     Number(b.pharmacy_id === selectedPharmacyId) - Number(a.pharmacy_id === selectedPharmacyId));
@@ -72,7 +72,7 @@ export function resolveMedicineImages(medicine: Medicamento, preferredOfferId?: 
     .map((candidate) => candidate.url.startsWith('/')
       ? `${API_URL.replace(/\/+$/, '')}${candidate.url}`
       : candidate.url);
-  const specific = validHttps([...storedSpecific, ...specificCandidates]).slice(0, 3);
+  const specific = validHttps([...storedSpecific, ...specificCandidates]).slice(0, 6);
   const storedGeneric = ownFirst(candidates.filter((candidate) => candidate.generic))
     .map((candidate) => candidate.url.startsWith('/')
       ? `${API_URL.replace(/\/+$/, '')}${candidate.url}`
