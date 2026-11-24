@@ -8,11 +8,11 @@ Reviewed the checked-out application, deployment configuration, the production V
 
 The counts below group confirmed application/control findings; dependency scanner package alerts are listed separately because scanner output does not prove exploitability or reachability in this application.
 
-| Severity | Found before | Corrected and verified | Pending confirmed findings |
+| Severity | Found | Corrected in production | Pending in production |
 |---|---:|---:|---:|
 | Critical | 0 | 0 | 0 |
 | High | 0 | 0 | 0 |
-| Medium | 3 | 3 | 0 |
+| Medium | 3 | 1 | 2 |
 | Low | 1 | 1 | 0 |
 | Informative / functional | 1 | 1 | 0 |
 
@@ -20,8 +20,8 @@ The counts below group confirmed application/control findings; dependency scanne
 
 | ID | Component | Severity | Evidence and correction | Regression check / result |
 |---|---|---|---|---|
-| PB-SEC-01 | Password recovery | Medium | Reset links placed bearer tokens in the query string, where browser history and referrers may expose them. Links now place tokens in the fragment, and the reset page scrubs both new and legacy tokens from browser history immediately. | Updated frontend and mailer tests pass. New links do not send the fragment to the server. |
-| PB-SEC-02 | Android release build | Medium | A tracked debug keystore and public debug signing values were configured for release/standalone variants. The keystore was removed; release variants now fail closed unless an external release keystore is supplied. | Android signing guard passes; CI includes the guard. The already-built internal APK remains debug-signed and is not a Play Store release. |
+| PB-SEC-01 | Password recovery | Medium | Reset links placed bearer tokens in the query string, where browser history and referrers may expose them. The branch now places tokens in the fragment and scrubs them from browser history. | Updated frontend and mailer tests pass. **API/web code fix is published in the branch but not deployed** because the production API image was intentionally left unchanged; production reset emails may still use the old URL format. |
+| PB-SEC-02 | Android release build | Medium | A tracked debug keystore and public debug signing values were configured for release/standalone variants. The keystore was removed; release variants now fail closed unless an external release keystore is supplied. | Android signing guard passes; CI includes the guard. The publicly linked internal APK remains debug-signed and is not a Play Store release; dedicated release signing remains pending. |
 | PB-SEC-03 | HTTP response headers | Low | CSP and Permissions-Policy were absent at the public edge. A conservative CSP (`object-src`, `base-uri`, `form-action`, `frame-ancestors`) and a restrictive Permissions-Policy are now active on `precobao.app`; existing HSTS, nosniff, referrer, and frame headers remain. | Caddy config validated; public HTTPS responses show all configured headers. |
 | PB-SEC-04 | Web server image | Medium | Production used Nginx 1.27.5, which ZAP flagged as a version with known vulnerabilities; official NGINX advisories cover this version range. Affected NGINX TLS and HTTP/2 features are not enabled in the container, so exploitability in this setup was not demonstrated. The frontend image now uses NGINX 1.30.8, and `server_tokens off` removes the patch version from the public response. | Candidate image was built and smoke-tested locally; production reports NGINX 1.30.8 and no version suffix in `Server`. Official version source: https://nginx.org/en/download.html. |
 | PB-OPS-01 | Android download | Informative / availability | The stable download route was configured, but its APK file was absent from the production web container, yielding 404. The verified APK is now supplied from a dedicated read-only host mount. | Public HTTPS returned 200, attachment disposition and Android MIME type; a complete download matched the expected byte count and SHA-256. |
