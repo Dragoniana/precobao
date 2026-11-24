@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { api } from '../services/api';
-import { fetchCatalogPage, fetchFilterOptions, FilterOption, isGenericOfferImage, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
+import { fetchCatalogPage, fetchFilterOptions, FilterOption, isGenericOfferImage, mergeCatalogMedicine, normalizeMedicine, resolveMedicineImage, resolveMedicineImages, toggleFilterSelection } from '../services/catalog';
 import { useCatalogState } from '../hooks/useCatalogState';
 import { Medicamento } from '../types/api';
 
@@ -11,6 +11,24 @@ const item = {
 };
 
 beforeEach(() => jest.clearAllMocks());
+
+it('preserves cross-pharmacy image candidates while normalizing and refreshing catalog cache entries', () => {
+  const candidate = { url: '/catalogo/medicamentos/18/imagem?link_id=4', pharmacy_id: 1, generic: false };
+  const normalized = normalizeMedicine({ ...item, imagem_candidatos: [candidate] });
+  expect(normalized.imagem_candidatos).toEqual([candidate]);
+
+  const refreshed = normalizeMedicine({ ...item, imagem_candidatos: [] });
+  expect(mergeCatalogMedicine(normalized, refreshed).imagem_candidatos).toEqual([]);
+
+  const partialRefresh = normalizeMedicine({ ...item, imagem_url: 'https://cdn.test/new.webp' });
+  expect(mergeCatalogMedicine(normalized, partialRefresh).imagem_candidatos).toEqual([candidate]);
+
+  const malformed = normalizeMedicine({
+    ...item,
+    imagem_candidatos: [candidate, { url: '/unsafe', pharmacy_id: 'wrong', generic: false }, null],
+  } as unknown as Partial<Medicamento>);
+  expect(malformed.imagem_candidatos).toEqual([candidate]);
+});
 
 it('keeps sale type exclusive while allowing category and laboratory filters together', () => {
   const saleFree: FilterOption = { id: 'tipo_venda:venda_livre', type: 'tipo_venda', label: 'Venda livre', value: 'venda_livre' };

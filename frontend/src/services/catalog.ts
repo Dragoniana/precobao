@@ -135,6 +135,13 @@ export function normalizeMedicine(raw: Partial<Medicamento> & { name_search?: st
     categorias: Array.isArray(raw.categorias) ? raw.categorias.map(String) : [],
     imagem_url: raw.imagem_url || null,
     imagem_urls: Array.isArray(raw.imagem_urls) ? raw.imagem_urls.filter((url): url is string => typeof url === 'string') : [],
+    imagem_candidatos: Array.isArray(raw.imagem_candidatos)
+      ? raw.imagem_candidatos.filter((candidate): candidate is NonNullable<Medicamento['imagem_candidatos']>[number] =>
+        !!candidate
+        && typeof candidate.url === 'string'
+        && Number.isInteger(candidate.pharmacy_id)
+        && typeof candidate.generic === 'boolean')
+      : [],
     imagem_ref: raw.imagem_ref || null,
     imagem_fonte: raw.imagem_fonte || null,
     imagem_status: raw.imagem_status || null,
@@ -166,10 +173,10 @@ export function mergeCatalogMedicine(existing: Medicamento | undefined, incoming
   if (!incoming.nome.trim() && existing.nome.trim()) merged.nome = existing.nome;
   if (!incoming.name_search?.trim() && existing.name_search?.trim()) merged.name_search = existing.name_search;
 
-  const imageFields = ['imagem_url', 'imagem_urls', 'imagem_ref', 'imagem_fonte', 'imagem_status', 'imagem_motivo_rejeicao', 'imagem_armazenada'];
-  if (!imageFields.some((field) => incomingFields.has(field))) {
-    for (const field of imageFields as (keyof Medicamento)[]) {
-      if (field in existing) (merged as unknown as Record<string, unknown>)[field] = existing[field];
+  const imageFields = ['imagem_url', 'imagem_urls', 'imagem_candidatos', 'imagem_ref', 'imagem_fonte', 'imagem_status', 'imagem_motivo_rejeicao', 'imagem_armazenada'];
+  for (const field of imageFields as (keyof Medicamento)[]) {
+    if (!incomingFields.has(field) && field in existing) {
+      (merged as unknown as Record<string, unknown>)[field] = existing[field];
     }
   }
   if (!incomingFields.has('ofertas')) merged.ofertas = existing.ofertas;
