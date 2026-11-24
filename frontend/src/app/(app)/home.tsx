@@ -1,4 +1,3 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, useWindowDimensions, View } from 'react-native';
@@ -6,7 +5,9 @@ import { ActivityIndicator, Platform, Pressable, Text, useWindowDimensions, View
 import { FilterChip } from '../../components/FilterChip';
 import { CatalogFiltersSidebar } from '../../components/CatalogFiltersSidebar';
 import { MedicineCard } from '../../components/MedicineCard';
+import { MobileAppDownloadBanner } from '../../components/MobileAppDownload';
 import { Screen } from '../../components/Screen';
+import { SortSelector } from '../../components/SortSelector';
 import { markMedicineOpenTrace, startMedicineOpenTrace } from '../../services/medicineOpenPerformance';
 import { SearchBar } from '../../components/SearchBar';
 import { useCatalogContext } from '../../context/AppContext';
@@ -36,7 +37,6 @@ export default function HomeScreen() {
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [sortBy, setSortBy] = useState<CatalogSort>('relevancia');
-  const [sortMenuVisible, setSortMenuVisible] = useState(false);
   const limit = width < 520 ? 8 : 12;
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const isWeb = Platform.OS === 'web';
@@ -90,7 +90,6 @@ export default function HomeScreen() {
     { value: 'maior_preco', label: 'Maior preço' },
     { value: 'nome', label: 'Nome (A–Z)' },
   ];
-  const selectedSortLabel = sortOptions.find((option) => option.value === sortBy)?.label ?? 'Relevância';
 
   const heading = useMemo(() => selectedPharmacyId === null
     ? 'Compare preços de medicamentos'
@@ -105,6 +104,7 @@ export default function HomeScreen() {
 
   return (
     <Screen contentStyle={styles.screen} wideContent={hasDesktopSidebar}>
+      <MobileAppDownloadBanner />
       <View style={[styles.intro, width <= 480 && styles.introCompact]}>
         <Text style={styles.eyebrow}>PREÇO BÃO · COMPARADOR</Text>
         <Text style={[styles.pageTitle, width <= 480 && styles.pageTitleCompact]}>Encontre o melhor preço</Text>
@@ -155,35 +155,7 @@ export default function HomeScreen() {
           <Text style={styles.resultCount}>{total.toLocaleString('pt-BR')} medicamentos</Text>
         </View>
         <View style={[styles.resultActions, width < 520 && styles.resultActionsCompact]}>
-          <View style={styles.sortWrap}>
-            <Pressable
-              onPress={() => setSortMenuVisible((visible) => !visible)}
-              accessibilityRole="button"
-              accessibilityLabel={`Ordenar: ${selectedSortLabel}`}
-              accessibilityState={{ expanded: sortMenuVisible }}
-              style={styles.sortButton}
-            >
-              <Ionicons name="swap-vertical-outline" size={16} color={palette.primaryDark} />
-              <Text style={styles.sortButtonText}>{selectedSortLabel}</Text>
-              <Ionicons name={sortMenuVisible ? 'chevron-up' : 'chevron-down'} size={14} color={palette.textSoft} />
-            </Pressable>
-            {sortMenuVisible && (
-              <View style={styles.sortMenu}>
-                {sortOptions.map((option) => (
-                  <Pressable
-                    key={option.value}
-                    onPress={() => { setSortBy(option.value); setSortMenuVisible(false); }}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: sortBy === option.value }}
-                    style={[styles.sortOption, sortBy === option.value && styles.sortOptionActive]}
-                  >
-                    <Text style={[styles.sortOptionText, sortBy === option.value && styles.sortOptionTextActive]}>{option.label}</Text>
-                    {sortBy === option.value && <Ionicons name="checkmark" size={16} color={palette.primaryDark} />}
-                  </Pressable>
-                ))}
-              </View>
-            )}
-          </View>
+          <SortSelector value={sortBy} options={sortOptions} onChange={setSortBy} />
           {loading && <ActivityIndicator size="small" color={palette.primary} />}
         </View>
       </View>
@@ -247,14 +219,6 @@ const useStyles = createThemedStyles((palette) => ({
   resultHeaderCompact: { flexDirection: 'column', alignItems: 'flex-start', gap: spacing.sm, marginTop: spacing.md },
   resultActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   resultActionsCompact: { width: '100%', justifyContent: 'space-between' },
-  sortWrap: { position: 'relative', zIndex: 3 },
-  sortButton: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface },
-  sortButtonText: { color: palette.text, fontSize: 13, fontWeight: '600' },
-  sortMenu: { position: 'absolute', top: 43, right: 0, minWidth: 174, padding: 4, borderWidth: 1, borderColor: palette.border, borderRadius: radius.sm, backgroundColor: palette.surface, shadowColor: palette.shadow, shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 5, zIndex: 4 },
-  sortOption: { minHeight: 38, paddingHorizontal: spacing.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderRadius: radius.sm },
-  sortOptionActive: { backgroundColor: palette.primarySoft },
-  sortOptionText: { color: palette.text, fontSize: 13 },
-  sortOptionTextActive: { color: palette.primaryDark, fontWeight: '700' },
   sectionTitle: { color: palette.text, fontSize: 19, fontWeight: '800' },
   resultCount: { color: palette.textSoft, fontSize: 13, marginTop: 2 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: spacing.md },

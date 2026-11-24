@@ -2,7 +2,7 @@
   "expo": {
     "name": "Preço Bão",
     "slug": "farmacia-scraper-frontend",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/app-icon.png",
     "userInterfaceStyle": "automatic",
@@ -32,10 +32,12 @@
     },
     "ios": {
       "bundleIdentifier": "com.dragoniana.precobao",
+      "buildNumber": "2",
       "supportsTablet": true
     },
     "android": {
       "package": "com.dragoniana.precobao",
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon-foreground.png",
         "backgroundColor": "#1688F6"
