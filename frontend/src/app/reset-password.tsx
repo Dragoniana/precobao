@@ -8,6 +8,12 @@ import { api } from '../services/api';
 import { radius, spacing } from '../theme';
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
 
+export function getBrowserPasswordResetToken(search: string, hash: string): string | undefined {
+  return new URLSearchParams(hash.replace(/^#/, '')).get('token')
+    || new URLSearchParams(search).get('token')
+    || undefined;
+}
+
 export default function ResetPasswordScreen() {
   const styles = useStyles();
   const { palette } = useAppTheme();
@@ -23,11 +29,17 @@ export default function ResetPasswordScreen() {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    if (!routeToken) return;
-    setToken(routeToken);
+    let browserToken: string | undefined;
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      window.history.replaceState(window.history.state, '', window.location.pathname);
+      // New links use a fragment, which is not sent to servers or in Referer
+      // headers. Accept the query parameter temporarily for already-issued links.
+      browserToken = getBrowserPasswordResetToken(window.location.search, window.location.hash);
+      if (browserToken || routeToken) {
+        window.history.replaceState(window.history.state, '', window.location.pathname);
+      }
     }
+    const suppliedToken = routeToken || browserToken;
+    if (suppliedToken) setToken(suppliedToken);
   }, [routeToken]);
 
   const savePassword = async () => {

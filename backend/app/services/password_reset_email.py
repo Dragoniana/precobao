@@ -29,7 +29,9 @@ def _reset_link(token: str) -> str:
         or parsed.fragment
     ):
         raise RuntimeError("PASSWORD_RESET_URL must be an HTTPS reset-password URL")
-    return f"{reset_url}?token={quote(token, safe='')}"
+    # Keep the bearer-like reset token in the fragment: browsers do not send
+    # fragments in HTTP requests or Referer headers.
+    return f"{reset_url}#token={quote(token, safe='')}"
 
 
 def _send_password_reset_email(email: str, token: str) -> None:

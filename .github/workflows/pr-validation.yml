@@ -58,6 +58,10 @@ jobs:
         run: npx tsc --noEmit --project tsconfig.json
       - name: Production web configuration guard
         run: npm run test:web-build-validation
+      - name: Android release signing guard
+        run: npm run test:android-signing
+      - name: APK download delivery guard
+        run: npm run test:apk-delivery
       - name: Static web build
         env:
           EXPO_PUBLIC_API_URL: https://precobao.app/backend

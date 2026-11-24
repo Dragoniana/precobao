@@ -62,7 +62,8 @@ def test_smtp_message_is_multipart_and_requires_verified_starttls(monkeypatch):
     )
     html = message.get_body(preferencelist=("html",)).get_content()
     assert "Redefinir minha senha" in html
-    assert "https://precobao.app/reset-password?token=test-reset-token" in html
+    assert "https://precobao.app/reset-password#token=test-reset-token" in html
+    assert "?token=" not in html
 
 
 def test_smtp_refuses_non_tls_configuration(monkeypatch):

@@ -47,6 +47,7 @@ frontend/android/.gradle/
 frontend/ios/Pods/
 frontend/ios/build/
 *.jks
+frontend/android/app/debug.keystore
 *.p8
 *.p12
 *.mobileprovision

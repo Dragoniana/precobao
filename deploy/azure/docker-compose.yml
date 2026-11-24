@@ -227,6 +227,13 @@ services:
         EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL:?Set the public HTTPS API base URL}
     expose:
       - "80"
+    volumes:
+      - type: bind
+        source: ${WEB_DOWNLOADS_HOST_DIR:-/opt/preco-bao/downloads}
+        target: /usr/share/nginx/html/downloads
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 15s

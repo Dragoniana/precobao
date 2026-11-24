@@ -3,7 +3,7 @@ import { Dimensions, StyleSheet } from 'react-native';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import ForgotPasswordScreen from '../app/forgot-password';
-import ResetPasswordScreen from '../app/reset-password';
+import ResetPasswordScreen, { getBrowserPasswordResetToken } from '../app/reset-password';
 import { api } from '../services/api';
 import { darkPalette, lightPalette, spacing } from '../theme';
 import type { AppPalette } from '../theme';
@@ -28,6 +28,12 @@ jest.mock('../context/ThemeContext', () => {
 });
 
 const mockedPost = jest.mocked(api.post);
+
+it('reads new reset tokens from the fragment and accepts legacy query links', () => {
+  expect(getBrowserPasswordResetToken('', '#token=fragment-token')).toBe('fragment-token');
+  expect(getBrowserPasswordResetToken('?token=legacy-token', '')).toBe('legacy-token');
+  expect(getBrowserPasswordResetToken('', '')).toBeUndefined();
+});
 
 beforeEach(() => {
   mockedPost.mockReset();
