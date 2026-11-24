@@ -9,16 +9,16 @@ export type AppRelease = {
   available: boolean;
 };
 
-// A download becomes available only after its signed artifact is published and
-// its metadata has been reviewed. Empty URLs never produce a download link.
+// Releases require an explicit availability flag, HTTPS URL, and complete
+// platform-specific metadata. Empty or invalid URLs never produce a link.
 export const APP_RELEASES: Readonly<Record<DownloadPlatform, AppRelease>> = {
   android: {
-    version: '1.0.1',
-    url: null,
-    sizeBytes: null,
-    sha256: null,
-    publishedAt: null,
-    available: false,
+    version: '1.0.1-internal',
+    url: 'https://precobao.app/downloads/preco-bao.apk',
+    sizeBytes: 40_846_969,
+    sha256: 'bd9ba1288e00b1ce2b141e41aa30ba5538d1dd4f88509f120750d6d98622bacb',
+    publishedAt: '2026-11-24',
+    available: true,
   },
   ios: {
     version: '1.0.1',
