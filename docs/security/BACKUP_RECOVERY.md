@@ -2,7 +2,7 @@
 
 ## Verified restore drill
 
-On 2026-11-24, the VM backup set `/var/backups/preco-bao/preco-bao-20261124T012615Z` passed SHA-256 verification and both encrypted payloads decrypted successfully. The database dump restored in a temporary PostgreSQL 15.19 container with no network or published ports. Verified counts: 12,798 catalog entries, 15,165 offers, 19,921 price-history rows, 1,853 image blobs, 13,576 image links, and 13 users. The encrypted image-reference registry decrypted and parsed with 4,961 records.
+On 2026-11-24, the latest encrypted PostgreSQL backup and image-reference artifact passed SHA-256 verification and decrypted successfully. The database dump restored in a temporary PostgreSQL 15.19 container with no network or published ports. Schema, migration revision, core-table counts, and image references were checked against the backup manifest. Exact backup paths and production record counts are intentionally omitted from this public repository.
 
 The backup resides on the production VM. No external copy or independent recovery-key custody was proven. The restore drill validates recoverability of this set, not off-site disaster recovery.
 

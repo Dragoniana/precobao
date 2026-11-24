@@ -36,7 +36,7 @@ The counts below group confirmed application/control findings; dependency scanne
 - Images: URL allowlists and redirect revalidation, body/MIME/signature checks, normalization and BYTEA storage were found. The offline administrative importer consumes JSONL/base64 content and resolves catalog identity by source, SKU, URL, and EAN; it is not a public API endpoint. No path-based arbitrary file import was identified in this importer path.
 - CORS is configured with exact production origins. FastAPI docs/OpenAPI endpoints are disabled in production configuration. SQLAlchemy parameterized query patterns are used in reviewed routes.
 - Docker: production API runs as a non-root application user. Web and Caddy use their image defaults and writable root filesystems; no privileged container was observed. The APK mount is read-only.
-- Azure: Portal showed Ubuntu 24.04, 2 vCPU / 4 GiB VM, NSG allow rules for 80/443 and administrator-restricted SSH, with default inbound deny. PostgreSQL is private and enforces TLS. No Azure resources were provisioned.
+- Azure: Portal confirmed an Ubuntu VM, public HTTP/HTTPS, administrator-restricted SSH, and default inbound deny. PostgreSQL is private and enforces TLS. No Azure resources were provisioned.
 
 ## Dependency and supply-chain checks
 
@@ -64,7 +64,7 @@ No SQL injection, stored/reflected XSS, CSRF, SSRF, CORS bypass, BOLA/IDOR, priv
 | Image handling | Normalized image validation and BYTEA delivery reviewed; importer is an offline command, not a public endpoint. |
 | APK delivery | Stable HTTPS route now returns an attachment and verified bytes. Published standalone build is internal and debug-signed; not for Play Store. |
 | PostgreSQL | Version 15.19; private VNet, TLS required; application role lacks superuser and role/database creation privileges. |
-| Docker / Azure | VM is Ubuntu 24.04, 2 vCPU / 4 GiB; NSG exposes 80/443 and restricts SSH to administrator IP; no other inbound allow observed. |
+| Docker / Azure | Ubuntu VM; NSG permits the public web ports and restricts SSH to the administrator; no other inbound allow observed. |
 | SSH / firewall | Key-only SSH; password auth disabled; NSG is the effective network filter (host `ufw` is inactive); root key login still appears permitted. |
 | Backups | Current encrypted backup passed hash/decryption and isolated restore; off-VM replication and separate key custody remain unverified. |
 | Privacy / logs | User email, favorites, IP, and medication interests are sensitive. No legal/LGPD compliance determination; no user data was used in tests. Token logging was not observed in reviewed reset flow. |
@@ -73,7 +73,7 @@ No SQL injection, stored/reflected XSS, CSRF, SSRF, CORS bypass, BOLA/IDOR, priv
 
 ## Backup and recovery
 
-Backup set `/var/backups/preco-bao/preco-bao-20261124T012615Z` was hash-checked and decrypted successfully. Its PostgreSQL 15.19 custom dump restored in an isolated container with no published ports or network. Counts checked: 12,798 catalog entries, 15,165 offers, 19,921 history rows, 1,853 image blobs, 13,576 image links, and 13 users. The encrypted image reference registry parsed with 4,961 records. The verified copy is on the production VM; no off-VM copy or independent encryption-key escrow was verified. See `BACKUP_RECOVERY.md`.
+The latest encrypted database and image-reference backups were hash-checked, decrypted, and restored in isolated PostgreSQL 15.19 without published ports or network. Core schema, migration, and image-reference checks passed. The verified copy is on the production VM; no off-VM copy or independent encryption-key escrow was verified. Exact paths and row counts are omitted from this public report. See `BACKUP_RECOVERY.md`.
 
 ## Production changes made
 
