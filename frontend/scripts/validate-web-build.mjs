@@ -53,9 +53,26 @@ if (mode === '--config') {
   const dist = resolve('dist');
   const files = await walk(dist);
   const requiredRoutes = ['index.html', 'login.html', 'signup.html', 'forgot-password.html', 'search.html'];
+  const requiredIcons = ['favicon.ico', 'favicon-16x16.png', 'favicon-32x32.png', 'apple-touch-icon.png'];
   const names = new Set(files.map((file) => file.slice(dist.length + 1).replaceAll('\\', '/')));
   for (const route of requiredRoutes) {
     if (!names.has(route)) throw new Error(`Web export is missing required route ${route}.`);
+  }
+  for (const icon of requiredIcons) {
+    if (!names.has(icon)) throw new Error(`Web export is missing required favicon asset ${icon}.`);
+  }
+  const routeHtmlFiles = files.filter((file) => /\.html$/.test(file)
+    && !['_sitemap.html', '+not-found.html'].includes(file.slice(dist.length + 1).replaceAll('\\', '/')));
+  for (const file of routeHtmlFiles) {
+    const contents = await readFile(file, 'utf8');
+    if (!/<title[^>]*>precobao\.app<\/title>/.test(contents)) {
+      throw new Error(`Exported route ${file} must have the fixed title precobao.app.`);
+    }
+    for (const icon of requiredIcons) {
+      if (!contents.includes(`/${icon}?v=20261124`)) {
+        throw new Error(`Exported route ${file} is missing the cache-busted ${icon} link.`);
+      }
+    }
   }
   const textFiles = files.filter((file) => /\.(?:html|js|json)$/.test(file));
   let apiUrlEmbedded = false;
