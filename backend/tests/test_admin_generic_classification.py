@@ -13,3 +13,14 @@ def test_specific_generic_medicine_package_remains_a_product_photo():
         "https://drogariaspacheco.vteximg.com.br/arquivos/ids/123/"
         "celecoxibe-200mg-generico-eurofarma-10-capsulas.jpg"
     )
+
+
+def test_araujo_provided_generic_art_assets_are_illustrative_fallbacks():
+    assert is_generic_image_url(
+        "https://www.araujo.com.br/on/demandware.static/Sites-Araujo-Site/"
+        "-/default/dw1f93f88e/images/generico.webp"
+    )
+    assert is_generic_image_url(
+        "https://www.araujo.com.br/on/demandware.static/Sites-Araujo-Site/"
+        "-/default/dwf281a111/images/tarjado.webp"
+    )
