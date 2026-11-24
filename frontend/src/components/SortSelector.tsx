@@ -2,6 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useState } from 'react';
 import {
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -11,6 +12,7 @@ import {
 
 import { radius, spacing } from '../theme';
 import { createThemedStyles, useAppTheme } from '../context/ThemeContext';
+import { getMobileWebPlatform } from '../services/mobileWeb';
 
 export type SortOption<Value extends string = string> = {
   value: Value;
@@ -23,13 +25,17 @@ type SortSelectorProps<Value extends string> = {
   onChange: (value: Value) => void;
 };
 
+export function shouldUseMobileSortSheet(runtimePlatform: string, width: number, isMobileWeb: boolean) {
+  return runtimePlatform !== 'web' || isMobileWeb || width < 520;
+}
+
 export function SortSelector<Value extends string>({ value, options, onChange }: SortSelectorProps<Value>) {
   const styles = useStyles();
   const { palette } = useAppTheme();
   const { width } = useWindowDimensions();
   const [visible, setVisible] = useState(false);
   const selected = options.find((option) => option.value === value) ?? options[0];
-  const useMobileSheet = width < 520;
+  const useMobileSheet = shouldUseMobileSortSheet(Platform.OS, width, getMobileWebPlatform() !== null);
 
   const choose = (nextValue: Value) => {
     onChange(nextValue);

@@ -1,7 +1,14 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
-import { SortSelector, SortOption } from '../components/SortSelector';
+import { shouldUseMobileSortSheet, SortSelector, SortOption } from '../components/SortSelector';
+
+it('uses a bounded sheet for mobile browsers in portrait and landscape', () => {
+  expect(shouldUseMobileSortSheet('web', 390, true)).toBe(true);
+  expect(shouldUseMobileSortSheet('web', 844, true)).toBe(true);
+  expect(shouldUseMobileSortSheet('web', 1280, false)).toBe(false);
+  expect(shouldUseMobileSortSheet('android', 844, false)).toBe(true);
+});
 
 const options: SortOption<'relevancia' | 'menor_preco' | 'maior_preco' | 'nome'>[] = [
   { value: 'relevancia', label: 'Relevância' },
